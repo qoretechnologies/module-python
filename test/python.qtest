@@ -265,15 +265,16 @@ def t3():
             assertEq(1, PythonProgram::evalExpression("Serializable.deserialize(Serializable.serialize(1))"));
         }
 
-        hash<string, object> object_cache;
-        code callback = sub (object obj) {
-            # save object in object cache, so it doesn't go out of scope
-            object_cache{obj.uniqueHash()} = obj;
-        };
-        PythonProgram p("", "");
-        p.importNamespace("::Test", "x");
-        p.setSaveObjectCallback(callback);
-        p.evalStatementKeep("
+        {
+            hash<string, object> object_cache;
+            code callback = sub (object obj) {
+                # save object in object cache, so it doesn't go out of scope
+                object_cache{obj.uniqueHash()} = obj;
+            };
+            PythonProgram p("", "");
+            p.importNamespace("::Test", "x");
+            p.setSaveObjectCallback(callback);
+            p.evalStatementKeep("
 from qore.__root__.Test import Other
 
 class PyTest:
@@ -287,14 +288,38 @@ class PyTest:
 
 def test():
     return PyTest()", "test.py");
-        p.setSaveObjectCallback();
+            p.setSaveObjectCallback();
 
-        object obj = p.callFunction("test");
-        assertEq(1, obj.get("other", "get"));
+            object obj = p.callFunction("test");
+            assertEq(1, obj.get("other", "get"));
 
-        Queue q();
-        background q.push(obj.get("other", "get"));
-        assertEq(1, q.get());
+            Queue q();
+            background q.push(obj.get("other", "get"));
+            assertEq(1, q.get());
+        }
+
+        {
+            Program p(PO_NEW_STYLE);
+            p.issueModuleCmd("python", "parse python.py #
+class PythonBase:
+    def get(self) -> int:
+        return 1
+");
+            p.issueModuleCmd("python", "export-class PythonBase");
+            p.parse("
+class QoreTest inherits PythonBase {
+    int get(int i) {
+        return PythonBase::get() + i;
+    }
+}
+
+QoreTest sub get_object() {
+    return new QoreTest();
+}
+", "qore");
+            object obj = p.callFunction("get_object");
+            assertEq(2, obj.get(1));
+        }
     }
 
     javaTest() {

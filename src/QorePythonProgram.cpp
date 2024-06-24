@@ -1772,7 +1772,6 @@ QoreValue QorePythonProgram::callFunction(ExceptionSink* xsink, const QoreString
         }
 
         //printd(5, "QorePythonProgram::callFunction() this: %p %s()\n", this, func_name.c_str());
-        //return callInternal(xsink, py_func, args, arg_offset);
         rv = callInternal(xsink, py_func, args, arg_offset);
     }
     assert(!haveGil());
@@ -1833,6 +1832,8 @@ QoreValue QorePythonProgram::callMethod(ExceptionSink* xsink, const char* cname,
         return QoreValue();
     }
 
+    //printd(5, "QorePythonProgram::callMethod() %s::%s() args: %d\n", cname, mname, args ? (int)args->size() : 0);
+
     return callInternal(xsink, *py_method, args, arg_offset);
 }
 
@@ -1849,7 +1850,7 @@ QoreValue QorePythonProgram::callInternal(ExceptionSink* xsink, PyObject* callab
         return QoreValue();
     }
     //printd(5, "QorePythonProgram::callInternal() f: %p args: %d (%d) self: %p\n", callable,
-    //  args ? (int)args->size() : 0, (int)arg_offset, first);
+    //    args ? (int)args->size() : 0, (int)arg_offset, first);
     QorePythonReferenceHolder rv(callPythonInternal(xsink, callable, args, arg_offset, first));
     return *xsink ? QoreValue() : getQoreValue(xsink, rv.release());
 }
@@ -1863,8 +1864,8 @@ PyObject* QorePythonProgram::callPythonInternal(ExceptionSink* xsink, PyObject* 
         return nullptr;
     }
 
-    printd(5, "QorePythonProgram::callPythonInternal(): this: %p valid: %d argcount: %d (first: %p)\n", this, valid,
-      (args && args->size() > arg_offset) ? args->size() - arg_offset : 0, first);
+    //printd(5, "QorePythonProgram::callPythonInternal(): this: %p valid: %d argcount: %d (first: %p)\n", this, valid,
+    //    (args && args->size() > arg_offset) ? args->size() - arg_offset : 0, first);
     QorePythonReferenceHolder return_value(PyEval_CallObjectWithKeywords(callable, *py_args, kwargs));
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
@@ -1892,7 +1893,7 @@ QoreValue QorePythonProgram::callFunctionObject(ExceptionSink* xsink, PyObject* 
     }
 
     //printd(5, "QorePythonProgram::callFunctionObject(): this: %p valid: %d argcount: %d\n", this, valid,
-    //  (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
+    //    (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
     QorePythonReferenceHolder return_value(PyFunction_Type.tp_call(func, *py_args, nullptr));
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
@@ -2398,19 +2399,23 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
 }
 
 QoreValue QorePythonProgram::execPythonStaticCFunctionMethod(const QoreMethod& meth, PyObject* func,
-    const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink) {
+        const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink) {
+    //printd(5, "QorePythonProgram::execPythonStaticCFunctionMethod() m: %s::%s() argcount: %d\n", meth.getClassName(),
+    //    meth.getName(), args ? (int)args->size() : 0);
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
     return pypgm->callCFunctionMethod(xsink, func, args);
 }
 
 QoreValue QorePythonProgram::execPythonCFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
         ExceptionSink* xsink) {
+    //printd(5, "QorePythonProgram::execPythonCFunction() argcount: %d\n", args ? (int)args->size() : 0);
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
     return pypgm->callCFunctionMethod(xsink, func, args);
 }
 
 QoreValue QorePythonProgram::execPythonFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
         ExceptionSink* xsink) {
+    //printd(5, "QorePythonProgram::execPythonFunction() argcount: %d\n", args ? (int)args->size() : 0);
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
     return pypgm->callFunctionObject(xsink, func, args);
 }
@@ -2434,8 +2439,8 @@ QoreValue QorePythonProgram::callCFunctionMethod(ExceptionSink* xsink, PyObject*
         return QoreValue();
     }
 
-    //printd(5, "QorePythonProgram::callCMethod(): calling '%s' argcount: %d\n", fname->c_str(),
-    //  (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
+    //printd(5, "QorePythonProgram::callCMethod(): argcount: %d\n",
+    //    (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
     QorePythonReferenceHolder return_value(PyCFunction_Call(func, *py_args, nullptr));
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
@@ -2460,6 +2465,9 @@ void QorePythonProgram::execPythonConstructor(const QoreMethod& meth, PyObject* 
     }
 
     assert(PyType_Check(pycls));
+
+    //printd(5, "QorePythonProgram::execPythonConstructor() m: %s args: %d self: %s\n", meth.getName(),
+    //    args ? (int)args->size() : 0, self->getClassName());
 
     // save Qore object for any Python class that needs it
     QorePythonImplicitQoreArgHelper qpiqoh(self);
@@ -2487,45 +2495,49 @@ void QorePythonProgram::execPythonDestructor(const QorePythonClass& thisclass, P
 }
 
 QoreValue QorePythonProgram::execPythonStaticMethod(const QoreMethod& meth, PyObject* m,
-    const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink) {
+        const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink) {
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
     return pypgm->callInternal(xsink, m, args);
 }
 
 QoreValue QorePythonProgram::execPythonNormalMethod(const QoreMethod& meth, PyObject* m, QoreObject* self,
-    QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink) {
+        QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink) {
+    //printd(5, "QorePythonProgram::execPythonNormalMethod() %s::%s() pyobj: %p: %d\n", meth.getClassName(),
+    //    meth.getName(), m, m->ob_refcnt);
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
     return pypgm->callInternal(xsink, m, args, 0, pd->get());
 }
 
 QoreValue QorePythonProgram::execPythonNormalWrapperDescriptorMethod(const QoreMethod& meth, PyObject* m,
-    QoreObject* self, QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags,
-    ExceptionSink* xsink) {
+        QoreObject* self, QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags,
+        ExceptionSink* xsink) {
     //printd(5, "QorePythonProgram::execPythonNormalWrapperDescriptorMethod() %s::%s() pyobj: %p: %d\n",
-    //  meth.getClassName(), meth.getName(), m, m->ob_refcnt);
+    //    meth.getClassName(), meth.getName(), m, m->ob_refcnt);
     assert(m->ob_refcnt > 0);
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
     return pypgm->callWrapperDescriptorMethod(xsink, pd->get(), m, args);
 }
 
 QoreValue QorePythonProgram::execPythonNormalMethodDescriptorMethod(const QoreMethod& meth, PyObject* m,
-    QoreObject* self, QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags,
-    ExceptionSink* xsink) {
+        QoreObject* self, QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags,
+        ExceptionSink* xsink) {
     //printd(5, "QorePythonProgram::execPythonNormalMethodDescriptorMethod() %s::%s() pyobj: %p: %d\n",
-    //  meth.getClassName(), meth.getName(), m, m->ob_refcnt);
+    //    meth.getClassName(), meth.getName(), m, m->ob_refcnt);
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
     return pypgm->callMethodDescriptorMethod(xsink, pd->get(), m, args);
 }
 
 QoreValue QorePythonProgram::execPythonNormalClassMethodDescriptorMethod(const QoreMethod& meth, PyObject* m,
-    QoreObject* self, QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags,
-    ExceptionSink* xsink) {
+        QoreObject* self, QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags,
+        ExceptionSink* xsink) {
+    //printd(5, "QorePythonProgram::execPythonNormalClassMethodDescriptorMethod() %s::%s() pyobj: %p: %d\n",
+    //    meth.getClassName(), meth.getName(), m, m->ob_refcnt);
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
     return pypgm->callClassMethodDescriptorMethod(xsink, pd->get(), m, args);
 }
 
 QoreValue QorePythonProgram::callWrapperDescriptorMethod(ExceptionSink* xsink, PyObject* self, PyObject* obj,
-    const QoreListNode* args, size_t arg_offset) {
+        const QoreListNode* args, size_t arg_offset) {
     QorePythonHelper qph(this);
     if (checkValid(xsink)) {
         return QoreValue();
@@ -2536,8 +2548,8 @@ QoreValue QorePythonProgram::callWrapperDescriptorMethod(ExceptionSink* xsink, P
         return QoreValue();
     }
 
-    //printd(5, "QorePythonProgram::callWrapperDescriptorMethod(): calling '%s' argcount: %d\n", fname->c_str(),
-    //  (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
+    //printd(5, "QorePythonProgram::callWrapperDescriptorMethod() argcount: %d\n",
+    //    (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
     QorePythonReferenceHolder return_value(PyWrapperDescr_Type.tp_call(obj, *py_args, nullptr));
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
@@ -2548,7 +2560,7 @@ QoreValue QorePythonProgram::callWrapperDescriptorMethod(ExceptionSink* xsink, P
 }
 
 QoreValue QorePythonProgram::callMethodDescriptorMethod(ExceptionSink* xsink, PyObject* self, PyObject* obj,
-    const QoreListNode* args, size_t arg_offset) {
+        const QoreListNode* args, size_t arg_offset) {
     QorePythonHelper qph(this);
     if (checkValid(xsink)) {
         return QoreValue();
@@ -2560,8 +2572,8 @@ QoreValue QorePythonProgram::callMethodDescriptorMethod(ExceptionSink* xsink, Py
         return QoreValue();
     }
 
-    //printd(5, "QorePythonProgram::callMethodDescriptorMethod(): calling '%s' argcount: %d\n", fname->c_str(),
-    //  (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
+    //printd(5, "QorePythonProgram::callMethodDescriptorMethod() argcount: %d\n",
+    //    (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
     QorePythonReferenceHolder return_value(PyMethodDescr_Type.tp_call(obj, *py_args, nullptr));
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
@@ -2572,7 +2584,7 @@ QoreValue QorePythonProgram::callMethodDescriptorMethod(ExceptionSink* xsink, Py
 }
 
 QoreValue QorePythonProgram::callClassMethodDescriptorMethod(ExceptionSink* xsink, PyObject* self, PyObject* obj,
-    const QoreListNode* args, size_t arg_offset) {
+        const QoreListNode* args, size_t arg_offset) {
     QorePythonHelper qph(this);
     if (checkValid(xsink)) {
         return QoreValue();
@@ -2587,8 +2599,8 @@ QoreValue QorePythonProgram::callClassMethodDescriptorMethod(ExceptionSink* xsin
         return QoreValue();
     }
 
-    //printd(5, "QorePythonProgram::callClassMethodDescriptorMethod(): calling '%s' argcount: %d\n", fname->c_str(),
-    //  (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
+    //printd(5, "QorePythonProgram::callClassMethodDescriptorMethod(): argcount: %d\n",
+    //    (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
     QorePythonReferenceHolder return_value(PyClassMethodDescr_Type.tp_call(obj, *py_args, nullptr));
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
