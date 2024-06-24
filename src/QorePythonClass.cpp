@@ -92,6 +92,7 @@ QoreValue QorePythonClass::methodGate(const QoreMethod& meth, void* m, QoreObjec
 
     const QoreStringNode* mname = args->retrieveEntry(0).get<QoreStringNode>();
 
+    //printd(5, "QorePythonClass::methodGate() %s()\n", mname);
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
     if (!pypgm) {
         assert(*xsink);
@@ -122,6 +123,7 @@ QoreValue QorePythonClass::memberGate(const QoreMethod& meth, void* m, QoreObjec
 
 QoreValue QorePythonClass::callPythonMethod(ExceptionSink* xsink, QorePythonProgram* pypgm, const char* mname,
         const QoreListNode* args, QorePythonPrivateData* pd, size_t arg_offset) const {
+    //printd(5, "QorePythonClass::callPythonMethod() %s::%s()\n", pname.c_str(), mname);
     PyObject* pyobj = pd->get();
     PyTypeObject* mtype = Py_TYPE(pyobj);
     QorePythonHelper qph(pypgm);
