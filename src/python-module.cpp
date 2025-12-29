@@ -161,8 +161,8 @@ static void check_python_version() {
 
 static void python_module_shutdown() {
     if (python_initialized) {
-        PyThreadState_Swap(nullptr);
-        PyEval_AcquireThread(mainThreadState);
+        _QORE_PYTHREAD_STATE_SWAP(nullptr);
+        _qore_acquire_thread_state(mainThreadState);
         _qore_PyGILState_SetThisThreadState(mainThreadState);
     }
     python_shutdown = true;
@@ -297,11 +297,13 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     mainThreadState = PyThreadState_Get();
     if (python_initialized) {
         // release the current thread state after initialization
-        PyEval_ReleaseThread(mainThreadState);
+        _qore_release_thread_state(mainThreadState);
+#ifndef Py_GIL_DISABLED
         assert(!_qore_PyRuntimeGILState_GetThreadState());
         _qore_PyGILState_SetThisThreadState(nullptr);
         assert(!PyGILState_GetThisThreadState());
         assert(!QorePythonProgram::haveGil());
+#endif
     }
 
     if (!repeat) {
@@ -325,8 +327,10 @@ static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns) {
         }
     }
 
+#ifndef Py_GIL_DISABLED
     assert(!python_initialized || !PyGILState_Check());
     assert(!python_initialized || !QorePythonProgram::haveGil());
+#endif
 }
 
 static void python_module_delete() {
@@ -554,40 +558,48 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     //    new_thread_state, release_gil, state, t_state);
     assert(new_thread_state);
     if (release_gil) {
-        PyEval_AcquireThread(new_thread_state);
+        _qore_acquire_thread_state(new_thread_state);
+#ifndef Py_GIL_DISABLED
         assert(PyThreadState_Get() == new_thread_state);
+#endif
     } else {
+#ifndef Py_GIL_DISABLED
         assert(t_state == _qore_PyCeval_GetThreadState());
+#endif
     }
     // NOTE: even if the current thread state is equal to the new one, we still need to set all thread states in all
     // locations
 
-    ++new_thread_state->gilstate_counter;
-    PyThreadState_Swap(new_thread_state);
+    _QORE_GILSTATE_COUNTER_INC(new_thread_state);
+    _QORE_PYTHREAD_STATE_SWAP(new_thread_state);
 
     // set this thread state
     _qore_PyGILState_SetThisThreadState(new_thread_state);
+#ifndef Py_GIL_DISABLED
     assert(PyGILState_GetThisThreadState() == new_thread_state);
     assert(PyGILState_Check());
+#endif
 }
 
 QorePythonGilHelper::~QorePythonGilHelper() {
+#ifndef Py_GIL_DISABLED
     assert(_qore_has_gil());
+#endif
 
-    --new_thread_state->gilstate_counter;
+    _QORE_GILSTATE_COUNTER_DEC(new_thread_state);
 
     if (release_gil) {
         //printd(5, "QorePythonGilHelper::~QorePythonGilHelper() releasing %llx state: %llx t_state: %llx\n",
         //    new_thread_state, state, t_state);
-        PyThreadState_Swap(new_thread_state);
+        _QORE_PYTHREAD_STATE_SWAP(new_thread_state);
         _qore_PyCeval_SwapThreadState(new_thread_state);
         _qore_PyGILState_SetThisThreadState(new_thread_state);
-        // release the GIL
-        PyEval_ReleaseThread(new_thread_state);
+        // release the GIL / thread state
+        _qore_release_thread_state(new_thread_state);
     } else {
         //printd(5, "QorePythonGilHelper::~QorePythonGilHelper() swapping %llx state: %llx t_state: %llx\n",
         //    new_thread_state, state, t_state);
-        PyThreadState_Swap(state);
+        _QORE_PYTHREAD_STATE_SWAP(state);
         _qore_PyCeval_SwapThreadState(t_state);
     }
 
@@ -597,9 +609,11 @@ QorePythonGilHelper::~QorePythonGilHelper() {
 
 void QorePythonGilHelper::set(PyThreadState* other_state) {
     // as this is called after creating a new interpreter, we cannot assert that we hold the GIL here
+#ifndef Py_GIL_DISABLED
     assert(_qore_PyCeval_GetGilLockedStatus() && _qore_PyCeval_GetThreadState());
+#endif
 
-    PyThreadState_Swap(other_state);
+    _QORE_PYTHREAD_STATE_SWAP(other_state);
     _qore_PyCeval_SwapThreadState(other_state);
     _qore_PyGILState_SetThisThreadState(other_state);
 }

@@ -120,6 +120,10 @@ void qoreloader_free(void* obj) {
 
 static struct PyModuleDef_Slot qoreloader_slots[] = {
     {Py_mod_exec, reinterpret_cast<void*>(slot_qoreloader_exec)},
+#if PY_VERSION_HEX >= 0x030D0000
+    // Python 3.13+ free-threading support (PEP 703)
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
     {0, nullptr},
 };
 
@@ -179,7 +183,7 @@ static PyObject* qoreloader_atexit(PyObject* self, PyObject* args) {
     qore_cleanup();
 
     assert(mainThreadState);
-    PyThreadState_Swap(mainThreadState);
+    _QORE_PYTHREAD_STATE_SWAP(mainThreadState);
 
     Py_INCREF(Py_None);
     return Py_None;

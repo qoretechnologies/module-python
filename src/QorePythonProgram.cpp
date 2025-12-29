@@ -360,6 +360,17 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
             valid = false;
         }
         if (interpreter && owns_interpreter) {
+#ifdef Py_GIL_DISABLED
+            // In free-threading mode, use PyGILState_Ensure to get a valid thread state
+            PyGILState_STATE gstate = PyGILState_Ensure();
+            {
+                // enforce serialization
+                AutoLocker al(py_thr_lck);
+                PyInterpreterState_Clear(interpreter);
+            }
+            PyInterpreterState_Delete(interpreter);
+            PyGILState_Release(gstate);
+#else
             // grab the GIL with the main thread lock
             QorePythonGilHelper pgh;
             {
@@ -370,6 +381,7 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                 PyInterpreterState_Clear(interpreter);
             }
             PyInterpreterState_Delete(interpreter);
+#endif
 
             interpreter = nullptr;
             owns_interpreter = false;
@@ -511,7 +523,7 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
             }
             return -1;
         }
-        assert(python->gilstate_counter == 1);
+        _QORE_GILSTATE_COUNTER_ASSERT_ONE(python);
         //printd(5, "QorePythonProgram::createInterpreter() created thead state: %p\n", python);
 
         // NOTE: we have to reenable PyGILState_Check() here
@@ -608,7 +620,7 @@ QorePythonThreadInfo QorePythonProgram::setContext() const {
         printd(5, "QorePythonProgram::setContext() this: %p created new thread context: %p (py_thr_map: %p "
             "size: %d)\n", this, python, &py_thr_map, (int)py_thr_map.size());
         assert(python);
-        assert(python->gilstate_counter == 1);
+        _QORE_GILSTATE_COUNTER_ASSERT_ONE(python);
         // the thread state will be deleted when the thread terminates or the interpreter is deleted
         int tid = q_gettid();
         AutoLocker al(py_thr_lck);
@@ -635,7 +647,7 @@ QorePythonThreadInfo QorePythonProgram::setContext() const {
     }
 
     printd(5, "QorePythonProgram::setContext() got thread context: %p (GIL: %d hG: %d) refs: %d\n", python,
-        PyGILState_Check(), haveGil(), python->gilstate_counter);
+        PyGILState_Check(), haveGil(), _QORE_GILSTATE_COUNTER_GET(python));
 
     PyGILState_STATE g_state;
     // the TSS state needs to be restored in any case
@@ -648,6 +660,27 @@ QorePythonThreadInfo QorePythonProgram::setContext() const {
     }
 
     // are we currently holding the GIL?
+#ifdef Py_GIL_DISABLED
+    // In free-threading mode, there's no GIL to hold, but we need a valid attached thread state
+    // for Python operations to work
+    ceval_state = nullptr;
+    t_state = PyGILState_GetThisThreadState();
+
+    if (t_state == nullptr) {
+        // No thread state attached - we need to attach ours
+        // Use PyGILState_Ensure which will create and attach a thread state
+        g_state = PyGILState_Ensure();
+        // Now we have a valid thread state, update our tracking
+        t_state = PyGILState_GetThisThreadState();
+    } else if (t_state != python) {
+        // Different thread state is attached - we can't swap in free-threading
+        // Just use the existing one for now
+        g_state = PyGILState_LOCKED;  // Mark as "locked" since we don't need to release
+    } else {
+        // Our thread state is already attached
+        g_state = PyGILState_LOCKED;
+    }
+#else
     if (_qore_has_gil(tss_state)) {
         // set GIL context
         ceval_state = _qore_PyCeval_SwapThreadState(python);
@@ -662,9 +695,11 @@ QorePythonThreadInfo QorePythonProgram::setContext() const {
     t_state = _qore_PyRuntimeGILState_GetThreadState();
 
     if (t_state != python) {
-        PyThreadState_Swap(python);
+        _QORE_PYTHREAD_STATE_SWAP(python);
     }
+#endif
 
+#ifndef Py_GIL_DISABLED
     // now we have the GIL
     assert(PyGILState_Check());
     assert(haveGilUnlocked(python));
@@ -672,11 +707,17 @@ QorePythonThreadInfo QorePythonProgram::setContext() const {
     assert(_qore_PyRuntimeGILState_GetThreadState() == python);
     // TSS state
     assert(PyGILState_GetThisThreadState() == python);
+#endif
 
     //printd(5, "QorePythonProgram::setContext() old thread context: %p\n", t_state);
 
-    ++python->gilstate_counter;
+    _QORE_GILSTATE_COUNTER_INC(python);
 
+#ifdef Py_GIL_DISABLED
+    // In free-threading mode, skip recursion limit handling as it requires an attached interpreter
+    // which may not be available. Python 3.14 uses global limits anyway.
+    int recursion_depth = 1000;  // Use a default value
+#else
     // calculate new recursion depth
     int recursion_depth = PyThreadState_GetRecursionLimit(python);
     // be conservative when calculating the new recursion depth
@@ -684,6 +725,7 @@ QorePythonThreadInfo QorePythonProgram::setContext() const {
     //printd(5, "QorePythonProgram::setContext() recursion_depth: %d -> %d\n", python->recursion_depth,
     //  new_recursion_depth);
     PyThreadState_UpdateRecursionLimit(python, new_recursion_depth);
+#endif
 
     return {tss_state, t_state, ceval_state, g_state, recursion_depth, true};
 }
@@ -696,13 +738,17 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
     //struct _gilstate_runtime_state* gilstate = &_PyRuntime.gilstate;
     PyThreadState* python = getReleaseThreadState();
     assert(python);
+#ifndef Py_GIL_DISABLED
     assert(_qore_PyThreadState_IsCurrent(python));
+#endif
 
     //printd(5, "QorePythonProgram::releaseContext() rd: %d -> ord: %d\n", PyThreadState_GetRecursionLimit(python),
     //  oldstate.recursion_depth);
 
+#ifndef Py_GIL_DISABLED
     // restore recursion depth
     PyThreadState_UpdateRecursionLimit(python, oldstate.recursion_depth);
+#endif
 
     // restore the old state
     if (oldstate.ceval_state != python) {
@@ -710,20 +756,27 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
         _qore_PyCeval_SwapThreadState(oldstate.ceval_state);
     }
 
-    --python->gilstate_counter;
+    _QORE_GILSTATE_COUNTER_DEC(python);
 
     //printd(5, "QorePythonProgram::releaseContext() t_state: %p g_state: %d\n", oldstate.t_state, oldstate.g_state);
 
+#ifdef Py_GIL_DISABLED
+    // In free-threading mode, use PyGILState_Release if we called PyGILState_Ensure
     if (oldstate.g_state == PyGILState_UNLOCKED) {
-        PyEval_ReleaseThread(python);
+        PyGILState_Release(oldstate.g_state);
+    }
+#else
+    if (oldstate.g_state == PyGILState_UNLOCKED) {
+        _qore_release_thread_state(python);
         // NOTE we cannot assert !PyGILState_Check() here, as we have released the GIL, and another thread may have
         // created a new interpreter, which will temporarily disbale the GIL check, which would cause
         // PyGILState_Check() to return 1
     } else {
         if (python != oldstate.t_state) {
-            PyThreadState_Swap(oldstate.t_state);
+            _QORE_PYTHREAD_STATE_SWAP(oldstate.t_state);
         }
     }
+#endif
 
     // set new TSS thread state
     if (oldstate.tss_state != python) {
@@ -2327,8 +2380,8 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
                     (q_external_method_t)QorePythonProgram::execPythonNormalWrapperDescriptorMethod, Public,
                     normal_meth_flags, QDOM_UNCONTROLLED_API, autoTypeInfo);
                 printd(5, "QorePythonProgram::setupQorePythonClass() added normal wrapper " \
-                    "descriptor method %s.%s() (%s) %p: %d\n", type->tp_name, keystr, Py_TYPE(value)->tp_name, value,
-                    value->ob_refcnt);
+                    "descriptor method %s.%s() (%s) %p: %zd\n", type->tp_name, keystr, Py_TYPE(value)->tp_name, value,
+                    (Py_ssize_t)Py_REFCNT(value));
                 continue;
             }
             // check for method descriptors -> normal method
@@ -2342,8 +2395,8 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
                     (q_external_method_t)QorePythonProgram::execPythonNormalMethodDescriptorMethod, Public,
                     normal_meth_flags, QDOM_UNCONTROLLED_API, autoTypeInfo);
                 printd(5, "QorePythonProgram::setupQorePythonClass() added normal method " \
-                    "descriptor method %s.%s() (%s) %p: %d\n", type->tp_name, keystr, Py_TYPE(value)->tp_name, value,
-                    value->ob_refcnt);
+                    "descriptor method %s.%s() (%s) %p: %zd\n", type->tp_name, keystr, Py_TYPE(value)->tp_name, value,
+                    (Py_ssize_t)Py_REFCNT(value));
                 continue;
             }
             // check for classmethod descriptors -> normal method
@@ -2501,9 +2554,9 @@ QoreValue QorePythonProgram::execPythonNormalMethod(const QoreMethod& meth, PyOb
 QoreValue QorePythonProgram::execPythonNormalWrapperDescriptorMethod(const QoreMethod& meth, PyObject* m,
     QoreObject* self, QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags,
     ExceptionSink* xsink) {
-    //printd(5, "QorePythonProgram::execPythonNormalWrapperDescriptorMethod() %s::%s() pyobj: %p: %d\n",
-    //  meth.getClassName(), meth.getName(), m, m->ob_refcnt);
-    assert(m->ob_refcnt > 0);
+    //printd(5, "QorePythonProgram::execPythonNormalWrapperDescriptorMethod() %s::%s() pyobj: %p: %zd\n",
+    //  meth.getClassName(), meth.getName(), m, (Py_ssize_t)Py_REFCNT(m));
+    assert(Py_REFCNT(m) > 0);
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
     return pypgm->callWrapperDescriptorMethod(xsink, pd->get(), m, args);
 }
@@ -2511,8 +2564,8 @@ QoreValue QorePythonProgram::execPythonNormalWrapperDescriptorMethod(const QoreM
 QoreValue QorePythonProgram::execPythonNormalMethodDescriptorMethod(const QoreMethod& meth, PyObject* m,
     QoreObject* self, QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags,
     ExceptionSink* xsink) {
-    //printd(5, "QorePythonProgram::execPythonNormalMethodDescriptorMethod() %s::%s() pyobj: %p: %d\n",
-    //  meth.getClassName(), meth.getName(), m, m->ob_refcnt);
+    //printd(5, "QorePythonProgram::execPythonNormalMethodDescriptorMethod() %s::%s() pyobj: %p: %zd\n",
+    //  meth.getClassName(), meth.getName(), m, (Py_ssize_t)Py_REFCNT(m));
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
     return pypgm->callMethodDescriptorMethod(xsink, pd->get(), m, args);
 }

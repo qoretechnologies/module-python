@@ -63,7 +63,11 @@ DLLLOCAL extern bool python_shutdown;
 #include <internal/pycore_pystate.h>
 #else
 #if PY_MAJOR_VERSION >= 3
-#if PY_MINOR_VERSION == 11
+#if PY_MINOR_VERSION >= 14
+#include "python314_internals.h"
+#elif PY_MINOR_VERSION >= 12
+#include "python312_internals.h"
+#elif PY_MINOR_VERSION == 11
 #include "python311_internals.h"
 #elif PY_MINOR_VERSION == 10
 #include "python310_internals.h"
@@ -78,6 +82,31 @@ DLLLOCAL extern bool python_shutdown;
 #endif
 #endif
 #endif
+
+/*
+    Python API compatibility layer for Python 3.14+
+
+    These APIs were removed/deprecated in Python 3.14:
+    - PyEval_CallObject -> PyObject_Call
+    - PyEval_CallObjectWithKeywords -> PyObject_Call
+    - PyCFunction_Call -> PyObject_Call
+*/
+#if PY_VERSION_HEX >= 0x030E0000
+// Python 3.14+ compatibility wrappers
+
+// PyEval_CallObject was removed - use PyObject_Call instead
+#define PyEval_CallObject(callable, args) \
+    PyObject_Call((callable), (args) ? (args) : PyTuple_New(0), NULL)
+
+// PyEval_CallObjectWithKeywords was removed - use PyObject_Call instead
+#define PyEval_CallObjectWithKeywords(callable, args, kwargs) \
+    PyObject_Call((callable), (args) ? (args) : PyTuple_New(0), (kwargs))
+
+// PyCFunction_Call was removed - use PyObject_Call instead
+#define PyCFunction_Call(func, args, kwargs) \
+    PyObject_Call((func), (args), (kwargs))
+
+#endif // PY_VERSION_HEX >= 0x030E0000
 
 /** Thread State Locations:
     - _PyRuntime.gilstate.tstate_current - must only be modified while holding the GIL
