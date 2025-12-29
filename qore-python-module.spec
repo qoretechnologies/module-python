@@ -77,7 +77,7 @@ This RPM provides API documentation, test and example programs
 %doc docs/python test/*.qtest
 
 %changelog
-* Sun Dec 29 2024 David Nichols <david@qore.org>
+* Sun Dec 29 2025 David Nichols <david@qore.org>
 - updated to version 1.2.1
 - fixed a thread-safety race condition in qpy_deregister()
 - fixed an incorrect assertion in getQoreDateTimeFromTime()
