@@ -1422,7 +1422,7 @@ DateTimeNode* QorePythonProgram::getQoreDateTimeFromDate(PyObject* val) {
 }
 
 DateTimeNode* QorePythonProgram::getQoreDateTimeFromTime(PyObject* val) {
-    assert(PyDateTime_Check(val));
+    assert(Py_TYPE(val) == PyDateTimeAPI->TimeType);
     return DateTimeNode::makeAbsolute(currentTZ(), 0, 0, 0, PyDateTime_TIME_GET_HOUR(val),
         PyDateTime_TIME_GET_MINUTE(val), PyDateTime_TIME_GET_SECOND(val), PyDateTime_TIME_GET_MICROSECOND(val));
 }
@@ -2085,7 +2085,6 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
 QoreValue QorePythonProgram::callPythonMethod(ExceptionSink* xsink, PyObject* attr, PyObject* obj,
     const QoreListNode* args, size_t arg_offset) {
     PyTypeObject* mtype = Py_TYPE(attr);
-    printf("callPythonMethod() '%s' '%s'\n", mtype->tp_name, Py_TYPE(obj)->tp_name);
     // check for static method
     if (mtype == &PyStaticMethod_Type) {
         // get callable from static method

@@ -117,7 +117,7 @@ static void check_python_version() {
     // returns a borrowed reference
     PyObject* mod_dict = PyModule_GetDict(*mod);
     if (!mod_dict) {
-        throw QoreStandardException("PYTHON-MODULE-ERROR", "Python module 'sys' has no dictiomary");
+        throw QoreStandardException("PYTHON-MODULE-ERROR", "Python module 'sys' has no dictionary");
     }
 
     // returns a borrowed reference

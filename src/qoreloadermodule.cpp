@@ -155,6 +155,7 @@ void qpy_deregister(QorePythonProgram* p) {
         return;
     }
     printd(5, "qpy_deregister() p: %p\n", p, qore_needs_shutdown);
+    AutoLocker al(qpy_lock);
     qpy_pgm_set_t::iterator i = qpy_pgm_set.find(p);
     if (i != qpy_pgm_set.end()) {
         qpy_pgm_set.erase(i);
