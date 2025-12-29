@@ -62,6 +62,7 @@ class PythonTest inherits Test {
         addTestCase("object lifecycle", \objectLifecycleTest());
         addTestCase("basic test", \basicTest());
         addTestCase("import test", \importTest());
+        addTestCase("type conversion test", \typeConversionTest());
         # Set return value for compatibility with test harnesses that check the return value
         set_return_value(main());
     }
@@ -1065,6 +1066,161 @@ class test:
 
             delete pp;
             assertThrows("PYTHON-ERROR", \x.dostatic());
+        }
+    }
+
+    typeConversionTest() {
+        # Test datetime.time conversion (covers getQoreDateTimeFromTime fix)
+        {
+            PythonProgram pp("
+import datetime
+def get_time():
+    return datetime.time(14, 30, 45, 123456)
+
+def get_date():
+    return datetime.date(2024, 12, 29)
+
+def get_datetime():
+    return datetime.datetime(2024, 12, 29, 14, 30, 45, 123456)
+
+def get_timedelta():
+    return datetime.timedelta(days=5, hours=3, minutes=30, seconds=15, microseconds=500)
+", "datetime_test.py");
+
+            # Test time conversion
+            auto t = pp.callFunction("get_time");
+            assertEq(Type::Date, t.type());
+            hash<auto> ti = t.info();
+            assertEq(14, ti.hour);
+            assertEq(30, ti.minute);
+            assertEq(45, ti.second);
+            assertEq(123456, ti.microsecond);
+
+            # Test date conversion
+            auto d = pp.callFunction("get_date");
+            assertEq(Type::Date, d.type());
+            hash<auto> di = d.info();
+            assertEq(2024, di.year);
+            assertEq(12, di.month);
+            assertEq(29, di.day);
+
+            # Test datetime conversion
+            auto dt = pp.callFunction("get_datetime");
+            assertEq(Type::Date, dt.type());
+            hash<auto> dti = dt.info();
+            assertEq(2024, dti.year);
+            assertEq(12, dti.month);
+            assertEq(29, dti.day);
+            assertEq(14, dti.hour);
+            assertEq(30, dti.minute);
+            assertEq(45, dti.second);
+
+            # Test timedelta conversion
+            auto td = pp.callFunction("get_timedelta");
+            assertEq(Type::Date, td.type());
+            assertTrue(td.relative());
+        }
+
+        # Test large integer conversion (> 64-bit should become number)
+        {
+            PythonProgram pp("
+def get_large_int():
+    return 2**100
+
+def get_negative_large_int():
+    return -(2**100)
+", "bigint_test.py");
+
+            auto v = pp.callFunction("get_large_int");
+            assertEq(Type::Number, v.type());
+            assertTrue(v > 0);
+
+            v = pp.callFunction("get_negative_large_int");
+            assertEq(Type::Number, v.type());
+            assertTrue(v < 0);
+        }
+
+        # Test None/null conversion
+        {
+            PythonProgram pp("
+def get_none():
+    return None
+
+def pass_through(val):
+    return val
+", "none_test.py");
+
+            assertNothing(pp.callFunction("get_none"));
+            assertNothing(pp.callFunction("pass_through", NOTHING));
+        }
+
+        # Test empty collections
+        {
+            PythonProgram pp("
+def get_empty_list():
+    return []
+
+def get_empty_dict():
+    return {}
+
+def get_empty_tuple():
+    return ()
+", "empty_test.py");
+
+            assertEq((), pp.callFunction("get_empty_list"));
+            assertEq({}, pp.callFunction("get_empty_dict"));
+            assertEq((), pp.callFunction("get_empty_tuple"));
+        }
+
+        # Test nested structures
+        {
+            PythonProgram pp("
+def get_nested():
+    return {
+        'list': [1, 2, {'nested': True}],
+        'dict': {'a': [1, 2, 3]},
+        'mixed': [{'x': 1}, {'y': 2}]
+    }
+", "nested_test.py");
+
+            hash<auto> result = pp.callFunction("get_nested");
+            assertEq((1, 2, {"nested": True}), result.list);
+            assertEq({"a": (1, 2, 3)}, result.dict);
+            assertEq(({"x": 1}, {"y": 2}), result.mixed);
+        }
+
+        # Test binary data conversion
+        {
+            PythonProgram pp("
+def pass_binary(b):
+    return b
+
+def get_bytes():
+    return b'\\x00\\x01\\x02\\xff'
+
+def get_bytearray():
+    return bytearray(b'\\x00\\x01\\x02\\xff')
+", "binary_test.py");
+
+            binary b = <00010203>;
+            assertEq(b, pp.callFunction("pass_binary", b));
+            assertEq(<000102ff>, pp.callFunction("get_bytes"));
+            assertEq(<000102ff>, pp.callFunction("get_bytearray"));
+        }
+
+        # Test Unicode string handling
+        {
+            PythonProgram pp("
+def pass_unicode(s):
+    return s
+
+def get_unicode():
+    return 'Hello \\u4e16\\u754c \\U0001F600'
+", "unicode_test.py");
+
+            string s = "Hello 世界 😀";
+            assertEq(s, pp.callFunction("pass_unicode", s));
+            assertEq(s, pp.callFunction("get_unicode"));
         }
     }
 

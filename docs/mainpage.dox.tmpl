@@ -4,10 +4,10 @@
 
     @section pythonintro python Module Introduction
 
-    The \c python module allows for transparent and dynamic bidirectional importined code from %Qore to %Python and
+    The \c python module allows for transparent and dynamic bidirectional importing of code from %Qore to %Python and
     vice-versa.  Qore classes can inherit %Python classes and extend them, and %Python classes can inherit %Qore classes
     and extend them as well; even %Qore abstract classes can be inherited by %Python classes and made concrete by
-    implementing the requried concrete methods in %Python.
+    implementing the required concrete methods in %Python.
 
     This module also implements support in the same shared object for the \c qoreloader module for %Python so allow
     native %Python code to import %Qore APIs; see @ref python_qoreloader_module for more information.
@@ -436,7 +436,7 @@ from qore.__root__.Jni.org.qore.lang.restclient import RestClient
     |\c hash|\c dict
     |\c int|\c int
     |\c list|\c list
-    |\c list|\c string
+    |\c string|\c str
     |\c code (closure or call reference)|\c callable
 
     @subsection python_python_to_qore Type Conversions From Python to Qore
@@ -451,7 +451,7 @@ from qore.__root__.Jni.org.qore.lang.restclient import RestClient
     |\c datetime.delta|\c date (relative date/time values)
     |\c dict|\c hash
     |\c list|\c list
-    |\c string|\c list
+    |\c str|\c string
     |\c tuple|\c list
     |\c function, \c method|\c code
 
@@ -499,6 +499,18 @@ PythonProgram::setSaveObjectCallback(callback);
     @endcode
 
     @section pythonreleasenotes python Module Release Notes
+
+    @subsection python_1_2_1 python Module Version 1.2.1
+    - fixed a thread-safety race condition in \c qpy_deregister() where the shared program set was accessed without
+      proper locking
+      (<a href="https://github.com/qorelanguage/qore/issues/5048">issue 5048</a>)
+    - fixed an incorrect assertion in \c getQoreDateTimeFromTime() that used \c PyDateTime_Check instead of checking
+      for \c TimeType
+      (<a href="https://github.com/qorelanguage/qore/issues/5049">issue 5049</a>)
+    - removed a debug \c printf() statement that was left in \c callPythonMethod()
+      (<a href="https://github.com/qorelanguage/qore/issues/5050">issue 5050</a>)
+    - fixed a typo in an error message ("dictiomary" -> "dictionary")
+      (<a href="https://github.com/qorelanguage/qore/issues/5051">issue 5051</a>)
 
     @subsection python_1_2 python Module Version 1.2
     - enable proper Python stack trace reporting when exceptions are thrown in %Qore code called from %Python; %Python

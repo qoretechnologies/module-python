@@ -6,7 +6,7 @@
 %global user_module_dir %{mydatarootdir}/qore-modules/
 
 Name:           qore-python-module
-Version:        1.2.0
+Version:        1.2.1
 Release:        1
 Summary:        Qorus Integration Engine - Qore Python module
 License:        MIT
@@ -77,6 +77,13 @@ This RPM provides API documentation, test and example programs
 %doc docs/python test/*.qtest
 
 %changelog
+* Sun Dec 29 2024 David Nichols <david@qore.org>
+- updated to version 1.2.1
+- fixed a thread-safety race condition in qpy_deregister()
+- fixed an incorrect assertion in getQoreDateTimeFromTime()
+- removed a debug printf() statement left in callPythonMethod()
+- fixed a typo in an error message
+
 * Sun Dec 25 2022 David Nichols <david@qore.org>
 - updated to version 1.2.0
 

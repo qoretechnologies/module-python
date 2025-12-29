@@ -3,7 +3,7 @@ project(qore-python-module)
 
 set (VERSION_MAJOR 1)
 set (VERSION_MINOR 2)
-set (VERSION_PATCH 0)
+set (VERSION_PATCH 1)
 
 set(PROJECT_VERSION "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}")
 
@@ -21,7 +21,7 @@ if (UNIX AND NOT APPLE)
     set(LINUX TRUE)
 endif()
 
-# thread-state mamangement only works witb Python 3.7+
+# thread-state management only works with Python 3.7+
 set(MIN_PY_MINOR_VER 7)
 
 find_package(Qore 1.0 REQUIRED)
