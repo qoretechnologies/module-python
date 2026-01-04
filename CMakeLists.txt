@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.13)
+cmake_minimum_required(VERSION 3.10)
 project(qore-python-module)
 
 set (VERSION_MAJOR 1)
