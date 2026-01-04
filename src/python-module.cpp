@@ -402,7 +402,10 @@ static void py_mc_import(ExceptionSink* xsink, QoreString& arg, QorePythonProgra
     // process import statement
     //printd(5, "py_mc_import() pypgm: %p arg: %s\n", pypgm, arg.c_str());
 
-    QorePythonHelper qph(pypgm);
+    QorePythonHelper qph(pypgm, xsink);
+    if (qph.wasInterrupted()) {
+        return;
+    }
 
     // see if there is a dot (.) in the name
     qore_offset_t i = arg.find('.');
@@ -518,20 +521,35 @@ extern "C" int python_module_import(ExceptionSink* xsink, QoreProgram* pgm, cons
         pgm->addFeature(QORE_PYTHON_MODULE_NAME);
     }
     // the following call adds the class to the current program as well
-    QorePythonHelper qph(pypgm);
+    QorePythonHelper qph(pypgm, xsink);
+    if (qph.wasInterrupted()) {
+        return -1;
+    }
     return pypgm->import(xsink, module, symbol);
 }
 
-QorePythonHelper::QorePythonHelper(const QorePythonProgram* pypgm)
-        : old_pgm(q_swap_thread_local_data(python_u_tld_key, (void*)pypgm)), old_state(pypgm->setContext()),
-            new_pypgm(pypgm) {
+QorePythonHelper::QorePythonHelper(const QorePythonProgram* pypgm, ExceptionSink* xsink)
+        : old_pgm(q_swap_thread_local_data(python_u_tld_key, (void*)pypgm)),
+            old_state(pypgm->setContext(xsink != nullptr)), new_pypgm(pypgm) {
     //printd(5, "QorePythonHelper::QorePythonHelper() new: %p old: %p\n", pypgm, old_pgm);
+    if (xsink && wasInterrupted()) {
+        xsink->raiseException("PROGRAM-INTERRUPTED",
+            "program execution was interrupted while acquiring the Python GIL");
+    }
 }
 
 QorePythonHelper::~QorePythonHelper() {
     new_pypgm->releaseContext(old_state);
     q_swap_thread_local_data(python_u_tld_key, (void*)old_pgm);
     //printd(5, "QorePythonHelper::~QorePythonHelper() restored old: %p\n", old_pgm);
+}
+
+bool QorePythonHelper::isValid() const {
+    return old_state.valid || !new_pypgm->isValid();
+}
+
+bool QorePythonHelper::wasInterrupted() const {
+    return !old_state.valid && new_pypgm->isValid();
 }
 
 bool _qore_has_gil(PyThreadState* t_state) {

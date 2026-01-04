@@ -126,8 +126,8 @@ QoreValue QorePythonClass::callPythonMethod(ExceptionSink* xsink, QorePythonProg
     //printd(5, "QorePythonClass::callPythonMethod() %s::%s()\n", pname.c_str(), mname);
     PyObject* pyobj = pd->get();
     PyTypeObject* mtype = Py_TYPE(pyobj);
-    QorePythonHelper qph(pypgm);
-    if (pypgm->checkValid(xsink)) {
+    QorePythonHelper qph(pypgm, xsink);
+    if (*xsink || pypgm->checkValid(xsink)) {
         return QoreValue();
     }
     // returns a borrowed reference
@@ -142,8 +142,8 @@ QoreValue QorePythonClass::callPythonMethod(ExceptionSink* xsink, QorePythonProg
 
 QoreValue QorePythonClass::getPythonMember(QorePythonProgram* pypgm, const char* mname, QorePythonPrivateData* pd,
     ExceptionSink* xsink) const {
-    QorePythonHelper qph(pypgm);
-    if (pypgm->checkValid(xsink)) {
+    QorePythonHelper qph(pypgm, xsink);
+    if (*xsink || pypgm->checkValid(xsink)) {
         return QoreValue();
     }
 

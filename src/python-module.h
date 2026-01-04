@@ -29,6 +29,7 @@
 #include <structmember.h>
 
 #include <qore/Qore.h>
+#include <qore/QoreSandboxManager.h>
 
 //! the name of the module
 #define QORE_PYTHON_MODULE_NAME "python"
@@ -141,13 +142,23 @@ struct QorePythonThreadInfo {
 //! acquires the GIL and manages thread state
 class QorePythonHelper {
 public:
-    DLLLOCAL QorePythonHelper(const QorePythonProgram* pypgm);
+    //! Creates a helper for acquiring the Python GIL
+    /** @param pypgm the Python program to acquire the GIL for
+        @param xsink if not null, an exception will be raised if the context acquisition was interrupted
+    */
+    DLLLOCAL QorePythonHelper(const QorePythonProgram* pypgm, ExceptionSink* xsink = nullptr);
 
     DLLLOCAL ~QorePythonHelper();
 
     DLLLOCAL QorePythonProgram* getOldProgram() const {
         return old_pgm ? reinterpret_cast<QorePythonProgram*>(old_pgm) : const_cast<QorePythonProgram*>(new_pypgm);
     }
+
+    //! Returns true if the context was successfully acquired (not interrupted)
+    DLLLOCAL bool isValid() const;
+
+    //! Returns true if context acquisition was interrupted
+    DLLLOCAL bool wasInterrupted() const;
 
 protected:
     void* old_pgm;

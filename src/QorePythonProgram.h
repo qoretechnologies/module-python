@@ -109,8 +109,8 @@ public:
 
     DLLLOCAL QoreValue run(ExceptionSink* xsink) {
         assert(python_code);
-        QorePythonHelper qph(this);
-        if (checkValid(xsink)) {
+        QorePythonHelper qph(this, xsink);
+        if (qph.wasInterrupted() || checkValid(xsink)) {
             return QoreValue();
         }
         assert(module_dict);
@@ -213,7 +213,9 @@ public:
     DLLLOCAL QoreHashNode* getQoreHashFromDict(ExceptionSink* xsink, PyObject* val);
 
     //! Set Python thread context
-    DLLLOCAL QorePythonThreadInfo setContext() const;
+    /** @param check_interrupt if true, check for interrupt before acquiring the GIL
+    */
+    DLLLOCAL QorePythonThreadInfo setContext(bool check_interrupt = false) const;
 
     //! Release Python thread context
     DLLLOCAL void releaseContext(const QorePythonThreadInfo& oldstate) const;
@@ -232,6 +234,11 @@ public:
         }
         assert(PyGILState_Check());
         return 0;
+    }
+
+    //! Returns true if the program is valid (does not require GIL)
+    DLLLOCAL bool isValid() const {
+        return valid;
     }
 
     //! Returns the Qore program

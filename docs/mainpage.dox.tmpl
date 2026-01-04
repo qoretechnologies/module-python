@@ -500,6 +500,12 @@ PythonProgram::setSaveObjectCallback(callback);
 
     @section pythonreleasenotes python Module Release Notes
 
+    @subsection python_1_3 python Module Version 1.3
+    <b>New Features and Enhancements:</b>
+    - Added support for interruptible I/O for graceful termination of sandboxed programs; interrupt checks are
+      performed before acquiring the Python GIL when a sandbox manager is active
+      (<a href="https://github.com/qoretechnologies/qore/issues/5116">issue 5116</a>)
+
     @subsection python_1_2_1 python Module Version 1.2.1
     - fixed a thread-safety race condition in \c qpy_deregister() where the shared program set was accessed without
       proper locking

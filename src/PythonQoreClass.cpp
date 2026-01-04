@@ -428,24 +428,26 @@ PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* 
             pgm = qore_python_pgm->getQoreProgram();
         }
 
-        QorePythonHelper qph(qore_python_pgm);
-        QoreExternalProgramContextHelper pch(&xsink, pgm);
+        QorePythonHelper qph(qore_python_pgm, &xsink);
         if (!xsink) {
-            ReferenceHolder<QoreListNode> qargs(qore_python_pgm->getQoreListFromTuple(&xsink, args, 1), &xsink);
+            QoreExternalProgramContextHelper pch(&xsink, pgm);
             if (!xsink) {
-                ValueHolder rv(&xsink);
-                {
-                    QorePythonReleaseGilHelper prgh;
-
-                    QorePythonStackLocationHelper slh(qph.getOldProgram());
-
-                    rv = obj->evalMethod(*m, *qargs, &xsink);
-                }
+                ReferenceHolder<QoreListNode> qargs(qore_python_pgm->getQoreListFromTuple(&xsink, args, 1), &xsink);
                 if (!xsink) {
-                    QorePythonReferenceHolder py_rv(qore_python_pgm->getPythonValue(*rv, &xsink));
+                    ValueHolder rv(&xsink);
+                    {
+                        QorePythonReleaseGilHelper prgh;
+
+                        QorePythonStackLocationHelper slh(qph.getOldProgram());
+
+                        rv = obj->evalMethod(*m, *qargs, &xsink);
+                    }
                     if (!xsink) {
-                        assert(py_rv);
-                        return py_rv.release();
+                        QorePythonReferenceHolder py_rv(qore_python_pgm->getPythonValue(*rv, &xsink));
+                        if (!xsink) {
+                            assert(py_rv);
+                            return py_rv.release();
+                        }
                     }
                 }
             }
@@ -487,24 +489,26 @@ PyObject* PythonQoreClass::exec_qore_static_method(const QoreMethod& m, PyObject
             pgm = qore_python_pgm->getQoreProgram();
         }
 
-        QorePythonHelper qph(qore_python_pgm);
-        QoreExternalProgramContextHelper pch(&xsink, pgm);
+        QorePythonHelper qph(qore_python_pgm, &xsink);
         if (!xsink) {
-            ReferenceHolder<QoreListNode> qargs(qore_python_pgm->getQoreListFromTuple(&xsink, args, offset), &xsink);
+            QoreExternalProgramContextHelper pch(&xsink, pgm);
             if (!xsink) {
-                ValueHolder rv(&xsink);
-                {
-                    QorePythonReleaseGilHelper prgh;
-
-                    QorePythonStackLocationHelper slh(qph.getOldProgram());
-
-                    rv = QoreObject::evalStaticMethod(m, m.getClass(), *qargs, &xsink);
-                }
+                ReferenceHolder<QoreListNode> qargs(qore_python_pgm->getQoreListFromTuple(&xsink, args, offset), &xsink);
                 if (!xsink) {
-                    QorePythonReferenceHolder py_rv(qore_python_pgm->getPythonValue(*rv, &xsink));
+                    ValueHolder rv(&xsink);
+                    {
+                        QorePythonReleaseGilHelper prgh;
+
+                        QorePythonStackLocationHelper slh(qph.getOldProgram());
+
+                        rv = QoreObject::evalStaticMethod(m, m.getClass(), *qargs, &xsink);
+                    }
                     if (!xsink) {
-                        assert(py_rv);
-                        return py_rv.release();
+                        QorePythonReferenceHolder py_rv(qore_python_pgm->getPythonValue(*rv, &xsink));
+                        if (!xsink) {
+                            assert(py_rv);
+                            return py_rv.release();
+                        }
                     }
                 }
             }
