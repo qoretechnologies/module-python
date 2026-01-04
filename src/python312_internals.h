@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright 2020 - 2022 Qore Technologies, s.r.o.
+    Copyright 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -565,7 +565,7 @@ DLLLOCAL static PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
 }
 
 DLLLOCAL static void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
-    _Py_tss_tstate = tstate;
+    _Py_tss_tstate = state;
 }
 
 DLLLOCAL static bool _qore_PyCeval_GetGilLockedStatus() {

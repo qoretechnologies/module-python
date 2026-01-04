@@ -4,7 +4,7 @@
 
     Qore Programming Language python Module
 
-    Copyright (C) 2020 - 2022 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -130,14 +130,26 @@ QoreValue QorePythonClass::callPythonMethod(ExceptionSink* xsink, QorePythonProg
     if (pypgm->checkValid(xsink)) {
         return QoreValue();
     }
-    // returns a borrowed reference
-    PyObject* attr = PyDict_GetItemString(mtype->tp_dict, mname);
-    if (!attr) {
+    // Use PyObject_GetAttrString to properly traverse the MRO for inherited methods
+    // (PyDict_GetItemString only looks in the immediate type's dict, missing inherited methods like __sizeof__)
+    // Note: PyObject_GetAttrString returns a new reference and may return a bound method
+    QorePythonReferenceHolder attr(PyObject_GetAttrString((PyObject*)mtype, mname));
+    if (!*attr) {
+        PyErr_Clear();
         xsink->raiseException("METHOD-DOES-NOT-EXIST", "Python value of type '%s' has no method or member '%s'",
             mtype->tp_name, mname);
         return QoreValue();
     }
-    return pypgm->callPythonMethod(xsink, attr, pyobj, args, 2);
+    // PyObject_GetAttrString can return either:
+    // 1. Unbound descriptors (function, method_descriptor, etc.) - need self prepended, use arg_offset
+    // 2. Bound methods (builtin_function_or_method for classmethods) - self already bound, use arg_offset - 1
+    // Check if it's a bound builtin method by checking if it's a PyCFunction that's already bound
+    PyTypeObject* attr_type = Py_TYPE(*attr);
+    if (PyCFunction_Check(*attr) && attr_type != &PyMethodDescr_Type && attr_type != &PyClassMethodDescr_Type) {
+        // Bound method - only skip the method name, not the implicit self
+        return pypgm->callPythonMethod(xsink, *attr, pyobj, args, arg_offset - 1);
+    }
+    return pypgm->callPythonMethod(xsink, *attr, pyobj, args, arg_offset);
 }
 
 QoreValue QorePythonClass::getPythonMember(QorePythonProgram* pypgm, const char* mname, QorePythonPrivateData* pd,

@@ -2,7 +2,7 @@
 /*
     qore Python module
 
-    Copyright (C) 2020 - 2022 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -120,6 +120,10 @@ void qoreloader_free(void* obj) {
 
 static struct PyModuleDef_Slot qoreloader_slots[] = {
     {Py_mod_exec, reinterpret_cast<void*>(slot_qoreloader_exec)},
+#if PY_VERSION_HEX >= 0x030C0000
+    // Python 3.12+ sub-interpreter support (PEP 684)
+    {Py_mod_multiple_interpreters, Py_MOD_PER_INTERPRETER_GIL_SUPPORTED},
+#endif
 #if PY_VERSION_HEX >= 0x030D0000
     // Python 3.13+ free-threading support (PEP 703)
     {Py_mod_gil, Py_MOD_GIL_NOT_USED},
@@ -315,6 +319,14 @@ PyMODINIT_FUNC PyInit_qoreloader() {
 }
 
 int load_jni_module(QorePythonProgram* qore_python_pgm) {
+#ifdef Py_GIL_DISABLED
+    // JNI is not compatible with Python free-threading mode due to mimalloc heap conflicts
+    // JNI creates threads that don't have proper Python mimalloc heap initialization
+    PyErr_SetString(PyExc_RuntimeError,
+        "JNI/Java integration is not supported with Python free-threading (PEP 703) builds; "
+        "use a GIL-enabled Python build for Java integration");
+    return -1;
+#else
     static bool jni_loaded = false;
 
     if (!jni_loaded) {
@@ -328,6 +340,7 @@ int load_jni_module(QorePythonProgram* qore_python_pgm) {
         jni_loaded = true;
     }
     return 0;
+#endif
 }
 
 int do_jni_module_import(QorePythonProgram* qore_python_pgm, const char* name_str) {

@@ -3,7 +3,7 @@
 /*
     Qore Programming Language
 
-    Copyright 2020 - 2021 Qore Technologies, s.r.o.
+    Copyright 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -99,14 +99,12 @@ static ModuleNamespace* get_namespace(PyObject* py_mns) {
 }
 
 PyObject* ModuleNamespace_New(const char* name, const QoreNamespace* ns) {
-    QorePythonReferenceHolder self(ModuleNamespace_Type.tp_alloc(&ModuleNamespace_Type, 0));
-    if (!self) {
-        return nullptr;
-    }
-    // call the parent class init method
+    // Create the module by calling the type with the name argument
+    // This properly calls tp_new and tp_init, ensuring the module dictionary is initialized
     QorePythonReferenceHolder args(PyTuple_New(1));
     PyTuple_SET_ITEM(*args, 0, PyUnicode_FromString(name));
-    if (PyModule_Type.tp_init(*self, *args, nullptr)) {
+    QorePythonReferenceHolder self(PyObject_Call((PyObject*)&ModuleNamespace_Type, *args, nullptr));
+    if (!self) {
         return nullptr;
     }
     assert(PyModule_Check(*self));

@@ -5,7 +5,7 @@
 
     Qore Programming Language
 
-    Copyright 2020 - 2022 Qore Technologies, s.r.o.
+    Copyright 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -283,6 +283,30 @@ static auto PythonProgram::evalExpression(string source_code, string source_labe
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
     assert(pypgm);
     return pypgm->eval(xsink, *source_code, *source_label, Py_eval_input, false);
+}
+
+//! Returns @ref True if the Python interpreter was built with free-threading support (PEP 703)
+/** @par Example:
+    @code{.py}
+if (PythonProgram::isFreeThreading()) {
+    # Free-threading Python - some features may be limited
+}
+    @endcode
+
+    @return @ref True if the Python interpreter was built with free-threading support (Py_GIL_DISABLED),
+    @ref False otherwise
+
+    @note JNI/Java integration is not supported with free-threading Python builds due to memory allocator
+    conflicts; use a GIL-enabled Python build for Java integration
+
+    @since python 1.3
+*/
+static bool PythonProgram::isFreeThreading() {
+#ifdef Py_GIL_DISABLED
+    return true;
+#else
+    return false;
+#endif
 }
 
 //! Sets the "save object" callback for %Qore objects created from Python code in the root %Qore Program context
