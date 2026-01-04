@@ -119,15 +119,41 @@ inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_lim
     Py_SetRecursionLimit(new_limit);
 }
 #endif // !Py_GIL_DISABLED
-// Python 3.14+ compatibility wrappers
 
-// PyEval_CallObject was removed - use PyObject_Call instead
-#define PyEval_CallObject(callable, args) \
-    PyObject_Call((callable), (args) ? (args) : PyTuple_New(0), NULL)
+// Python 3.14+ compatibility wrappers for removed APIs
 
-// PyEval_CallObjectWithKeywords was removed - use PyObject_Call instead
+// PyEval_CallObject was removed - provide a compatibility wrapper using PyObject_Call
+static inline PyObject* qore_PyEval_CallObject(PyObject* callable, PyObject* args) {
+    PyObject* empty_args = nullptr;
+    if (!args) {
+        empty_args = PyTuple_New(0);
+        if (!empty_args) {
+            return nullptr;
+        }
+        args = empty_args;
+    }
+    PyObject* result = PyObject_Call(callable, args, nullptr);
+    Py_XDECREF(empty_args);
+    return result;
+}
+#define PyEval_CallObject(callable, args) qore_PyEval_CallObject((callable), (args))
+
+// PyEval_CallObjectWithKeywords was removed - provide a compatibility wrapper using PyObject_Call
+static inline PyObject* qore_PyEval_CallObjectWithKeywords(PyObject* callable, PyObject* args, PyObject* kwargs) {
+    PyObject* empty_args = nullptr;
+    if (!args) {
+        empty_args = PyTuple_New(0);
+        if (!empty_args) {
+            return nullptr;
+        }
+        args = empty_args;
+    }
+    PyObject* result = PyObject_Call(callable, args, kwargs);
+    Py_XDECREF(empty_args);
+    return result;
+}
 #define PyEval_CallObjectWithKeywords(callable, args, kwargs) \
-    PyObject_Call((callable), (args) ? (args) : PyTuple_New(0), (kwargs))
+    qore_PyEval_CallObjectWithKeywords((callable), (args), (kwargs))
 
 // PyCFunction_Call was removed - use PyObject_Call instead
 #define PyCFunction_Call(func, args, kwargs) \

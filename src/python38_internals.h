@@ -453,4 +453,6 @@ DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadStat
 
 #define _QORE_PYTHON_REENABLE_GIL_CHECK { assert(!_PyRuntime.gilstate.check_enabled); _PyRuntime.gilstate.check_enabled = 1; }
 
+#define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
+
 #endif

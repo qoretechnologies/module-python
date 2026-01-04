@@ -1,6 +1,6 @@
 /* -*- mode: c++; indent-tabs-mode: nil -*- */
 /*
-    python38_internals.h
+    python312_internals.h
 
     Qore Programming Language
 
