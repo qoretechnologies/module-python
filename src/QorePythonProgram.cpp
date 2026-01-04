@@ -768,6 +768,29 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     //printd(5, "QorePythonProgram::setContext() free-threading: after swap, current: %p g_state: %d\n",
     //    PyGILState_GetThisThreadState(), (int)g_state);
 #else
+#if PY_VERSION_HEX >= 0x030D0000
+    // Python 3.13+ changed thread state management - use PyEval_AcquireThread/ReleaseThread
+    // which properly handle TSS and fast TLS synchronization
+    t_state = PyGILState_GetThisThreadState();
+
+    if (_qore_has_gil(t_state)) {
+        // Already have the GIL - just swap thread states if needed
+        ceval_state = t_state;
+        if (t_state != python) {
+            PyThreadState_Swap(python);
+        }
+        g_state = PyGILState_LOCKED;
+    } else {
+        // Don't have the GIL - need to acquire it
+        ceval_state = nullptr;
+        // Use PyEval_AcquireThread which properly handles stale TSS values
+        PyEval_AcquireThread(python);
+        g_state = PyGILState_UNLOCKED;
+    }
+
+    // Update our tracking
+    _qore_PyGILState_SetThisThreadState(python);
+#else
     if (_qore_has_gil(tss_state)) {
         // set GIL context
         ceval_state = _qore_PyCeval_SwapThreadState(python);
@@ -785,6 +808,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         _QORE_PYTHREAD_STATE_SWAP(python);
     }
 #endif
+#endif
 
 #ifndef Py_GIL_DISABLED
     // now we have the GIL
@@ -800,15 +824,17 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 
     _QORE_GILSTATE_COUNTER_INC(python);
 
-#ifdef Py_GIL_DISABLED
-    // In free-threading mode, skip recursion limit handling as it requires an attached interpreter
-    // which may not be available. Python 3.14 uses global limits anyway.
+#if defined(Py_GIL_DISABLED) || PY_VERSION_HEX >= 0x030D0000
+    // In free-threading mode and Python 3.13+, skip recursion limit handling
+    // - Free-threading: requires an attached interpreter which may not be available
+    // - Python 3.13+: uses global limits instead of per-thread, and Py_GetRecursionLimit()
+    //   may not be safe to call in all contexts (e.g., during cleanup)
     int recursion_depth = 1000;  // Use a default value
 #else
     // calculate new recursion depth
     int recursion_depth = PyThreadState_GetRecursionLimit(python);
-    // be conservative when calculating the new recursion depth
-    int new_recursion_depth = q_thread_stack_used() / PYTHON_SMALL_STACK_FACTOR;
+    // be conservative when calculating the new recursion depth based on remaining stack space
+    int new_recursion_depth = q_thread_stack_remaining() / PYTHON_SMALL_STACK_FACTOR;
     //printd(5, "QorePythonProgram::setContext() recursion_depth: %d -> %d\n", python->recursion_depth,
     //  new_recursion_depth);
     PyThreadState_UpdateRecursionLimit(python, new_recursion_depth);
@@ -832,8 +858,9 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
     //printd(5, "QorePythonProgram::releaseContext() rd: %d -> ord: %d\n", PyThreadState_GetRecursionLimit(python),
     //  oldstate.recursion_depth);
 
-#ifndef Py_GIL_DISABLED
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030D0000
     // restore recursion depth
+    // Skip for Python 3.13+ which uses global limits
     PyThreadState_UpdateRecursionLimit(python, oldstate.recursion_depth);
 #endif
 
@@ -856,6 +883,21 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
         // We swapped in setContext, so swap back to the original (or nullptr)
         PyThreadState_Swap(oldstate.t_state);
     }
+#elif PY_VERSION_HEX >= 0x030D0000
+    // Python 3.13+ - restore original state and release GIL if needed
+    if (oldstate.g_state == PyGILState_UNLOCKED) {
+        // We acquired the GIL, so release it
+        // Use PyEval_ReleaseThread which properly clears both TSS and fast TLS
+        PyEval_ReleaseThread(python);
+        _qore_PyGILState_SetThisThreadState(nullptr);
+    } else {
+        // We already had the GIL - swap back to original thread state if needed
+        if (oldstate.ceval_state != python && oldstate.ceval_state != nullptr) {
+            PyThreadState_Swap(oldstate.ceval_state);
+        }
+        // Restore tracking to original state
+        _qore_PyGILState_SetThisThreadState(oldstate.t_state);
+    }
 #else
     if (oldstate.g_state == PyGILState_UNLOCKED) {
         _qore_release_thread_state(python);
@@ -867,12 +909,12 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
             _QORE_PYTHREAD_STATE_SWAP(oldstate.t_state);
         }
     }
-#endif
 
     // set new TSS thread state
     if (oldstate.tss_state != python) {
         _qore_PyGILState_SetThisThreadState(oldstate.tss_state);
     }
+#endif
 }
 
 PythonQoreClass* QorePythonProgram::findCreatePythonClass(const QoreClass& cls, const char* mod_name) {

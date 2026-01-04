@@ -24,6 +24,17 @@
 #ifndef _QORE_PYTHON_MODULE_H
 #define _QORE_PYTHON_MODULE_H
 
+// For Python with internal includes, we need Py_BUILD_CORE defined before
+// including Python.h to access internal headers. However, for Python 3.13+,
+// we also define Py_BUILD_CORE_MODULE to ensure that _PyThreadState_GET() uses
+// _PyThreadState_GetCurrent() instead of the non-exported _Py_tss_tstate variable.
+#ifdef HAVE_PYTHON_INTERNAL_INCLUDES
+#define Py_BUILD_CORE
+// For Python 3.13+, define Py_BUILD_CORE_MODULE to avoid using _Py_tss_tstate
+// which is not exported from the Python library
+#define Py_BUILD_CORE_MODULE
+#endif
+
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <structmember.h>
@@ -60,8 +71,103 @@ DLLLOCAL extern bool python_shutdown;
           interpreters
 */
 #ifdef HAVE_PYTHON_INTERNAL_INCLUDES
-#define Py_BUILD_CORE
+// Py_BUILD_CORE is already defined at the top of this file before Python.h
 #include <internal/pycore_pystate.h>
+#if PY_VERSION_HEX >= 0x030D0000
+#include <internal/pycore_ceval.h>
+#include <internal/pycore_gil.h>
+#include <internal/pycore_pylifecycle.h>
+#endif
+
+// Define QORE macros when using Python internal includes
+// In GIL-enabled mode, use standard PyThreadState_Swap
+#define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
+
+// gilstate_counter access macros - these are available in GIL-enabled Python
+#define _QORE_GILSTATE_COUNTER_INC(tstate) (++(tstate)->gilstate_counter)
+#define _QORE_GILSTATE_COUNTER_DEC(tstate) (--(tstate)->gilstate_counter)
+#define _QORE_GILSTATE_COUNTER_GET(tstate) ((tstate)->gilstate_counter)
+#define _QORE_GILSTATE_COUNTER_ASSERT_ONE(tstate) assert((tstate)->gilstate_counter == 1)
+
+#define _QORE_PYTHON_REENABLE_GIL_CHECK { assert(!_PyRuntime.gilstate.check_enabled); _PyRuntime.gilstate.check_enabled = 1; }
+
+// Thread state functions using internal Python APIs
+DLLLOCAL static inline PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
+    return _PyThreadState_GET();
+}
+
+DLLLOCAL static inline void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
+#if PY_VERSION_HEX >= 0x030D0000
+    // Python 3.13+: the thread-local state (_Py_tss_tstate) is not exported,
+    // so we cannot set it directly. The Python runtime handles TSS synchronization
+    // automatically through PyThreadState_Swap, PyEval_RestoreThread, etc.
+    // This function becomes a no-op for Python 3.13+.
+    (void)state;
+#else
+    _PyGILState_SetThisThreadState(state);
+#endif
+}
+
+#if PY_VERSION_HEX >= 0x030D0000
+// Python 3.13+: GIL is per-interpreter, accessed via tstate->interp->ceval.gil
+DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
+    PyThreadState* tstate = _PyThreadState_GET();
+    if (!tstate || !tstate->interp || !tstate->interp->ceval.gil) {
+        return false;
+    }
+    return (bool)(tstate->interp->ceval.gil->locked);
+}
+
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_GetThreadState() {
+    PyThreadState* tstate = _PyThreadState_GET();
+    if (!tstate || !tstate->interp || !tstate->interp->ceval.gil) {
+        return nullptr;
+    }
+    return tstate->interp->ceval.gil->last_holder;
+}
+
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* gil_state) {
+    PyThreadState* tstate = _PyThreadState_GET();
+    if (!tstate || !tstate->interp || !tstate->interp->ceval.gil) {
+        return nullptr;
+    }
+    PyThreadState* old = tstate->interp->ceval.gil->last_holder;
+    if (old != gil_state) {
+        tstate->interp->ceval.gil->last_holder = gil_state;
+    }
+    return old;
+}
+#else
+// Python < 3.13: GIL is global, accessed via _PyRuntime.ceval.gil
+DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
+    return (bool)(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.locked));
+}
+
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_GetThreadState() {
+    return reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.last_holder));
+}
+
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* gil_state) {
+    PyThreadState* old = reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.last_holder));
+    if (old != gil_state) {
+        _Py_atomic_store_relaxed(&_PyRuntime.ceval.gil.last_holder, (uintptr_t)gil_state);
+    }
+    return old;
+}
+#endif // PY_VERSION_HEX >= 0x030D0000
+
+DLLLOCAL static inline bool _qore_has_thread_state_attached() {
+    return PyGILState_Check();
+}
+
+DLLLOCAL static inline void _qore_acquire_thread_state(PyThreadState* tstate) {
+    PyEval_AcquireThread(tstate);
+}
+
+DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
+    PyEval_ReleaseThread(tstate);
+}
+
 #else
 #if PY_MAJOR_VERSION >= 3
 #if PY_MINOR_VERSION >= 14
@@ -72,7 +178,9 @@ DLLLOCAL extern bool python_shutdown;
 // GIL-enabled Python 3.14+ uses 3.12 internals
 #include "python312_internals.h"
 #endif
-#elif PY_MINOR_VERSION >= 12
+#elif PY_MINOR_VERSION >= 13
+#include "python313_internals.h"
+#elif PY_MINOR_VERSION == 12
 #include "python312_internals.h"
 #elif PY_MINOR_VERSION == 11
 #include "python311_internals.h"
@@ -91,37 +199,20 @@ DLLLOCAL extern bool python_shutdown;
 #endif
 
 /*
-    Python API compatibility layer for Python 3.14+
+    Python API compatibility layer for Python 3.13+
 
-    These APIs were removed/deprecated in Python 3.14:
+    These APIs were deprecated in Python 3.9 and removed in Python 3.13:
     - PyEval_CallObject -> PyObject_Call
     - PyEval_CallObjectWithKeywords -> PyObject_Call
     - PyCFunction_Call -> PyObject_Call
+
+    These were removed in Python 3.14:
     - PyThreadState_GetRecursionLimit removed (use Py_GetRecursionLimit)
     - _PyGILState_GetInterpreterStateUnsafe removed (use PyInterpreterState_Main)
 */
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030D0000
 
-// Recursion limit APIs - Python 3.14 uses global limits, not per-thread
-#ifndef Py_GIL_DISABLED
-inline int PyThreadState_GetRecursionLimit(PyThreadState* state) {
-    (void)state;  // unused in Python 3.14+
-    return Py_GetRecursionLimit();
-}
-
-// _PyGILState_GetInterpreterStateUnsafe was removed in Python 3.14
-// Use PyInterpreterState_Main() as a replacement when there's no thread state
-inline PyInterpreterState* _PyGILState_GetInterpreterStateUnsafe() {
-    return PyInterpreterState_Main();
-}
-
-inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_limit) {
-    (void)state;  // unused in Python 3.14+
-    Py_SetRecursionLimit(new_limit);
-}
-#endif // !Py_GIL_DISABLED
-
-// Python 3.14+ compatibility wrappers for removed APIs
+// Python 3.13+ compatibility wrappers for removed APIs
 
 // PyEval_CallObject was removed - provide a compatibility wrapper using PyObject_Call
 static inline PyObject* qore_PyEval_CallObject(PyObject* callable, PyObject* args) {
@@ -159,6 +250,36 @@ static inline PyObject* qore_PyEval_CallObjectWithKeywords(PyObject* callable, P
 // PyCFunction_Call was removed - use PyObject_Call instead
 #define PyCFunction_Call(func, args, kwargs) \
     PyObject_Call((func), (args), (kwargs))
+
+// Recursion limit APIs - removed in Python 3.13+
+// Only define when using Python internal includes (not bundled internals)
+// Bundled internals files define their own versions
+#ifdef HAVE_PYTHON_INTERNAL_INCLUDES
+#ifndef Py_GIL_DISABLED
+inline int PyThreadState_GetRecursionLimit(PyThreadState* state) {
+    (void)state;  // unused in Python 3.13+
+    return Py_GetRecursionLimit();
+}
+
+inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_limit) {
+    (void)state;  // unused in Python 3.13+
+    Py_SetRecursionLimit(new_limit);
+}
+#endif // !Py_GIL_DISABLED
+#endif // HAVE_PYTHON_INTERNAL_INCLUDES
+
+#endif // PY_VERSION_HEX >= 0x030D0000
+
+// Python 3.14+ specific compatibility APIs
+#if PY_VERSION_HEX >= 0x030E0000
+
+#ifndef Py_GIL_DISABLED
+// _PyGILState_GetInterpreterStateUnsafe was removed in Python 3.14
+// Use PyInterpreterState_Main() as a replacement when there's no thread state
+inline PyInterpreterState* _PyGILState_GetInterpreterStateUnsafe() {
+    return PyInterpreterState_Main();
+}
+#endif // !Py_GIL_DISABLED
 
 #endif // PY_VERSION_HEX >= 0x030E0000
 
@@ -220,11 +341,15 @@ protected:
 
 class QorePythonReleaseGilHelper {
 public:
-    DLLLOCAL QorePythonReleaseGilHelper() : _save(PyEval_SaveThread()) {
+    DLLLOCAL QorePythonReleaseGilHelper() {
+        _save = PyEval_SaveThread();
+        printd(5, "QorePythonReleaseGilHelper: released GIL, saved tstate: %p\n", _save);
     }
 
     DLLLOCAL ~QorePythonReleaseGilHelper() {
+        printd(5, "~QorePythonReleaseGilHelper: acquiring GIL with saved tstate: %p\n", _save);
         PyEval_RestoreThread(_save);
+        printd(5, "~QorePythonReleaseGilHelper: GIL acquired\n");
     }
 
 private:
