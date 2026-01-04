@@ -38,7 +38,10 @@ PythonCallableCallReferenceNode::PythonCallableCallReferenceNode(QorePythonProgr
 
 QoreValue PythonCallableCallReferenceNode::execValue(const QoreListNode* args, ExceptionSink* xsink) const {
     //printd(5, "PythonCallableCallReferenceNode::execValue() f: %p self: %p\n", *val, *self);
-    QorePythonHelper qph(*pypgm);
+    QorePythonHelper qph(*pypgm, xsink);
+    if (*xsink) {
+        return QoreValue();
+    }
     //QorePythonGilHelper qpgh;
     return pypgm->callInternal(xsink, *val, args, 0, *self);
 }

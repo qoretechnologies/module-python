@@ -231,6 +231,14 @@ void QorePythonProgram::createQoreProgram() {
     qpgm->getRootNS()->addNamespace(pyns);
     qpgm->setExternalData(QORE_PYTHON_MODULE_NAME, this);
 
+    // Inherit sandbox manager from parent program
+    if (pgm) {
+        QoreSandboxManager* sm = pgm->getSandboxManager();
+        if (sm) {
+            qpgm->setSandboxManager(sm);
+        }
+    }
+
     //printd(5, "QorePythonProgram::createQoreProgram() this: %p pgm: %p rootns: %p\n", this, qpgm,
     //  qpgm->getRootNS());
 }
@@ -442,8 +450,8 @@ QoreValue QorePythonProgram::eval(ExceptionSink* xsink, const QoreString& source
     }
 
     // ensure atomic access to the Python interpreter (GIL) and manage the Python thread state
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return QoreValue();
     }
 
@@ -673,9 +681,20 @@ int QorePythonProgram::setRecursionLimit(ExceptionSink* xsink) {
     return checkPythonException(xsink);
 }
 
-QorePythonThreadInfo QorePythonProgram::setContext() const {
+QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     if (!valid) {
         return {nullptr, nullptr, nullptr, PyGILState_UNLOCKED, 0, false};
+    }
+
+    // Check for interrupt before acquiring any state (only if requested)
+    if (check_interrupt) {
+        QoreSandboxManager* sm = runtime_get_sandbox_manager();
+        QoreSandboxManager* qpgm_sm = qpgm ? qpgm->getSandboxManager() : nullptr;
+        bool sm_interrupted = sm && sm->isInterruptRequested();
+        bool qpgm_sm_interrupted = qpgm_sm && qpgm_sm != sm && qpgm_sm->isInterruptRequested();
+        if (sm_interrupted || qpgm_sm_interrupted) {
+            return {nullptr, nullptr, nullptr, PyGILState_UNLOCKED, 0, false};
+        }
     }
 
     assert(interpreter);
@@ -1137,8 +1156,8 @@ void QorePythonProgram::importQoreNamespaceToPython(const QoreNamespace& ns, con
     //printd(5, "QorePythonProgram::getCreateModule() '%s'\n", path);
     assert(!py_mod_path.empty());
 
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return;
     }
 
@@ -1190,8 +1209,8 @@ void QorePythonProgram::importQoreNamespaceToPython(const QoreNamespace& ns, con
 
 void QorePythonProgram::aliasDefinition(const QoreString& source_path, const QoreString& target_path) {
     ExceptionSink xsink;
-    QorePythonHelper qph(this);
-    if (checkValid(&xsink)) {
+    QorePythonHelper qph(this, &xsink);
+    if (xsink || checkValid(&xsink)) {
         throw QoreXSinkException(xsink);
     }
 
@@ -1268,8 +1287,8 @@ void QorePythonProgram::aliasDefinition(const QoreString& source_path, const Qor
 }
 
 void QorePythonProgram::exportClass(ExceptionSink* xsink, QoreString& arg) {
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return;
     }
 
@@ -1326,8 +1345,8 @@ void QorePythonProgram::addModulePath(ExceptionSink* xsink, QoreString& arg) {
     q_env_subst(arg);
     printd(5, "QorePythonProgram::addModulePath() this: %p arg: '%s'\n", this, arg.c_str());
 
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return;
     }
 
@@ -1355,8 +1374,8 @@ void QorePythonProgram::addModulePath(ExceptionSink* xsink, QoreString& arg) {
 }
 
 void QorePythonProgram::exportFunction(ExceptionSink* xsink, QoreString& arg) {
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return;
     }
 
@@ -1892,9 +1911,9 @@ QoreValue QorePythonProgram::callFunction(ExceptionSink* xsink, const QoreString
 
     ValueHolder rv(xsink);
     {
-        QorePythonHelper qph(this);
+        QorePythonHelper qph(this, xsink);
         //printd(5, "QorePythonProgram::callFunction() after qph: module: %p module_dict: %p\n", *module, module_dict);
-        if (checkValid(xsink)) {
+        if (*xsink || checkValid(xsink)) {
             return QoreValue();
         }
 
@@ -1939,8 +1958,8 @@ QoreValue QorePythonProgram::callMethod(ExceptionSink* xsink, const char* cname,
         return QoreValue();
     }
 
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return QoreValue();
     }
 
@@ -1981,8 +2000,8 @@ QoreValue QorePythonProgram::callInternal(ExceptionSink* xsink, PyObject* callab
         return QoreValue();
     }
 
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return QoreValue();
     }
     //printd(5, "QorePythonProgram::callInternal() f: %p args: %d (%d) self: %p\n", callable,
@@ -2019,8 +2038,8 @@ QoreValue QorePythonProgram::callFunctionObject(ExceptionSink* xsink, PyObject* 
         return QoreValue();
     }
 
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return QoreValue();
     }
     QorePythonReferenceHolder py_args(getPythonTupleValue(xsink, args, arg_offset, first));
@@ -2564,9 +2583,9 @@ QoreValue QorePythonProgram::callCFunctionMethod(ExceptionSink* xsink, PyObject*
         return QoreValue();
     }
 
-    QorePythonHelper qph(this);
+    QorePythonHelper qph(this, xsink);
     QorePythonReferenceHolder py_args;
-    if (checkValid(xsink)) {
+    if (*xsink || checkValid(xsink)) {
         return QoreValue();
     }
 
@@ -2595,8 +2614,8 @@ void QorePythonProgram::execPythonConstructor(const QoreMethod& meth, PyObject* 
         return;
     }
 
-    QorePythonHelper qph(pypgm);
-    if (pypgm->checkValid(xsink)) {
+    QorePythonHelper qph(pypgm, xsink);
+    if (*xsink || pypgm->checkValid(xsink)) {
         return;
     }
 
@@ -2675,8 +2694,8 @@ QoreValue QorePythonProgram::execPythonNormalClassMethodDescriptorMethod(const Q
 
 QoreValue QorePythonProgram::callWrapperDescriptorMethod(ExceptionSink* xsink, PyObject* self, PyObject* obj,
         const QoreListNode* args, size_t arg_offset) {
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return QoreValue();
     }
     QorePythonReferenceHolder py_args;
@@ -2698,8 +2717,8 @@ QoreValue QorePythonProgram::callWrapperDescriptorMethod(ExceptionSink* xsink, P
 
 QoreValue QorePythonProgram::callMethodDescriptorMethod(ExceptionSink* xsink, PyObject* self, PyObject* obj,
         const QoreListNode* args, size_t arg_offset) {
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return QoreValue();
     }
     QorePythonReferenceHolder py_args;
@@ -2722,8 +2741,8 @@ QoreValue QorePythonProgram::callMethodDescriptorMethod(ExceptionSink* xsink, Py
 
 QoreValue QorePythonProgram::callClassMethodDescriptorMethod(ExceptionSink* xsink, PyObject* self, PyObject* obj,
         const QoreListNode* args, size_t arg_offset) {
-    QorePythonHelper qph(this);
-    if (checkValid(xsink)) {
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
         return QoreValue();
     }
 

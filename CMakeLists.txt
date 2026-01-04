@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 2.8.13)
 project(qore-python-module)
 
 set (VERSION_MAJOR 1)
-set (VERSION_MINOR 2)
-set (VERSION_PATCH 1)
+set (VERSION_MINOR 3)
+set (VERSION_PATCH 0)
 
 set(PROJECT_VERSION "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}")
 
@@ -46,6 +46,23 @@ if(${Python3_VERSION_MINOR} VERSION_LESS ${MIN_PY_MINOR_VER})
 endif()
 message(STATUS "Found Python3 libs: ${Python3_LIBRARIES}")
 message(STATUS "Found Python3 includes: ${Python3_INCLUDE_DIRS}")
+
+# Check for Python internal includes (needed for Python 3.12+)
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES ${Python3_INCLUDE_DIRS})
+set(CMAKE_REQUIRED_DEFINITIONS "-DPy_BUILD_CORE")
+check_cxx_source_compiles("
+#include <Python.h>
+#include <internal/pycore_pystate.h>
+int main() { return 0; }
+" HAVE_PYTHON_INTERNAL_INCLUDES)
+set(CMAKE_REQUIRED_DEFINITIONS "")
+if(HAVE_PYTHON_INTERNAL_INCLUDES)
+    message(STATUS "Found Python internal includes")
+    add_definitions(-DHAVE_PYTHON_INTERNAL_INCLUDES)
+else()
+    message(STATUS "Python internal includes not found - using bundled internals")
+endif()
 
 # Check for C++11.
 include(CheckCXXCompilerFlag)
