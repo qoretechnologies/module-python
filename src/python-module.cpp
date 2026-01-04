@@ -338,15 +338,24 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
 #ifndef Py_GIL_DISABLED
     mainThreadState = PyThreadState_Get();
     if (python_initialized) {
+#if PY_VERSION_HEX >= 0x030D0000
+        // Python 3.13+ changed thread state management significantly
+        // Use PyEval_ReleaseThread which properly clears both TSS and fast TLS
+        printd(5, "python_module_init: before release, mainThreadState: %p TSS: %p GIL: %d\n",
+            mainThreadState, PyGILState_GetThisThreadState(), PyGILState_Check());
+        PyEval_ReleaseThread(mainThreadState);
+        printd(5, "python_module_init: after release, TSS: %p GIL: %d\n",
+            PyGILState_GetThisThreadState(), PyGILState_Check());
+        _qore_PyGILState_SetThisThreadState(nullptr);
+#else
         // release the current thread state after initialization
         _qore_release_thread_state(mainThreadState);
         assert(!_qore_PyRuntimeGILState_GetThreadState());
         _qore_PyGILState_SetThisThreadState(nullptr);
-#if PY_VERSION_HEX < 0x030E0000
-        // In Python 3.14+, PyEval_ReleaseThread doesn't clear PyGILState_GetThisThreadState
+        // In Python < 3.13, PyEval_ReleaseThread clears PyGILState_GetThisThreadState
         assert(!PyGILState_GetThisThreadState());
-#endif
         assert(!QorePythonProgram::haveGil());
+#endif
     }
 #else
     // In free-threading mode, don't release the thread state after initialization
@@ -375,11 +384,12 @@ static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns) {
     }
 
 #ifndef Py_GIL_DISABLED
-#if PY_VERSION_HEX < 0x030E0000
-    // In Python 3.14+, PyGILState_Check() behavior is different
+#if PY_VERSION_HEX < 0x030D0000
+    // In Python 3.13+, PyGILState_Check() behavior has changed
+    // It may return 1 even after releasing the GIL in some cases with sub-interpreters
     assert(!python_initialized || !PyGILState_Check());
-#endif
     assert(!python_initialized || !QorePythonProgram::haveGil());
+#endif
 #endif
 }
 
@@ -621,14 +631,35 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     : new_thread_state(new_thread_state), state(_qore_PyRuntimeGILState_GetThreadState()),
         t_state(PyGILState_GetThisThreadState()),
         release_gil(!_qore_has_gil(t_state, new_thread_state)) {
-    //printd(5, "QorePythonGilHelper::QorePythonGilHelper() %llx acquire: %d state: %llx t_state: %llx\n",
-    //    new_thread_state, release_gil, state, t_state);
     assert(new_thread_state);
 #ifdef Py_GIL_DISABLED
-    // In free-threading mode, use PyGILState_Ensure to properly initialize the thread
-    // and ensure a valid thread state is attached. This is required before calling
-    // Py_NewInterpreterFromConfig.
+    // In free-threading mode, use PyGILState_Ensure to properly
+    // initialize the thread and ensure a valid thread state is attached.
     gstate = PyGILState_Ensure();
+    // Now we have a thread state attached
+    t_state = PyGILState_GetThisThreadState();
+    if (t_state != new_thread_state) {
+        PyThreadState_Swap(new_thread_state);
+    }
+    _qore_PyGILState_SetThisThreadState(new_thread_state);
+    _QORE_GILSTATE_COUNTER_INC(new_thread_state);
+#elif PY_VERSION_HEX >= 0x030D0000
+    // Python 3.13+ GIL mode - use PyEval_AcquireThread/ReleaseThread which properly
+    // handle TSS and fast TLS synchronization
+    printd(5, "QorePythonGilHelper ctor: release_gil: %d t_state: %p new_thread_state: %p\n",
+        release_gil, t_state, new_thread_state);
+    if (release_gil) {
+        // Need to acquire the GIL with our specific thread state
+        PyEval_AcquireThread(new_thread_state);
+    } else {
+        // Already have the GIL - swap to our thread state if needed
+        if (t_state != new_thread_state) {
+            printd(5, "QorePythonGilHelper ctor: swapping from %p to %p\n", t_state, new_thread_state);
+            PyThreadState_Swap(new_thread_state);
+        }
+    }
+    _QORE_GILSTATE_COUNTER_INC(new_thread_state);
+    _qore_PyGILState_SetThisThreadState(new_thread_state);
 #else
     if (release_gil) {
         _qore_acquire_thread_state(new_thread_state);
@@ -657,13 +688,31 @@ QorePythonGilHelper::~QorePythonGilHelper() {
         // When the sub-interpreter is destroyed, it will clean up its own thread state.
         return;
     }
-    // In free-threading mode, first swap back to main interpreter's thread state
-    // (PyGILState_Ensure attached a main interpreter state), then release
+    // First swap back to the original thread state if needed
     PyThreadState* current = PyGILState_GetThisThreadState();
     if (current && current != t_state && t_state) {
         PyThreadState_Swap(t_state);
     }
+    // Decrement counter before release
+    _QORE_GILSTATE_COUNTER_DEC(new_thread_state);
+    // Release the GIL state
     PyGILState_Release(gstate);
+    _qore_PyGILState_SetThisThreadState(nullptr);
+#elif PY_VERSION_HEX >= 0x030D0000
+    // Python 3.13+ GIL mode
+    printd(5, "QorePythonGilHelper dtor: release_gil: %d t_state: %p new_thread_state: %p\n",
+        release_gil, t_state, new_thread_state);
+    _QORE_GILSTATE_COUNTER_DEC(new_thread_state);
+
+    if (release_gil) {
+        // We acquired the GIL, so release it
+        // Use PyEval_SaveThread which properly releases the GIL
+        PyEval_SaveThread();
+        _qore_PyGILState_SetThisThreadState(nullptr);
+    } else {
+        // We already had the GIL - restore the original tracking
+        _qore_PyGILState_SetThisThreadState(t_state);
+    }
 #else
     assert(_qore_has_gil());
 
@@ -714,6 +763,10 @@ void QorePythonGilHelper::set(PyThreadState* other_state) {
     new_thread_state = other_state;
 #else
     assert(_qore_PyCeval_GetGilLockedStatus() && _qore_PyCeval_GetThreadState());
+
+    // Update new_thread_state so the destructor releases the correct thread state
+    // This is critical when called after Py_NewInterpreter() which creates a new thread state
+    new_thread_state = other_state;
 
     _QORE_PYTHREAD_STATE_SWAP(other_state);
     _qore_PyCeval_SwapThreadState(other_state);

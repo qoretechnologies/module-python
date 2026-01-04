@@ -47,30 +47,39 @@ endif()
 message(STATUS "Found Python3 libs: ${Python3_LIBRARIES}")
 message(STATUS "Found Python3 includes: ${Python3_INCLUDE_DIRS}")
 
-# Check for Python internal includes (needed for Python 3.12+)
+# Check for Python internal includes
+# Python 3.13+ requires internal includes for proper thread state management
+# Python 3.12 and earlier use bundled internals
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES ${Python3_INCLUDE_DIRS})
 set(CMAKE_REQUIRED_DEFINITIONS "-DPy_BUILD_CORE")
-check_cxx_source_compiles("
-#include <Python.h>
-#include <internal/pycore_pystate.h>
-int main() { return 0; }
-" HAVE_PYTHON_INTERNAL_INCLUDES)
-set(CMAKE_REQUIRED_DEFINITIONS "")
-if(HAVE_PYTHON_INTERNAL_INCLUDES)
-    message(STATUS "Found Python internal includes")
+if(${Python3_VERSION_MINOR} GREATER_EQUAL 13)
+    # Python 3.13+ requires additional internal headers for thread state management
+    check_cxx_source_compiles("
+    #include <Python.h>
+    #include <internal/pycore_pystate.h>
+    #include <internal/pycore_ceval.h>
+    #include <internal/pycore_gil.h>
+    int main() { return 0; }
+    " HAVE_PYTHON_INTERNAL_INCLUDES)
+    if(NOT HAVE_PYTHON_INTERNAL_INCLUDES)
+        message(FATAL_ERROR "Python 3.13+ requires internal includes (python3-devel with internal headers)")
+    endif()
+    message(STATUS "Found Python 3.13+ internal includes")
     add_definitions(-DHAVE_PYTHON_INTERNAL_INCLUDES)
 else()
-    message(STATUS "Python internal includes not found - using bundled internals")
+    # Python 3.12 and earlier - use bundled internals
+    message(STATUS "Python ${Python3_VERSION} - using bundled internals")
 endif()
+set(CMAKE_REQUIRED_DEFINITIONS "")
 
-# Check for C++11.
+# Check for C++17 (required for Python 3.13+ and inline thread_local).
 include(CheckCXXCompilerFlag)
-CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
-if(COMPILER_SUPPORTS_CXX11)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+CHECK_CXX_COMPILER_FLAG("-std=c++17" COMPILER_SUPPORTS_CXX17)
+if(COMPILER_SUPPORTS_CXX17)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
 else()
-    message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
+    message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++17 support. Please use a different C++ compiler.")
 endif()
 
 set(QPP_SRC

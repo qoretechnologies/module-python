@@ -358,7 +358,7 @@ struct _import_runtime_state {
            or are imported in the main interpreter.
            This is initialized lazily in _PyImport_FixupExtensionObject().
            Modules are added there and looked up in _imp.find_extension(). */
-        _Py_hashtable_t *hashtable;
+        void *hashtable;  // _Py_hashtable_t* - opaque pointer, not accessed directly
     } extensions;
     /* Package context -- the full module name for package imports */
     const char * pkgcontext;
@@ -557,34 +557,41 @@ typedef enum _Py_memory_order {
 #define _Py_atomic_store_relaxed(ATOMIC_VAL, NEW_VAL) \
     _Py_atomic_store_explicit((ATOMIC_VAL), (NEW_VAL), _Py_memory_order_relaxed)
 
-extern _Py_thread_local PyThreadState *_Py_tss_tstate = NULL;
+// For Python 3.12, use our own thread-local state to track current thread state
+// This mirrors the approach used in Python 3.13+ bundled internals
+// Using inline thread_local ensures a single instance shared across all compilation units (C++17)
+inline thread_local PyThreadState* _qore_tss_tstate = nullptr;
 
-// equivalent to: PyThreadState_GET() == _PyThreadState_GET() == _PyRuntimeState_GetThreadState(&_PyRuntime.gilstate.tstate_current)
-DLLLOCAL static PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
-    return _Py_tss_tstate;
+// Get the current thread state from our thread-local tracking
+DLLLOCAL static inline PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
+    return _qore_tss_tstate;
 }
 
-DLLLOCAL static void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
-    _Py_tss_tstate = state;
+// Set this thread's state in thread-local storage
+DLLLOCAL static inline void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
+    _qore_tss_tstate = state;
 }
 
-DLLLOCAL static bool _qore_PyCeval_GetGilLockedStatus() {
-    return (bool)(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.locked));
+// GIL status check - use PyGILState_Check() which is the public API
+DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
+    return PyGILState_Check();
 }
 
-DLLLOCAL static PyThreadState* _qore_PyCeval_GetThreadState() {
-    return reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.last_holder));
+// Get the thread state that holds the GIL - use PyGILState_GetThisThreadState for actual state
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_GetThreadState() {
+    // Return the actual Python TSS state, not our tracking variable
+    // This ensures we correctly identify the GIL holder even when our tracking isn't set
+    return PyGILState_GetThisThreadState();
 }
 
-DLLLOCAL static PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* gil_state) {
-    PyThreadState* old = reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.last_holder));
-    if (old != gil_state) {
-        _Py_atomic_store_relaxed(&_PyRuntime.ceval.gil.last_holder, (uintptr_t)gil_state);
-    }
+// Swap thread state for ceval purposes - use our thread-local tracking
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* new_state) {
+    PyThreadState* old = _qore_tss_tstate;
+    _qore_tss_tstate = new_state;
     return old;
 }
 
-#define _QORE_PYTHON_REENABLE_GIL_CHECK { assert(!_PyRuntime.gilstate.check_enabled); _PyRuntime.gilstate.check_enabled = 1; }
+#define _QORE_PYTHON_REENABLE_GIL_CHECK /* no-op in bundled internals - check is always enabled */
 
 // In GIL-enabled mode, use standard PyThreadState_Swap
 #define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
