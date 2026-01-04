@@ -371,20 +371,16 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
 
         valid = false;
 
+        // Properly clean up thread state before interpreter deletion
+        // Must detach and delete thread state before clearing/deleting interpreter
+        PyThreadState_Swap(nullptr);
+        PyThreadState_Clear(cleanup_tstate);
+        PyThreadState_Delete(cleanup_tstate);
+
         // Use PyInterpreterState_Clear and PyInterpreterState_Delete
         // Py_EndInterpreter causes issues with weak references
         PyInterpreterState_Clear(interpreter);
         PyInterpreterState_Delete(interpreter);
-
-        // After deleting the interpreter, don't try to swap back to old_tstate
-        // as it may be from a sub-interpreter that's already been cleaned up.
-        // Just detach from the current thread state (which was already deleted
-        // along with the interpreter) by swapping to NULL.
-        // The next operation that needs a thread state will attach appropriately.
-        PyThreadState_Swap(nullptr);
-
-        // Delete the cleanup thread state we created (it was deleted with the interpreter)
-        // Note: cleanup_tstate was already deleted when we called PyInterpreterState_Delete
 
         interpreter = nullptr;
         owns_interpreter = false;
