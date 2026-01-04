@@ -453,4 +453,26 @@ DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadStat
 
 #define _QORE_PYTHON_REENABLE_GIL_CHECK { assert(!_PyRuntime.gilstate.check_enabled); _PyRuntime.gilstate.check_enabled = 1; }
 
+// In GIL-enabled mode, use standard PyThreadState_Swap
+#define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
+
+// gilstate_counter access macros - these are available in GIL-enabled Python
+#define _QORE_GILSTATE_COUNTER_INC(tstate) (++(tstate)->gilstate_counter)
+#define _QORE_GILSTATE_COUNTER_DEC(tstate) (--(tstate)->gilstate_counter)
+#define _QORE_GILSTATE_COUNTER_GET(tstate) ((tstate)->gilstate_counter)
+#define _QORE_GILSTATE_COUNTER_ASSERT_ONE(tstate) assert((tstate)->gilstate_counter == 1)
+
+// Thread state management functions for GIL-enabled Python
+DLLLOCAL static inline bool _qore_has_thread_state_attached() {
+    return PyGILState_Check();
+}
+
+DLLLOCAL static inline void _qore_acquire_thread_state(PyThreadState* tstate) {
+    PyEval_AcquireThread(tstate);
+}
+
+DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
+    PyEval_ReleaseThread(tstate);
+}
+
 #endif

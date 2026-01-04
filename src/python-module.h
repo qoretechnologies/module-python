@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright 2020 - 2021 Qore Technologies, s.r.o.
+    Copyright 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -64,7 +64,17 @@ DLLLOCAL extern bool python_shutdown;
 #include <internal/pycore_pystate.h>
 #else
 #if PY_MAJOR_VERSION >= 3
-#if PY_MINOR_VERSION == 11
+#if PY_MINOR_VERSION >= 14
+#ifdef Py_GIL_DISABLED
+// Free-threading Python 3.14+
+#include "python314_internals.h"
+#else
+// GIL-enabled Python 3.14+ uses 3.12 internals
+#include "python312_internals.h"
+#endif
+#elif PY_MINOR_VERSION >= 12
+#include "python312_internals.h"
+#elif PY_MINOR_VERSION == 11
 #include "python311_internals.h"
 #elif PY_MINOR_VERSION == 10
 #include "python310_internals.h"
@@ -79,6 +89,78 @@ DLLLOCAL extern bool python_shutdown;
 #endif
 #endif
 #endif
+
+/*
+    Python API compatibility layer for Python 3.14+
+
+    These APIs were removed/deprecated in Python 3.14:
+    - PyEval_CallObject -> PyObject_Call
+    - PyEval_CallObjectWithKeywords -> PyObject_Call
+    - PyCFunction_Call -> PyObject_Call
+    - PyThreadState_GetRecursionLimit removed (use Py_GetRecursionLimit)
+    - _PyGILState_GetInterpreterStateUnsafe removed (use PyInterpreterState_Main)
+*/
+#if PY_VERSION_HEX >= 0x030E0000
+
+// Recursion limit APIs - Python 3.14 uses global limits, not per-thread
+#ifndef Py_GIL_DISABLED
+inline int PyThreadState_GetRecursionLimit(PyThreadState* state) {
+    (void)state;  // unused in Python 3.14+
+    return Py_GetRecursionLimit();
+}
+
+// _PyGILState_GetInterpreterStateUnsafe was removed in Python 3.14
+// Use PyInterpreterState_Main() as a replacement when there's no thread state
+inline PyInterpreterState* _PyGILState_GetInterpreterStateUnsafe() {
+    return PyInterpreterState_Main();
+}
+
+inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_limit) {
+    (void)state;  // unused in Python 3.14+
+    Py_SetRecursionLimit(new_limit);
+}
+#endif // !Py_GIL_DISABLED
+
+// Python 3.14+ compatibility wrappers for removed APIs
+
+// PyEval_CallObject was removed - provide a compatibility wrapper using PyObject_Call
+static inline PyObject* qore_PyEval_CallObject(PyObject* callable, PyObject* args) {
+    PyObject* empty_args = nullptr;
+    if (!args) {
+        empty_args = PyTuple_New(0);
+        if (!empty_args) {
+            return nullptr;
+        }
+        args = empty_args;
+    }
+    PyObject* result = PyObject_Call(callable, args, nullptr);
+    Py_XDECREF(empty_args);
+    return result;
+}
+#define PyEval_CallObject(callable, args) qore_PyEval_CallObject((callable), (args))
+
+// PyEval_CallObjectWithKeywords was removed - provide a compatibility wrapper using PyObject_Call
+static inline PyObject* qore_PyEval_CallObjectWithKeywords(PyObject* callable, PyObject* args, PyObject* kwargs) {
+    PyObject* empty_args = nullptr;
+    if (!args) {
+        empty_args = PyTuple_New(0);
+        if (!empty_args) {
+            return nullptr;
+        }
+        args = empty_args;
+    }
+    PyObject* result = PyObject_Call(callable, args, kwargs);
+    Py_XDECREF(empty_args);
+    return result;
+}
+#define PyEval_CallObjectWithKeywords(callable, args, kwargs) \
+    qore_PyEval_CallObjectWithKeywords((callable), (args), (kwargs))
+
+// PyCFunction_Call was removed - use PyObject_Call instead
+#define PyCFunction_Call(func, args, kwargs) \
+    PyObject_Call((func), (args), (kwargs))
+
+#endif // PY_VERSION_HEX >= 0x030E0000
 
 /** Thread State Locations:
     - _PyRuntime.gilstate.tstate_current - must only be modified while holding the GIL
@@ -110,11 +192,30 @@ public:
 
     DLLLOCAL void set(PyThreadState* other_state);
 
+#ifdef Py_GIL_DISABLED
+    //! Releases the GIL state before creating a sub-interpreter
+    /** In free-threading mode, PyGILState_Ensure() initializes thread-local mimalloc heap data
+        for the main interpreter. When creating a sub-interpreter, we need to release this state
+        so that Py_NewInterpreterFromConfig can properly initialize mimalloc for the new interpreter.
+
+        This method:
+        1. Releases the PyGILState to reset thread-local mimalloc state
+        2. Detaches the current thread state so Py_NewInterpreterFromConfig can attach a new one
+
+        After calling this, you MUST call set() with the new interpreter's thread state.
+    */
+    DLLLOCAL void releaseBeforeSubInterpreter();
+#endif
+
 protected:
     PyThreadState* new_thread_state;
     PyThreadState* state;
     PyThreadState* t_state;
     bool release_gil = true;
+#ifdef Py_GIL_DISABLED
+    PyGILState_STATE gstate;
+    bool gstate_released = false;  // True if gstate was released for sub-interpreter creation
+#endif
 };
 
 class QorePythonReleaseGilHelper {

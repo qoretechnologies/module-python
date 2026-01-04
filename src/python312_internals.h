@@ -1,10 +1,10 @@
 /* -*- mode: c++; indent-tabs-mode: nil -*- */
 /*
-    python38_internals.h
+    python312_internals.h
 
     Qore Programming Language
 
-    Copyright 2020 - 2022 Qore Technologies, s.r.o.
+    Copyright 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -28,11 +28,11 @@
 #include <fileobject.h>
 
 inline int PyThreadState_GetRecursionLimit(PyThreadState* state) {
-    return state->recursion_depth;
+    return state->py_recursion_limit;
 }
 
 inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_limit) {
-    state->recursion_depth = new_limit;
+    state->py_recursion_limit = new_limit;
 }
 
 typedef struct _Py_atomic_address {
@@ -43,36 +43,15 @@ typedef struct _Py_atomic_int {
     int _value;
 } _Py_atomic_int;
 
-struct _pending_calls {
-    PyThread_type_lock lock;
-    /* Request for running pending calls. */
-    _Py_atomic_int calls_to_do;
-    /* Request for looking at the `async_exc` field of the current
-       thread state.
-       Guarded by the GIL. */
-    int async_exc;
-#define NPENDINGCALLS 32
-    struct {
-        int (*func)(void *);
-        void *arg;
-    } calls[NPENDINGCALLS];
-    int first;
-    int last;
-};
-
 struct _gilstate_runtime_state {
     /* bpo-26558: Flag to disable PyGILState_Check().
        If set to non-zero, PyGILState_Check() always return 1. */
     int check_enabled;
-    /* Assuming the current thread holds the GIL, this is the
-       PyThreadState for the current thread. */
-    _Py_atomic_address tstate_current;
     /* The single PyInterpreterState used by this process'
        GILState implementation
     */
     /* TODO: Given interp_main, it may be possible to kill this ref */
     PyInterpreterState *autoInterpreterState;
-    Py_tss_t autoTSSkey;
 };
 
 #define FORCE_SWITCHING
@@ -104,15 +83,61 @@ struct _gil_runtime_state {
 #endif
 };
 
+#ifdef PY_HAVE_PERF_TRAMPOLINE
+typedef enum {
+    PERF_STATUS_FAILED = -1,  // Perf trampoline is in an invalid state
+    PERF_STATUS_NO_INIT = 0,  // Perf trampoline is not initialized
+    PERF_STATUS_OK = 1,       // Perf trampoline is ready to be executed
+} perf_status_t;
+
+struct code_arena_st;
+
+struct trampoline_api_st {
+    void* (*init_state)(void);
+    void (*write_state)(void* state, const void *code_addr,
+                        unsigned int code_size, PyCodeObject* code);
+    int (*free_state)(void* state);
+    void *state;
+};
+#endif
+
+struct _pending_calls {
+    int busy;
+    PyThread_type_lock lock;
+    /* Request for running pending calls. */
+    _Py_atomic_int calls_to_do;
+    /* Request for looking at the `async_exc` field of the current
+       thread state.
+       Guarded by the GIL. */
+    int async_exc;
+#define NPENDINGCALLS 32
+    struct _pending_call {
+        int (*func)(void *);
+        void *arg;
+    } calls[NPENDINGCALLS];
+    int first;
+    int last;
+};
+
 struct _ceval_runtime_state {
+     struct {
+#ifdef PY_HAVE_PERF_TRAMPOLINE
+        perf_status_t status;
+        Py_ssize_t extra_code_index;
+        void *code_arena;
+        struct trampoline_api_st trampoline_api;
+        FILE *map_file;
+#else
+        int _not_used;
+#endif
+    } perf;
     /* Request for checking signals. It is shared by all interpreters (see
        bpo-40513). Any thread of any interpreter can receive a signal, but only
        the main thread of the main interpreter can handle signals: see
        _Py_ThreadCanHandleSignals(). */
     _Py_atomic_int signals_pending;
-#ifndef EXPERIMENTAL_ISOLATED_SUBINTERPRETERS
-    struct _gil_runtime_state gil;
-#endif
+    /* Pending calls to be made only on the main thread. */
+    struct _pending_calls pending_mainthread;
 };
 
 /* GC information is stored BEFORE the object structure. */
@@ -188,67 +213,156 @@ struct _Py_unicode_runtime_ids {
     Py_ssize_t next_index;
 };
 
-typedef struct pyruntimestate {
-    /* Is running Py_PreInitialize()? */
-    int preinitializing;
+typedef struct {
+    /* We tag each block with an API ID in order to tag API violations */
+    char api_id;
+    PyMemAllocatorEx alloc;
+} debug_alloc_api_t;
 
-    /* Is Python preinitialized? Set to 1 by Py_PreInitialize() */
-    int preinitialized;
+struct _pymem_allocators {
+    PyThread_type_lock mutex;
+    struct {
+        PyMemAllocatorEx raw;
+        PyMemAllocatorEx mem;
+        PyMemAllocatorEx obj;
+    } standard;
+    struct {
+        debug_alloc_api_t raw;
+        debug_alloc_api_t mem;
+        debug_alloc_api_t obj;
+    } debug;
+    PyObjectArenaAllocator obj_arena;
+};
 
-    /* Is Python core initialized? Set to 1 by _Py_InitializeCore() */
-    int core_initialized;
+struct _obmalloc_global_state {
+    int dump_debug_stats;
+    Py_ssize_t interpreter_leaks;
+};
 
-    /* Is Python fully initialized? Set to 1 by Py_Initialize() */
+struct _time_runtime_state {
+#ifdef HAVE_TIMES
+    int ticks_per_second_initialized;
+    long ticks_per_second;
+#else
+    int _not_used;
+#endif
+};
+
+struct _pythread_runtime_state {
     int initialized;
 
-    /* Set by Py_FinalizeEx(). Only reset to NULL if Py_Initialize()
-       is called again.
+#ifdef _USE_PTHREADS
+    // This matches when thread_pthread.h is used.
+    struct {
+        /* NULL when pthread_condattr_setclock(CLOCK_MONOTONIC) is not supported. */
+        pthread_condattr_t *ptr;
+# ifdef CONDATTR_MONOTONIC
+    /* The value to which condattr_monotonic is set. */
+        pthread_condattr_t val;
+# endif
+    } _condattr_monotonic;
 
-       Use _PyRuntimeState_GetFinalizing() and _PyRuntimeState_SetFinalizing()
-       to access it, don't access it directly. */
-    _Py_atomic_address _finalizing;
+#endif  // USE_PTHREADS
 
-    struct pyinterpreters {
-        PyThread_type_lock mutex;
-        PyInterpreterState *head;
-        PyInterpreterState *main;
-        /* _next_interp_id is an auto-numbered sequence of small
-           integers.  It gets initialized in _PyInterpreterState_Init(),
-           which is called in Py_Initialize(), and used in
-           PyInterpreterState_New().  A negative interpreter ID
-           indicates an error occurred.  The main interpreter will
-           always have an ID of 0.  Overflow results in a RuntimeError.
-           If that becomes a problem later then we can adjust, e.g. by
-           using a Python int. */
-        int64_t next_id;
-    } interpreters;
-    // XXX Remove this field once we have a tp_* slot.
-    struct _xidregistry {
-        PyThread_type_lock mutex;
-        struct _xidregitem *head;
-    } xidregistry;
+#if defined(HAVE_PTHREAD_STUBS)
+    struct {
+        struct py_stub_tls_entry tls_entries[PTHREAD_KEYS_MAX];
+    } stubs;
+#endif
+};
 
-    unsigned long main_thread;
+#ifdef _SIG_MAXSIG
+   // gh-91145: On FreeBSD, <signal.h> defines NSIG as 32: it doesn't include
+   // realtime signals: [SIGRTMIN,SIGRTMAX]. Use _SIG_MAXSIG instead. For
+   // example on x86-64 FreeBSD 13, SIGRTMAX is 126 and _SIG_MAXSIG is 128.
+#  define Py_NSIG _SIG_MAXSIG
+#elif defined(NSIG)
+#  define Py_NSIG NSIG
+#elif defined(_NSIG)
+#  define Py_NSIG _NSIG            // BSD/SysV
+#elif defined(_SIGMAX)
+#  define Py_NSIG (_SIGMAX + 1)    // QNX
+#elif defined(SIGMAX)
+#  define Py_NSIG (SIGMAX + 1)     // djgpp
+#else
+#  define Py_NSIG 64               // Use a reasonable default value
+#endif
 
+struct _signals_runtime_state {
+    volatile struct {
+        _Py_atomic_int tripped;
+        /* func is atomic to ensure that PyErr_SetInterrupt is async-signal-safe
+         * (even though it would probably be otherwise, anyway).
+         */
+        _Py_atomic_address func;
+    } handlers[Py_NSIG];
+
+    volatile struct {
+#ifdef MS_WINDOWS
+        /* This would be "SOCKET fd" if <winsock2.h> were always included.
+           It isn't so we must cast to SOCKET where appropriate. */
+        volatile int fd;
+#elif defined(__VXWORKS__)
+        int fd;
+#else
+        sig_atomic_t fd;
+#endif
+
+        int warn_on_full_buffer;
+#ifdef MS_WINDOWS
+        int use_send;
+#endif
+    } wakeup;
+
+    /* Speed up sigcheck() when none tripped */
+    _Py_atomic_int is_tripped;
+
+    /* These objects necessarily belong to the main interpreter. */
+    PyObject *default_handler;
+    PyObject *ignore_handler;
+
+#ifdef MS_WINDOWS
+    /* This would be "HANDLE sigint_event" if <windows.h> were always included.
+       It isn't so we must cast to HANDLE everywhere "sigint_event" is used. */
+    void *sigint_event;
+#endif
+
+    /* True if the main interpreter thread exited due to an unhandled
+     * KeyboardInterrupt exception, suggesting the user pressed ^C. */
+    int unhandled_keyboard_interrupt;
+};
+
+typedef void (*atexit_callbackfunc)(void);
+
+struct _atexit_runtime_state {
+    PyThread_type_lock mutex;
 #define NEXITFUNCS 32
-    void (*exitfuncs[NEXITFUNCS])(void);
-    int nexitfuncs;
+    atexit_callbackfunc callbacks[NEXITFUNCS];
+    int ncallbacks;
+};
 
-    struct _ceval_runtime_state ceval;
-    struct _gilstate_runtime_state gilstate;
-
-    PyPreConfig preconfig;
-
-    Py_OpenCodeHookFunction open_code_hook;
-    void *open_code_userdata;
-    _Py_AuditHookEntry *audit_hook_head;
-
-    struct _Py_unicode_runtime_ids unicode_ids;
-
-    // XXX Consolidate globals found via the check-c-globals script.
-} _PyRuntimeState;
-
-DLLLOCAL extern _PyRuntimeState _PyRuntime;
+struct _import_runtime_state {
+    /* The builtin modules (defined in config.c). */
+    struct _inittab *inittab;
+    /* The most recent value assigned to a PyModuleDef.m_base.m_index.
+       This is incremented each time PyModuleDef_Init() is called,
+       which is just about every time an extension module is imported.
+       See PyInterpreterState.modules_by_index for more info. */
+    Py_ssize_t last_module_index;
+    struct {
+        /* A lock to guard the cache. */
+        PyThread_type_lock mutex;
+        /* The actual cache of (filename, name, PyModuleDef) for modules.
+           Only legacy (single-phase init) extension modules are added
+           and only if they support multiple initialization (m_size >- 0)
+           or are imported in the main interpreter.
+           This is initialized lazily in _PyImport_FixupExtensionObject().
+           Modules are added there and looked up in _imp.find_extension(). */
+        _Py_hashtable_t *hashtable;
+    } extensions;
+    /* Package context -- the full module name for package imports */
+    const char * pkgcontext;
+};
 
 #if defined(__GNUC__) && (defined(__i386__) || defined(__amd64))
 typedef enum _Py_memory_order {
@@ -443,13 +557,15 @@ typedef enum _Py_memory_order {
 #define _Py_atomic_store_relaxed(ATOMIC_VAL, NEW_VAL) \
     _Py_atomic_store_explicit((ATOMIC_VAL), (NEW_VAL), _Py_memory_order_relaxed)
 
+extern _Py_thread_local PyThreadState *_Py_tss_tstate = NULL;
+
 // equivalent to: PyThreadState_GET() == _PyThreadState_GET() == _PyRuntimeState_GetThreadState(&_PyRuntime.gilstate.tstate_current)
 DLLLOCAL static PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
-    return reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.gilstate.tstate_current));
+    return _Py_tss_tstate;
 }
 
 DLLLOCAL static void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
-    PyThread_tss_set(&_PyRuntime.gilstate.autoTSSkey, (void*)state);
+    _Py_tss_tstate = state;
 }
 
 DLLLOCAL static bool _qore_PyCeval_GetGilLockedStatus() {
