@@ -89,7 +89,12 @@ DLLLOCAL extern bool python_shutdown;
 #define _QORE_GILSTATE_COUNTER_GET(tstate) ((tstate)->gilstate_counter)
 #define _QORE_GILSTATE_COUNTER_ASSERT_ONE(tstate) assert((tstate)->gilstate_counter == 1)
 
+// Python 3.14+: _PyRuntime.gilstate.check_enabled doesn't exist - GIL check is always enabled
+#if PY_VERSION_HEX >= 0x030E0000
+#define _QORE_PYTHON_REENABLE_GIL_CHECK /* no-op in Python 3.14+ */
+#else
 #define _QORE_PYTHON_REENABLE_GIL_CHECK { assert(!_PyRuntime.gilstate.check_enabled); _PyRuntime.gilstate.check_enabled = 1; }
+#endif
 
 // Thread state functions using internal Python APIs
 DLLLOCAL static inline PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
