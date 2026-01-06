@@ -343,12 +343,18 @@ class QorePythonReleaseGilHelper {
 public:
     DLLLOCAL QorePythonReleaseGilHelper() {
         _save = PyEval_SaveThread();
+        // Update our tracking to indicate we don't have the GIL anymore
+        // This is critical for multi-threaded scenarios where another thread might check
+        // _qore_PyCeval_GetGilLockedStatus() to see if it needs to acquire the GIL.
+        _qore_PyGILState_SetThisThreadState(nullptr);
         printd(5, "QorePythonReleaseGilHelper: released GIL, saved tstate: %p\n", _save);
     }
 
     DLLLOCAL ~QorePythonReleaseGilHelper() {
         printd(5, "~QorePythonReleaseGilHelper: acquiring GIL with saved tstate: %p\n", _save);
         PyEval_RestoreThread(_save);
+        // Restore our tracking now that we have the GIL again
+        _qore_PyGILState_SetThisThreadState(_save);
         printd(5, "~QorePythonReleaseGilHelper: GIL acquired\n");
     }
 
@@ -509,7 +515,9 @@ DLLLOCAL PyMODINIT_FUNC PyInit_qoreloader();
 DLLLOCAL int init_global_qore_python_pgm();
 
 //! Returns true if the current thread is holding the GIL
-DLLLOCAL bool _qore_has_gil(PyThreadState* t_state = PyGILState_GetThisThreadState());
+// NOTE: For Python 3.12, the default uses our tracking instead of Python's TSS
+// because PyGILState_GetThisThreadState() can be stale after PyEval_ReleaseThread().
+DLLLOCAL bool _qore_has_gil(PyThreadState* t_state = _qore_PyRuntimeGILState_GetThreadState());
 
 class QorePythonProgram;
 DLLLOCAL extern QoreNamespace* PNS;

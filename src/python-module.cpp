@@ -350,10 +350,12 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
 #else
         // release the current thread state after initialization
         _qore_release_thread_state(mainThreadState);
+        // Our tracking should be cleared by _qore_release_thread_state
         assert(!_qore_PyRuntimeGILState_GetThreadState());
         _qore_PyGILState_SetThisThreadState(nullptr);
-        // In Python < 3.13, PyEval_ReleaseThread clears PyGILState_GetThisThreadState
-        assert(!PyGILState_GetThisThreadState());
+        // NOTE: In Python 3.12, PyEval_ReleaseThread does NOT clear PyGILState_GetThisThreadState()
+        // because it doesn't update the autoTSSkey. This is different from earlier Python versions.
+        // We only check haveGil() which uses our own tracking.
         assert(!QorePythonProgram::haveGil());
 #endif
     }
@@ -384,12 +386,14 @@ static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns) {
     }
 
 #ifndef Py_GIL_DISABLED
-#if PY_VERSION_HEX < 0x030D0000
-    // In Python 3.13+, PyGILState_Check() behavior has changed
-    // It may return 1 even after releasing the GIL in some cases with sub-interpreters
+#if PY_VERSION_HEX < 0x030C0000
+    // In Python 3.12+, PyGILState_Check() behavior changed - it returns 1 even after
+    // releasing the GIL because PyEval_ReleaseThread doesn't clear the TSS.
+    // In Python 3.13+, sub-interpreters also affect this behavior.
     assert(!python_initialized || !PyGILState_Check());
-    assert(!python_initialized || !QorePythonProgram::haveGil());
 #endif
+    // haveGil() uses our own tracking which should be accurate
+    assert(!python_initialized || !QorePythonProgram::haveGil());
 #endif
 }
 
@@ -665,7 +669,12 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
         _qore_acquire_thread_state(new_thread_state);
         assert(PyThreadState_Get() == new_thread_state);
     } else {
-        assert(t_state == _qore_PyCeval_GetThreadState());
+        // NOTE: In Python 3.12, t_state (from PyGILState_GetThisThreadState()) may be stale
+        // after PyEval_ReleaseThread() since Python's TSS isn't cleared.
+        // _qore_has_gil() verified we have the GIL with either t_state or new_thread_state,
+        // so check against both possibilities.
+        PyThreadState* ceval_ts = _qore_PyCeval_GetThreadState();
+        assert(ceval_ts == t_state || ceval_ts == new_thread_state);
     }
     // NOTE: even if the current thread state is equal to the new one, we still need to set all thread states in all
     // locations
@@ -675,7 +684,11 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
 
     // set this thread state
     _qore_PyGILState_SetThisThreadState(new_thread_state);
+#if PY_VERSION_HEX < 0x030C0000
+    // NOTE: In Python 3.12+, PyGILState_GetThisThreadState() can be unreliable because
+    // PyEval_ReleaseThread() doesn't clear the autoTSSkey. Our tracking is authoritative.
     assert(PyGILState_GetThisThreadState() == new_thread_state);
+#endif
     assert(PyGILState_Check());
 #endif
 }
@@ -721,20 +734,25 @@ QorePythonGilHelper::~QorePythonGilHelper() {
     if (release_gil) {
         //printd(5, "QorePythonGilHelper::~QorePythonGilHelper() releasing %llx state: %llx t_state: %llx\n",
         //    new_thread_state, state, t_state);
-        _QORE_PYTHREAD_STATE_SWAP(new_thread_state);
-        _qore_PyCeval_SwapThreadState(new_thread_state);
-        _qore_PyGILState_SetThisThreadState(new_thread_state);
-        // release the GIL / thread state
+        // We acquired the GIL with new_thread_state in the constructor.
+        // During our lifetime, setContext() might have changed the ceval thread state to a different
+        // PythonProgram's thread state. We need to ensure we release the correct state.
+        // Swap to new_thread_state before releasing to avoid "wrong thread state" error.
+        PyThreadState* current = PyThreadState_Get();
+        if (current != new_thread_state) {
+            PyThreadState_Swap(new_thread_state);
+        }
         _qore_release_thread_state(new_thread_state);
+        // _qore_release_thread_state already cleared _qore_tss_tstate to nullptr.
     } else {
         //printd(5, "QorePythonGilHelper::~QorePythonGilHelper() swapping %llx state: %llx t_state: %llx\n",
         //    new_thread_state, state, t_state);
+        // We already had the GIL - restore to original state
         _QORE_PYTHREAD_STATE_SWAP(state);
         _qore_PyCeval_SwapThreadState(t_state);
+        // restore the old TLD state - only when we already had the GIL
+        _qore_PyGILState_SetThisThreadState(t_state);
     }
-
-    // restore the old TLD state
-    _qore_PyGILState_SetThisThreadState(t_state);
 #endif
 }
 

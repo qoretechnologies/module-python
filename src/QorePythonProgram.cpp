@@ -736,10 +736,14 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     PyThreadState* tss_state = PyGILState_GetThisThreadState();
     PyThreadState* t_state, * ceval_state;
 
-    // set new TSS thread state
+#if defined(Py_GIL_DISABLED) || PY_VERSION_HEX >= 0x030D0000
+    // set new TSS thread state (for free-threading and Python 3.13+)
+    // NOTE: For Python 3.12, we set this AFTER checking/acquiring the GIL
+    // to avoid confusing _qore_has_gil() which uses our tracking
     if (tss_state != python) {
         _qore_PyGILState_SetThisThreadState(python);
     }
+#endif
 
     // are we currently holding the GIL?
 #ifdef Py_GIL_DISABLED
@@ -791,14 +795,27 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // Update our tracking
     _qore_PyGILState_SetThisThreadState(python);
 #else
-    if (_qore_has_gil(tss_state)) {
-        // set GIL context
+    // Python 3.12 with bundled internals
+    // NOTE: Don't use _qore_has_gil(tss_state) here because tss_state (from Python's TSS)
+    // can be stale in Python 3.12 after PyEval_ReleaseThread(). Instead, check our own
+    // tracking to determine if we have the GIL.
+    bool have_gil = _qore_PyCeval_GetGilLockedStatus();
+    if (have_gil) {
+        // We already have the GIL - swap thread states
         ceval_state = _qore_PyCeval_SwapThreadState(python);
-
         g_state = PyGILState_LOCKED;
+        // Also update Python's TSS via PyThreadState_Swap
+        // NOTE: Our tracking is updated above, but Python's autoTSSkey is not.
+        // PyThreadState_Swap updates both the ceval thread state and autoTSSkey.
+        if (PyGILState_GetThisThreadState() != python) {
+            PyThreadState_Swap(python);
+        }
     } else {
+        // We don't have the GIL - acquire it
         ceval_state = nullptr;
         PyEval_RestoreThread(python);
+        // Set our tracking now that we have the GIL
+        _qore_PyGILState_SetThisThreadState(python);
         g_state = PyGILState_UNLOCKED;
     }
 
@@ -900,19 +917,28 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
     }
 #else
     if (oldstate.g_state == PyGILState_UNLOCKED) {
+        // We acquired the GIL in setContext() with PyEval_RestoreThread(python).
+        // During our context, nested setContext calls might have changed the ceval thread state.
+        // Ensure we release the correct thread state by swapping back to python first.
+        PyThreadState* current = PyThreadState_Get();
+        if (current != python) {
+            PyThreadState_Swap(python);
+        }
         _qore_release_thread_state(python);
         // NOTE we cannot assert !PyGILState_Check() here, as we have released the GIL, and another thread may have
         // created a new interpreter, which will temporarily disbale the GIL check, which would cause
         // PyGILState_Check() to return 1
+        // NOTE: Do NOT restore tss_state here - we've released the GIL and _qore_release_thread_state already
+        // cleared our tracking. Restoring stale tss_state would incorrectly indicate we still have the GIL.
     } else {
         if (python != oldstate.t_state) {
             _QORE_PYTHREAD_STATE_SWAP(oldstate.t_state);
         }
-    }
-
-    // set new TSS thread state
-    if (oldstate.tss_state != python) {
-        _qore_PyGILState_SetThisThreadState(oldstate.tss_state);
+        // Restore our tracking to the original ceval_state (which was saved from our tracking).
+        // NOTE: Don't use oldstate.tss_state here - in Python 3.12, Python's TSS can be stale
+        // after PyEval_ReleaseThread(). Use oldstate.ceval_state which came from our tracking.
+        // The tracking was already restored at lines 886-889 above via _qore_PyCeval_SwapThreadState,
+        // so we don't need to do it again here.
     }
 #endif
 }

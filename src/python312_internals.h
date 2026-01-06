@@ -557,8 +557,23 @@ typedef enum _Py_memory_order {
 #define _Py_atomic_store_relaxed(ATOMIC_VAL, NEW_VAL) \
     _Py_atomic_store_explicit((ATOMIC_VAL), (NEW_VAL), _Py_memory_order_relaxed)
 
-// For Python 3.12, use our own thread-local state to track current thread state
-// This mirrors the approach used in Python 3.13+ bundled internals
+// Python 3.12 GIL Tracking
+// ========================
+// In Python 3.12, PyEval_ReleaseThread() does NOT clear the Thread-Specific Storage (TSS)
+// that stores the current thread state. This means:
+// - PyGILState_Check() returns 1 even after releasing the GIL
+// - PyGILState_GetThisThreadState() returns a non-null value after releasing the GIL
+// - These functions are unreliable for determining if the current thread holds the GIL
+//
+// Solution: Use our own thread-local tracking variable (_qore_tss_tstate) that we
+// explicitly clear when releasing the GIL and set when acquiring it. All GIL status
+// checks must use our tracking, not Python's TSS-based functions.
+//
+// NOTE: Python-created threads (e.g., threading.Thread) that call back into Qore
+// will not have our tracking initialized. This case requires additional handling
+// that is not yet fully implemented - see the "python thread test" in python.qtest.
+
+// Thread-local state to track current thread state for GIL ownership
 // Using inline thread_local ensures a single instance shared across all compilation units (C++17)
 inline thread_local PyThreadState* _qore_tss_tstate = nullptr;
 
@@ -572,16 +587,18 @@ DLLLOCAL static inline void _qore_PyGILState_SetThisThreadState(PyThreadState* s
     _qore_tss_tstate = state;
 }
 
-// GIL status check - use PyGILState_Check() which is the public API
+// GIL status check - use our own tracking since PyGILState_Check() in Python 3.12
+// returns true even after PyEval_ReleaseThread() because the TSS isn't cleared.
 DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
-    return PyGILState_Check();
+    // We have the GIL if our thread-local tracking has a thread state
+    return _qore_tss_tstate != nullptr;
 }
 
-// Get the thread state that holds the GIL - use PyGILState_GetThisThreadState for actual state
+// Get the thread state that holds the GIL - use our tracking for consistency with _qore_PyCeval_GetGilLockedStatus()
+// NOTE: In Python 3.12, PyGILState_GetThisThreadState() may return non-null even after PyEval_ReleaseThread(),
+// so we must use our own tracking to stay consistent.
 DLLLOCAL static inline PyThreadState* _qore_PyCeval_GetThreadState() {
-    // Return the actual Python TSS state, not our tracking variable
-    // This ensures we correctly identify the GIL holder even when our tracking isn't set
-    return PyGILState_GetThisThreadState();
+    return _qore_tss_tstate;
 }
 
 // Swap thread state for ceval purposes - use our thread-local tracking
@@ -609,10 +626,14 @@ DLLLOCAL static inline bool _qore_has_thread_state_attached() {
 
 DLLLOCAL static inline void _qore_acquire_thread_state(PyThreadState* tstate) {
     PyEval_AcquireThread(tstate);
+    // Set our thread-local tracking since we acquired the GIL
+    _qore_tss_tstate = tstate;
 }
 
 DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
     PyEval_ReleaseThread(tstate);
+    // Clear our thread-local tracking since we released the GIL
+    _qore_tss_tstate = nullptr;
 }
 
 #endif
