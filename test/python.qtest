@@ -1341,7 +1341,7 @@ def simple_func():
 
         # Print all debug messages until we see step 1
         hash<auto> msg;
-        if (m_options.verbose > 0) {
+        if (m_options.verbose > 2) {
             while (True) {
                 msg = q.get(5s);
                 printf("DEBUG: msg = %y\n", msg);
@@ -1366,7 +1366,7 @@ def simple_func():
         signal_counter.dec();  # signal to continue
 
         # Print all debug messages until we see step 2
-        if (m_options.verbose > 0) {
+        if (m_options.verbose > 2) {
             while (True) {
                 msg = q.get(5s);
                 printf("DEBUG: msg = %y\n", msg);
