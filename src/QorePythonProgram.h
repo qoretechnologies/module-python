@@ -241,6 +241,11 @@ public:
         return valid;
     }
 
+    //! Returns true if the program is being or has been destroyed (does not require GIL)
+    DLLLOCAL bool isDestroyed() const {
+        return destroyed;
+    }
+
     //! Returns the Qore program
     DLLLOCAL QoreProgram* getQoreProgram() const {
         return qpgm;

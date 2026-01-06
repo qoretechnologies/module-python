@@ -168,6 +168,14 @@ DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
     PyEval_ReleaseThread(tstate);
 }
 
+// Check if this might be a Python-created thread that already has the GIL.
+// When using Python internal includes, the GIL detection through
+// _qore_PyCeval_GetGilLockedStatus() works correctly even for Python-created
+// threads, so this function just returns nullptr.
+DLLLOCAL static inline PyThreadState* _qore_check_python_created_thread_gil() {
+    return nullptr;
+}
+
 #else
 #if PY_MAJOR_VERSION >= 3
 #if PY_MINOR_VERSION >= 14
@@ -560,6 +568,15 @@ class QorePythonProgram;
 //! for tracking QorePythonProgram objects when initialized from Python
 DLLLOCAL bool qpy_register(QorePythonProgram* p);
 DLLLOCAL void qpy_deregister(QorePythonProgram* p);
+
+//! Track ALL QorePythonProgram pointers for validity checking in destructors
+DLLLOCAL void qpy_global_register(QorePythonProgram* p);
+DLLLOCAL void qpy_global_deregister(QorePythonProgram* p);
+DLLLOCAL bool qpy_is_valid(QorePythonProgram* p);
+//! Returns the count of destroyed interpreters (for detecting unsafe destructor calls)
+DLLLOCAL int qpy_get_destroyed_count();
+//! Increments the destroyed interpreter count (call when an interpreter is actually destroyed)
+DLLLOCAL void qpy_interpreter_destroyed();
 
 //! if true then this module was initialized by Python
 DLLLOCAL extern bool qore_needs_shutdown;

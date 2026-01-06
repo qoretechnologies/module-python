@@ -147,6 +147,38 @@ typedef std::set<QorePythonProgram*> qpy_pgm_set_t;
 static qpy_pgm_set_t qpy_pgm_set;
 QoreThreadLock qpy_lock;
 
+// Global set to track ALL QorePythonProgram pointers for validity checking
+static qpy_pgm_set_t qpy_global_set;
+static QoreThreadLock qpy_global_lock;
+// Counter for how many sub-interpreters have been destroyed
+// Used to detect when destructor calls might be unsafe
+static std::atomic<int> qpy_destroyed_count{0};
+
+void qpy_global_register(QorePythonProgram* p) {
+    AutoLocker al(qpy_global_lock);
+    qpy_global_set.insert(p);
+}
+
+void qpy_global_deregister(QorePythonProgram* p) {
+    AutoLocker al(qpy_global_lock);
+    qpy_global_set.erase(p);
+    // NOTE: We don't increment destroyed count here - it's incremented when the
+    // interpreter is actually destroyed in qpy_interpreter_destroyed()
+}
+
+void qpy_interpreter_destroyed() {
+    ++qpy_destroyed_count;
+}
+
+bool qpy_is_valid(QorePythonProgram* p) {
+    AutoLocker al(qpy_global_lock);
+    return qpy_global_set.find(p) != qpy_global_set.end();
+}
+
+int qpy_get_destroyed_count() {
+    return qpy_destroyed_count.load();
+}
+
 bool qpy_register(QorePythonProgram* p) {
     if (!qore_needs_shutdown) {
         return false;

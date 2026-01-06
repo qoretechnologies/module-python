@@ -78,6 +78,7 @@ unsigned QorePythonProgram::pgm_count = 0;
 
 QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
     printd(5, "QorePythonProgram::QorePythonProgram() this: %p\n", this);
+    qpy_global_register(this);
     assert(PyGILState_Check());
     PyThreadState* python;
     if (PyGILState_Check()) {
@@ -104,6 +105,7 @@ QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
 
 QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
         : qpgm(qpgm), pyns(pyns), save_object_callback(nullptr) {
+    qpy_global_register(this);
     QorePythonGilHelper qpgh;
 
     ExceptionSink xsink;
@@ -144,6 +146,7 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
 QorePythonProgram::QorePythonProgram(const QoreString& source_code, const QoreString& source_label, int start,
         ExceptionSink* xsink) : save_object_callback(nullptr) {
     printd(5, "QorePythonProgram::QorePythonProgram() this: %p\n", this);
+    qpy_global_register(this);
     TempEncodingHelper src_code(source_code, QCS_UTF8, xsink);
     if (*xsink) {
         xsink->appendLastDescription(" (while processing the \"source_code\" argument)");
@@ -295,6 +298,8 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
         return;
     }
     destroyed = true;
+    // Deregister from global validity tracking FIRST, before anything else
+    qpy_global_deregister(this);
     if (needs_deregistration) {
         qpy_deregister(this);
     }
@@ -381,6 +386,8 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
         // Py_EndInterpreter causes issues with weak references
         PyInterpreterState_Clear(interpreter);
         PyInterpreterState_Delete(interpreter);
+        // Signal that an interpreter has been destroyed - must be AFTER deletion
+        qpy_interpreter_destroyed();
 
         interpreter = nullptr;
         owns_interpreter = false;
@@ -392,10 +399,8 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                 Py_DECREF(i);
             }
 
-            for (auto& i : meth_vec) {
-                delete i;
-            }
-            meth_vec.clear();
+            // NOTE: Do NOT delete meth_vec items here - Python function objects still reference them
+            // They will be deleted after PyInterpreterState_Clear below
 
             module.purge();
             python_code.purge();
@@ -418,9 +423,24 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                 PyInterpreterState_Clear(interpreter);
             }
             PyInterpreterState_Delete(interpreter);
+            // Signal that an interpreter has been destroyed - must be AFTER deletion
+            qpy_interpreter_destroyed();
+
+            // Now it's safe to delete PyMethodDef structures since the interpreter is gone
+            // and Python function objects no longer reference them
+            for (auto& i : meth_vec) {
+                delete i;
+            }
+            meth_vec.clear();
 
             interpreter = nullptr;
             owns_interpreter = false;
+        } else {
+            // If we don't own the interpreter, still need to clean up meth_vec
+            for (auto& i : meth_vec) {
+                delete i;
+            }
+            meth_vec.clear();
         }
 #endif
     }
@@ -777,7 +797,23 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // which properly handle TSS and fast TLS synchronization
     t_state = PyGILState_GetThisThreadState();
 
-    if (_qore_has_gil(t_state)) {
+    bool have_gil = _qore_has_gil(t_state);
+    if (!have_gil) {
+        // Our tracking says we don't have the GIL. This could be:
+        // A) A Qore thread that released the GIL and needs to acquire it
+        // B) A Python-created thread (e.g., threading.Thread) that has the GIL
+        //    but our tracking was never initialized
+        // Check for case B using Python's TSS
+        PyThreadState* python_thread_state = _qore_check_python_created_thread_gil();
+        if (python_thread_state != nullptr) {
+            // This is a Python-created thread with the GIL
+            have_gil = true;
+            t_state = python_thread_state;
+            printd(5, "QorePythonProgram::setContext() detected Python-created thread with GIL, "
+                "tss_state: %p\n", python_thread_state);
+        }
+    }
+    if (have_gil) {
         // Already have the GIL - just swap thread states if needed
         ceval_state = t_state;
         if (t_state != python) {
@@ -800,6 +836,18 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // can be stale in Python 3.12 after PyEval_ReleaseThread(). Instead, check our own
     // tracking to determine if we have the GIL.
     bool have_gil = _qore_PyCeval_GetGilLockedStatus();
+    if (!have_gil) {
+        // Our tracking says we don't have the GIL. This could be:
+        // A) A Qore thread that released the GIL and needs to acquire it
+        // B) A Python-created thread (e.g., threading.Thread) that has the GIL
+        //    but our tracking was never initialized
+        // Check for case B using Python's TSS
+        PyThreadState* python_thread_state = _qore_check_python_created_thread_gil();
+        if (python_thread_state != nullptr) {
+            // This is a Python-created thread with the GIL
+            have_gil = true;
+        }
+    }
     if (have_gil) {
         // We already have the GIL - swap thread states
         ceval_state = _qore_PyCeval_SwapThreadState(python);
@@ -2706,10 +2754,38 @@ void QorePythonProgram::execPythonDestructor(const QorePythonClass& thisclass, P
     }
     QorePythonProgram* pypgm = thisclass.getPythonProgram();
 
-    QorePythonHelper qph(pypgm);
+    // Check if the Python program pointer is still valid - it may have been destroyed
+    // during program cleanup, leaving a dangling pointer in the QorePythonClass
+    if (!qpy_is_valid(pypgm)) {
+        return;
+    }
 
-    // FIXME: cannot delete objects after the python program has been destroyed
-    if (pypgm->valid) {
+    // Check the destroyed flag (safe now that we know pypgm is a valid pointer)
+    // The destroyed flag is set at the very start of deleteIntern(), before any cleanup
+    if (pypgm->isDestroyed()) {
+        return;
+    }
+
+    // Also check the valid flag for good measure
+    if (!pypgm->isValid()) {
+        return;
+    }
+
+    // Check if any sub-interpreters have been destroyed
+    // When sub-interpreters are destroyed in Python 3.12, the GIL state can become
+    // corrupted, making it unsafe to acquire the GIL for the main interpreter.
+    // Skip the destructor in this case - the Python object will be cleaned up
+    // when the interpreter is eventually destroyed anyway.
+    if (qpy_get_destroyed_count() > 0) {
+        return;
+    }
+
+    QorePythonHelper qph(pypgm);
+    if (!qph.isValid()) {
+        return;
+    }
+
+    if (pypgm->isValid()) {
         pd->deref(xsink);
     }
 }
