@@ -575,6 +575,17 @@ typedef enum _Py_memory_order {
 // has ever been initialized for this thread (_qore_tss_initialized). If a thread
 // has never been initialized but Python's TSS shows it has a thread state and the
 // GIL, we know it's a Python-created thread that already has the GIL.
+//
+// Additional Complexity - PyThreadState_New() Behavior:
+// In Python 3.12, PyThreadState_New() automatically binds the new thread state to
+// the current thread via TSS (see Python/pystate.c bind_tstate/bind_gilstate_tstate).
+// This means that after calling PyThreadState_New() from a new Qore thread:
+// - PyGILState_GetThisThreadState() will return the new thread state
+// - PyGILState_Check() will return 1 (true)
+// Even though we haven't acquired the GIL yet! This could cause
+// _qore_check_python_created_thread_gil() to incorrectly detect a new Qore thread
+// as a Python-created thread. To fix this, setContext() marks _qore_tss_initialized=true
+// immediately after PyThreadState_New() to prevent this false detection.
 
 // Thread-local state to track current thread state for GIL ownership
 // Using inline thread_local ensures a single instance shared across all compilation units (C++17)
@@ -612,26 +623,73 @@ DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
 // Check if this might be a Python-created thread that already has the GIL.
 // This handles the case where a Python threading.Thread calls back into Qore.
 // Returns the thread state if this is a Python-created thread with the GIL, nullptr otherwise.
+//
+// IMPORTANT - Python 3.12 TSS Reliability Issues:
+// In Python 3.12, PyGILState_Check() and PyGILState_GetThisThreadState() are unreliable:
+// 1. After PyEval_ReleaseThread(), they still return values suggesting GIL ownership
+// 2. After PyThreadState_New() in a new thread, they return the new thread state
+//    even though the GIL hasn't been acquired yet
+//
+// To correctly detect Python-created threads, we:
+// 1. Check if _qore_tss_initialized is true - if so, this is a Qore-managed thread
+//    (either currently holding GIL or previously held it), not a Python-created thread
+// 2. If not initialized, check if the TSS thread state is in any interpreter's thread list
+//    - For Python-created threads: it will be a valid thread state in the list
+//    - For new Qore threads after PyThreadState_New(): the newly created state is also
+//      in the list, BUT setContext() sets _qore_tss_initialized=true BEFORE we get here,
+//      so we'll return nullptr (handled by case 1)
+// 3. If the TSS state is in the list and we're not initialized, it's a Python-created thread
 DLLLOCAL static inline PyThreadState* _qore_check_python_created_thread_gil() {
     // If our tracking is already initialized, this is a Qore-managed thread
     if (_qore_tss_initialized) {
         printd(5, "_qore_check_python_created_thread_gil() already initialized, returning nullptr\n");
         return nullptr;
     }
+
     // Check if Python thinks this thread has the GIL
-    // For Python-created threads, the TSS will be set correctly by Python
     PyThreadState* tss_state = PyGILState_GetThisThreadState();
     int gil_check = PyGILState_Check();
     printd(5, "_qore_check_python_created_thread_gil() tss_state: %p gil_check: %d initialized: %d\n",
         tss_state, gil_check, (int)_qore_tss_initialized);
+
     if (tss_state != nullptr && gil_check) {
-        // This is a Python-created thread that has the GIL
-        // Initialize our tracking with Python's state
+        // Both PyGILState_GetThisThreadState() and PyGILState_Check() indicate we have the GIL.
+        // This could be:
+        // A) A Python-created thread (e.g., threading.Thread) that truly has the GIL
+        // B) A brand new Qore thread with stale/garbage TSS values
+        //
+        // To distinguish: verify that tss_state is in the interpreter's thread state list.
+        // This is safe because PyInterpreterState_Head() and PyInterpreterState_ThreadHead()
+        // are public APIs that don't require accessing opaque internal structures.
+        bool found = false;
+        PyInterpreterState* interp = PyInterpreterState_Head();
+        while (interp != nullptr && !found) {
+            PyThreadState* ts = PyInterpreterState_ThreadHead(interp);
+            while (ts != nullptr) {
+                if (ts == tss_state) {
+                    found = true;
+                    break;
+                }
+                ts = PyThreadState_Next(ts);
+            }
+            interp = PyInterpreterState_Next(interp);
+        }
+
+        if (!found) {
+            // The tss_state is not in any interpreter's thread list - it's stale/garbage
+            printd(5, "_qore_check_python_created_thread_gil() tss_state %p not found in thread lists, "
+                "returning nullptr\n", tss_state);
+            return nullptr;
+        }
+
+        // tss_state is a valid thread state - this is a Python-created thread with the GIL
         _qore_tss_tstate = tss_state;
         _qore_tss_initialized = true;
-        printd(5, "_qore_check_python_created_thread_gil() detected Python-created thread, tss_state: %p\n", tss_state);
+        printd(5, "_qore_check_python_created_thread_gil() detected Python-created thread, tss_state: %p\n",
+            tss_state);
         return tss_state;
     }
+
     printd(5, "_qore_check_python_created_thread_gil() not a Python-created thread with GIL\n");
     return nullptr;
 }

@@ -715,14 +715,78 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 
     assert(interpreter);
     PyThreadState* python = getAcquireThreadState();
+    printd(5, "QorePythonProgram::setContext() ENTRY this: %p owns_interpreter: %d python: %p "
+        "_qore_tss_tstate: %p tid: %d\n", this, owns_interpreter, python, _qore_PyCeval_GetThreadState(),
+        q_gettid());
+
+    // Flag to track if this is a Python-created thread (threading.Thread calling back into Qore)
+    bool is_python_created_thread = false;
+
     // create new thread state if necessary
     if (!python) {
-        python = PyThreadState_New(interpreter);
+        // IMPORTANT - Python-Created Thread Detection (Python 3.12+)
+        // Before creating a new thread state, we must check if this is a Python-created thread
+        // (e.g., a threading.Thread) that already has a thread state and holds the GIL.
+        //
+        // For Python-created threads:
+        // - Python already created a thread state when the thread was spawned
+        // - The thread already has the GIL (from Python's thread startup)
+        // - We should USE that existing thread state, not create a new one
+        //
+        // For Qore-created threads (background threads calling into Python):
+        // - No thread state exists yet
+        // - We need to create one with PyThreadState_New()
+        // - Then acquire the GIL with PyEval_RestoreThread()
+        //
+        // The _qore_check_python_created_thread_gil() function checks Python's TSS to detect
+        // Python-created threads. We MUST call it BEFORE PyThreadState_New() because in Python 3.12,
+        // PyThreadState_New() modifies TSS (see bind_tstate/bind_gilstate_tstate in pystate.c),
+        // which would corrupt our detection.
+#if PY_VERSION_HEX >= 0x030C0000 && !defined(QORE_PYTHON_INCLUDE_INTERNALS)
+        PyThreadState* python_thread_state = _qore_check_python_created_thread_gil();
+        if (python_thread_state != nullptr) {
+            // This is a Python-created thread - use the existing thread state
+            // The thread already has the GIL, so we don't need to acquire it
+            python = python_thread_state;
+            is_python_created_thread = true;
+            printd(5, "QorePythonProgram::setContext() detected Python-created thread, using existing "
+                "thread state: %p\n", python);
+        }
+#endif
 
-        printd(5, "QorePythonProgram::setContext() this: %p created new thread context: %p (py_thr_map: %p "
-            "size: %d)\n", this, python, &py_thr_map, (int)py_thr_map.size());
-        assert(python);
-        _QORE_GILSTATE_COUNTER_ASSERT_ONE(python);
+        if (!python) {
+            // This is a Qore-created thread - create a new thread state
+            printd(5, "QorePythonProgram::setContext() creating new thread state for interpreter: %p\n",
+                interpreter);
+            python = PyThreadState_New(interpreter);
+
+            printd(5, "QorePythonProgram::setContext() this: %p created new thread context: %p (py_thr_map: %p "
+                "size: %d)\n", this, python, &py_thr_map, (int)py_thr_map.size());
+            assert(python);
+            _QORE_GILSTATE_COUNTER_ASSERT_ONE(python);
+
+            // IMPORTANT - Python 3.12 PyThreadState_New() Behavior Change:
+            // In Python 3.12, PyThreadState_New() automatically binds the newly created thread state
+            // to the current thread via TSS (see Python/pystate.c bind_tstate/bind_gilstate_tstate).
+            // This is different from older Python versions where PyThreadState_New() did not modify TSS.
+            //
+            // After PyThreadState_New() returns:
+            // - PyGILState_GetThisThreadState() returns the new thread state
+            // - PyGILState_Check() returns 1 (true)
+            // Even though we HAVEN'T ACQUIRED THE GIL yet!
+            //
+            // The fix: immediately mark our tracking as initialized (_qore_tss_initialized = true)
+            // but WITHOUT setting _qore_tss_tstate. This tells _qore_check_python_created_thread_gil()
+            // that this is a Qore-managed thread (not Python-created) that doesn't have the GIL yet.
+            // The GIL will be properly acquired later via PyEval_RestoreThread().
+#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000 && !defined(QORE_PYTHON_INCLUDE_INTERNALS)
+            _qore_tss_initialized = true;
+            // Keep _qore_tss_tstate = nullptr to indicate we don't have the GIL
+            printd(5, "QorePythonProgram::setContext() Python 3.12: marked _qore_tss_initialized=true "
+                "after PyThreadState_New() to prevent false Python-created thread detection\n");
+#endif
+        }
+
         // the thread state will be deleted when the thread terminates or the interpreter is deleted
         int tid = q_gettid();
         AutoLocker al(py_thr_lck);
@@ -797,22 +861,11 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // which properly handle TSS and fast TLS synchronization
     t_state = PyGILState_GetThisThreadState();
 
-    bool have_gil = _qore_has_gil(t_state);
-    if (!have_gil) {
-        // Our tracking says we don't have the GIL. This could be:
-        // A) A Qore thread that released the GIL and needs to acquire it
-        // B) A Python-created thread (e.g., threading.Thread) that has the GIL
-        //    but our tracking was never initialized
-        // Check for case B using Python's TSS
-        PyThreadState* python_thread_state = _qore_check_python_created_thread_gil();
-        if (python_thread_state != nullptr) {
-            // This is a Python-created thread with the GIL
-            have_gil = true;
-            t_state = python_thread_state;
-            printd(5, "QorePythonProgram::setContext() detected Python-created thread with GIL, "
-                "tss_state: %p\n", python_thread_state);
-        }
-    }
+    // IMPORTANT: If is_python_created_thread is true (set earlier when we detected a Python-created
+    // thread like threading.Thread), we already have the GIL and should not try to acquire it.
+    bool have_gil = is_python_created_thread || _qore_has_gil(t_state);
+    printd(5, "QorePythonProgram::setContext() Python 3.13+ is_python_created_thread: %d have_gil: %d "
+        "t_state: %p tid: %d\n", is_python_created_thread, have_gil, t_state, q_gettid());
     if (have_gil) {
         // Already have the GIL - just swap thread states if needed
         ceval_state = t_state;
@@ -835,19 +888,14 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // NOTE: Don't use _qore_has_gil(tss_state) here because tss_state (from Python's TSS)
     // can be stale in Python 3.12 after PyEval_ReleaseThread(). Instead, check our own
     // tracking to determine if we have the GIL.
-    bool have_gil = _qore_PyCeval_GetGilLockedStatus();
-    if (!have_gil) {
-        // Our tracking says we don't have the GIL. This could be:
-        // A) A Qore thread that released the GIL and needs to acquire it
-        // B) A Python-created thread (e.g., threading.Thread) that has the GIL
-        //    but our tracking was never initialized
-        // Check for case B using Python's TSS
-        PyThreadState* python_thread_state = _qore_check_python_created_thread_gil();
-        if (python_thread_state != nullptr) {
-            // This is a Python-created thread with the GIL
-            have_gil = true;
-        }
-    }
+    //
+    // IMPORTANT: If is_python_created_thread is true (set earlier when we detected a Python-created
+    // thread like threading.Thread), we already have the GIL and should not try to acquire it.
+    bool have_gil = is_python_created_thread || _qore_PyCeval_GetGilLockedStatus();
+    printd(5, "QorePythonProgram::setContext() Python 3.12 is_python_created_thread: %d have_gil: %d "
+        "_qore_tss_tstate: %p _qore_tss_initialized: %d tid: %d\n", is_python_created_thread, have_gil,
+        _qore_PyCeval_GetThreadState(), _qore_tss_initialized, q_gettid());
+    printd(5, "QorePythonProgram::setContext() final have_gil: %d\n", have_gil);
     if (have_gil) {
         // We already have the GIL - swap thread states
         ceval_state = _qore_PyCeval_SwapThreadState(python);
@@ -1122,6 +1170,71 @@ void QorePythonProgram::raisePythonException(ExceptionSink& xsink) {
     QoreValue err(xsink.getExceptionErr());
     QoreValue desc(xsink.getExceptionDesc());
     QoreValue arg(xsink.getExceptionArg());
+
+    printd(5, "QorePythonProgram::raisePythonException() this: %p owns_interpreter: %d err: %s\n",
+        this, owns_interpreter,
+        err.getType() == NT_STRING ? err.get<const QoreStringNode>()->c_str() : "N/A");
+
+    // In sub-interpreters (owns_interpreter == true), we cannot use PythonQoreException_Type
+    // because it's a custom type initialized in the main interpreter. Using it in a sub-interpreter
+    // causes crashes in Python 3.12+ when the exception handling machinery tries to access
+    // type-specific data structures that aren't properly set up for the sub-interpreter.
+    //
+    // IMPORTANT: In Python 3.12+, each interpreter has its own builtin types. Using the global
+    // PyExc_RuntimeError (which is the main interpreter's type) in a sub-interpreter can cause
+    // crashes when Python's internal machinery tries to process the exception.
+    // We must get the RuntimeError type from the current interpreter's builtins.
+    if (owns_interpreter) {
+        // Convert values to Python objects for the exception args
+        // This matches the PythonQoreException behavior where args[0] is err, args[1] is desc, etc.
+        ExceptionSink xsink2;
+        QorePythonReferenceHolder py_err(getPythonValue(err, &xsink2));
+        QorePythonReferenceHolder py_desc(getPythonValue(desc, &xsink2));
+        xsink.clear();
+
+        // Create args tuple: (err, desc) or (err, desc, arg)
+        QorePythonReferenceHolder tuple(PyTuple_New(arg ? 3 : 2));
+        if (py_err) {
+            PyTuple_SET_ITEM(*tuple, 0, py_err.release());
+        } else {
+            Py_INCREF(Py_None);
+            PyTuple_SET_ITEM(*tuple, 0, Py_None);
+        }
+        if (py_desc) {
+            PyTuple_SET_ITEM(*tuple, 1, py_desc.release());
+        } else {
+            Py_INCREF(Py_None);
+            PyTuple_SET_ITEM(*tuple, 1, Py_None);
+        }
+        if (arg) {
+            QorePythonReferenceHolder py_arg(getPythonValue(arg, &xsink2));
+            if (py_arg) {
+                PyTuple_SET_ITEM(*tuple, 2, py_arg.release());
+            } else {
+                Py_INCREF(Py_None);
+                PyTuple_SET_ITEM(*tuple, 2, Py_None);
+            }
+        }
+
+        // Get RuntimeError from the current interpreter's builtins
+        PyObject* builtins = PyEval_GetBuiltins();
+        if (builtins) {
+            PyObject* runtime_error = PyDict_GetItemString(builtins, "RuntimeError");
+            if (runtime_error && PyType_Check(runtime_error)) {
+                // Create the exception with args tuple
+                QorePythonReferenceHolder exc(PyObject_Call(runtime_error, *tuple, nullptr));
+                if (exc) {
+                    PyErr_SetObject(runtime_error, *exc);
+                    return;
+                }
+            }
+        }
+
+        // Fallback - use error string as message
+        QoreStringValueHelper err_str(err);
+        PyErr_SetString(PyExc_RuntimeError, err_str->c_str());
+        return;
+    }
 
     ExceptionSink xsink2;
     QorePythonReferenceHolder tuple(PyTuple_New(arg ? 3 : 2));
@@ -2280,44 +2393,100 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
         use_loc = false;
     }
 
-    // check if it's a QoreException
+    // check if it's a QoreException (either PythonQoreException or RuntimeError with our tuple format)
+    bool is_qore_exception = false;
     if (*ex_type == (PyObject*)&PythonQoreException_Type) {
-        assert(PyObject_HasAttrString(*ex_value, "err"));
-        QorePythonReferenceHolder pyval(PyObject_GetAttrString(*ex_value, "err"));
-        ValueHolder err(getQoreValue(xsink, *pyval), xsink);
-        assert(err->getType() == NT_STRING);
-        if (!*xsink) {
-            ValueHolder desc(xsink);
-            if (PyObject_HasAttrString(*ex_value, "desc")) {
-                pyval = PyObject_GetAttrString(*ex_value, "desc");
-                desc = getQoreValue(xsink, *pyval);
-            }
-            if (!*xsink) {
-                assert(!desc || desc->getType() == NT_STRING);
-                ValueHolder arg(xsink);
-                if (PyObject_HasAttrString(*ex_value, "arg")) {
-                    pyval = PyObject_GetAttrString(*ex_value, "arg");
-                    arg = getQoreValue(xsink, *pyval);
-                }
-                if (!*xsink) {
-                    QoreStringValueHelper errstr(*err);
-                    QoreStringNodeValueHelper descstr(*desc);
-                    if (use_loc) {
-                        xsink->raiseExceptionArg(loc.get(), errstr->c_str(), arg->refSelf(),
-                            descstr.getReferencedValue(), callstack);
-                    } else {
-                        xsink->raiseExceptionArg(errstr->c_str(), arg->refSelf(), descstr.getReferencedValue(),
-                            callstack);
-                    }
-                    return -1;
+        is_qore_exception = true;
+    } else if (PyExceptionInstance_Check(*ex_value) && PyErr_GivenExceptionMatches(*ex_type, PyExc_RuntimeError)) {
+        // Check if it's a RuntimeError with our tuple format (err, desc[, arg])
+        // This is used for exceptions from sub-interpreters.
+        // NOTE: Only check RuntimeError specifically, not all exceptions, because other exceptions
+        // like SyntaxError also have 2 args but in a different format.
+        //
+        // Qore exception format: (err, desc[, arg]) where:
+        //   - err: can be int or string (error code like 1 or "ERROR-NAME")
+        //   - desc: can be None or string (description)
+        //   - arg: optional, any type
+        //
+        // SyntaxError format: ('invalid syntax', ('<string>', 1, 14, ...))
+        //   - Second arg is a tuple (location info), not None or string
+        //
+        // So we validate that the second element is NOT a tuple to distinguish from SyntaxError.
+        QorePythonReferenceHolder args(PyObject_GetAttrString(*ex_value, "args"));
+        if (args && PyTuple_Check(*args)) {
+            Py_ssize_t size = PyTuple_Size(*args);
+            if (size >= 2 && size <= 3) {
+                // Validate: second element should be None or string, not a tuple
+                PyObject* py_desc = PyTuple_GetItem(*args, 1);  // borrowed ref
+                if (!PyTuple_Check(py_desc)) {
+                    // Looks like our tuple format - treat as a Qore exception
+                    is_qore_exception = true;
                 }
             }
         }
     }
 
+    if (is_qore_exception) {
+        QorePythonReferenceHolder pyval;
+        ValueHolder err(xsink);
+        ValueHolder desc(xsink);
+        ValueHolder arg(xsink);
+
+        if (*ex_type == (PyObject*)&PythonQoreException_Type) {
+            // PythonQoreException has err, desc, arg attributes
+            assert(PyObject_HasAttrString(*ex_value, "err"));
+            pyval = PyObject_GetAttrString(*ex_value, "err");
+            err = getQoreValue(xsink, *pyval);
+            if (!*xsink && PyObject_HasAttrString(*ex_value, "desc")) {
+                pyval = PyObject_GetAttrString(*ex_value, "desc");
+                desc = getQoreValue(xsink, *pyval);
+            }
+            if (!*xsink && PyObject_HasAttrString(*ex_value, "arg")) {
+                pyval = PyObject_GetAttrString(*ex_value, "arg");
+                arg = getQoreValue(xsink, *pyval);
+            }
+        } else {
+            // RuntimeError with tuple args: (err, desc[, arg])
+            QorePythonReferenceHolder args(PyObject_GetAttrString(*ex_value, "args"));
+            if (args && PyTuple_Check(*args)) {
+                Py_ssize_t size = PyTuple_Size(*args);
+                if (size >= 1) {
+                    PyObject* py_err = PyTuple_GetItem(*args, 0);  // borrowed ref
+                    err = getQoreValue(xsink, py_err);
+                }
+                if (!*xsink && size >= 2) {
+                    PyObject* py_desc = PyTuple_GetItem(*args, 1);  // borrowed ref
+                    desc = getQoreValue(xsink, py_desc);
+                }
+                if (!*xsink && size >= 3) {
+                    PyObject* py_arg = PyTuple_GetItem(*args, 2);  // borrowed ref
+                    arg = getQoreValue(xsink, py_arg);
+                }
+            }
+        }
+
+        if (!*xsink) {
+            QoreStringValueHelper errstr(*err);
+            QoreStringNodeValueHelper descstr(*desc);
+            if (use_loc) {
+                xsink->raiseExceptionArg(loc.get(), errstr->c_str(), arg->refSelf(),
+                    descstr.getReferencedValue(), callstack);
+            } else {
+                xsink->raiseExceptionArg(errstr->c_str(), arg->refSelf(), descstr.getReferencedValue(),
+                    callstack);
+            }
+            return -1;
+        }
+    }
+
     if (!*xsink) {
         // get full exception class name
-        PyTypeObject* py_cls = Py_TYPE(*ex_value);
+        // NOTE: Use ex_type directly instead of Py_TYPE(*ex_value) because after PyErr_NormalizeException,
+        // ex_value might still be the exception class itself (not an instance) in some cases like SyntaxError.
+        // In such cases, Py_TYPE(*ex_value) returns 'type' (the metaclass), not the actual exception class.
+        PyTypeObject* py_cls = PyExceptionInstance_Check(*ex_value)
+            ? Py_TYPE(*ex_value)
+            : reinterpret_cast<PyTypeObject*>(*ex_type);
         QoreString ex_name(py_cls->tp_name);
         if (PyObject_HasAttrString(reinterpret_cast<PyObject*>(py_cls), "__module__")) {
             QorePythonReferenceHolder ex_mod(PyObject_GetAttrString(reinterpret_cast<PyObject*>(py_cls),
