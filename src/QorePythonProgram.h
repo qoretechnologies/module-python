@@ -232,7 +232,13 @@ public:
                 "deleted");
             return -1;
         }
+#if PY_VERSION_HEX >= 0x030D0000
+        // Python 3.13+: PyGILState_Check() relies on Python's TSS which can be corrupted by
+        // external modules like JNI. Use our thread-local tracking which is always reliable.
+        assert(_qore_PyCeval_GetGilLockedStatus());
+#else
         assert(PyGILState_Check());
+#endif
         return 0;
     }
 
@@ -344,7 +350,11 @@ public:
     DLLLOCAL static DateTimeNode* getQoreDateTimeFromDelta(PyObject* val);
 
     //! Returns a Qore absolute date time value from a Python DateTime object
-    DLLLOCAL static DateTimeNode* getQoreDateTimeFromDateTime(PyObject* val);
+    /** @param xsink exception sink for error reporting (can be nullptr to ignore timezone errors)
+        @param val the Python datetime object
+        @return the Qore DateTimeNode or nullptr on error (if xsink is set)
+    */
+    DLLLOCAL static DateTimeNode* getQoreDateTimeFromDateTime(ExceptionSink* xsink, PyObject* val);
 
     //! Returns a Qore absolute date time value from a Python Date object
     DLLLOCAL static DateTimeNode* getQoreDateTimeFromDate(PyObject* val);

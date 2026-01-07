@@ -688,8 +688,13 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     // NOTE: In Python 3.12+, PyGILState_GetThisThreadState() can be unreliable because
     // PyEval_ReleaseThread() doesn't clear the autoTSSkey. Our tracking is authoritative.
     assert(PyGILState_GetThisThreadState() == new_thread_state);
-#endif
     assert(PyGILState_Check());
+#else
+    // Python 3.12+: PyGILState_Check() and PyGILState_GetThisThreadState() rely on Python's
+    // internal TSS (autoTSSkey) which can be stale after PyEval_ReleaseThread() or corrupted
+    // by external modules like JNI. Our thread-local tracking (_qore_tss_tstate) is reliable.
+    assert(_qore_PyCeval_GetGilLockedStatus());
+#endif
 #endif
 }
 

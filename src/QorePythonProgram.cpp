@@ -79,9 +79,20 @@ unsigned QorePythonProgram::pgm_count = 0;
 QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
     printd(5, "QorePythonProgram::QorePythonProgram() this: %p\n", this);
     qpy_global_register(this);
+#if PY_VERSION_HEX >= 0x030D0000
+    // Python 3.13+: PyGILState_Check() and PyGILState_GetThisThreadState() check Python's
+    // Thread Specific Storage (TSS/autoTSSkey). When external modules like JNI are loaded,
+    // they can clear or corrupt Python's TSS without affecting actual GIL ownership.
+    // Use our own tracking exclusively - it's maintained independently and remains reliable.
+    assert(_qore_PyCeval_GetGilLockedStatus());
+    PyThreadState* python = _qore_PyRuntimeGILState_GetThreadState();
+    assert(python);
+    interpreter = python->interp;
+#else
     assert(PyGILState_Check());
+    bool have_gil = PyGILState_Check();
     PyThreadState* python;
-    if (PyGILState_Check()) {
+    if (have_gil) {
         assert(_qore_PyRuntimeGILState_GetThreadState() == PyGILState_GetThisThreadState());
         python = PyGILState_GetThisThreadState();
         interpreter = python->interp;
@@ -89,6 +100,7 @@ QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
         python = nullptr;
         interpreter = _PyGILState_GetInterpreterStateUnsafe();
     }
+#endif
     owns_interpreter = false;
 
     createQoreProgram();
@@ -567,7 +579,13 @@ bool QorePythonProgram::haveGilUnlocked(PyThreadState* check_tstate) {
 
 int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSink* xsink) {
 #ifndef Py_GIL_DISABLED
+#if PY_VERSION_HEX >= 0x030D0000
+    // Python 3.13+: Use our own tracking since Python's TSS can be cleared by external modules
+    // (like JNI) without affecting our actual GIL ownership. PyGILState_Check() is unreliable.
+    assert(_qore_PyCeval_GetGilLockedStatus());
+#else
     assert(PyGILState_Check());
+#endif
 #endif
     PyThreadState* python;
     {
@@ -924,13 +942,20 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 #endif
 
 #ifndef Py_GIL_DISABLED
-    // now we have the GIL
+    // Now we have the GIL - verify our state is consistent
+#if PY_VERSION_HEX >= 0x030D0000
+    // Python 3.13+: PyGILState_Check() and PyGILState_GetThisThreadState() rely on Python's
+    // internal TSS (autoTSSkey) which can become stale or cleared when external modules like
+    // JNI interact with Python. Our thread-local tracking (_qore_tss_tstate) is authoritative.
+    assert(_qore_PyCeval_GetGilLockedStatus());
+#else
     assert(PyGILState_Check());
+    // TSS state assertions - only reliable in Python < 3.13
+    assert(PyGILState_GetThisThreadState() == python);
+#endif
     assert(haveGilUnlocked(python));
     assert(_qore_PyCeval_GetThreadState() == python);
     assert(_qore_PyRuntimeGILState_GetThreadState() == python);
-    // TSS state
-    assert(PyGILState_GetThisThreadState() == python);
 #endif
 
     //printd(5, "QorePythonProgram::setContext() old thread context: %p\n", t_state);
@@ -1760,29 +1785,86 @@ DateTimeNode* QorePythonProgram::getQoreDateTimeFromDelta(PyObject* val) {
         PyDateTime_DELTA_GET_MICROSECONDS(val));
 }
 
-DateTimeNode* QorePythonProgram::getQoreDateTimeFromDateTime(PyObject* val) {
+DateTimeNode* QorePythonProgram::getQoreDateTimeFromDateTime(ExceptionSink* xsink, PyObject* val) {
     assert(PyDateTime_Check(val));
 
     const AbstractQoreZoneInfo* zone = nullptr;
+
+#if PY_VERSION_HEX >= 0x030A0000
+    // Python 3.10+: Use PyDateTime_DATE_GET_TZINFO() macro to directly access the tzinfo field.
+    //
+    // CRITICAL: In Python 3.13+ with sub-interpreters, PyObject_HasAttrString() can SIGSEGV because:
+    // 1. PyDateTimeAPI is a per-interpreter global pointer initialized by PyDateTime_IMPORT
+    // 2. When JNI or other external modules are loaded, they may initialize their own Python
+    //    sub-interpreter context, leaving our PyDateTimeAPI pointing to stale type objects
+    // 3. PyObject_HasAttrString() internally does type lookups using the stale PyDateTimeAPI
+    // 4. This causes segfaults when accessing freed memory
+    //
+    // The PyDateTime_DATE_GET_TZINFO() macro directly accesses the datetime struct's tzinfo
+    // field without using PyDateTimeAPI, making it safe across interpreter boundaries.
+    PyObject* tzinfo = PyDateTime_DATE_GET_TZINFO(val);
+    if (tzinfo && tzinfo != Py_None && PyTZInfo_Check(tzinfo)) {
+        // Get UTC offset using PyObject_CallMethod which is safer than attribute access
+        QorePythonReferenceHolder delta(PyObject_CallMethod(tzinfo, "utcoffset", "O", val));
+        if (!delta) {
+            // utcoffset() raised an exception - propagate to caller if xsink provided
+            if (xsink) {
+                // Fetch and format the Python exception
+                QorePythonReferenceHolder ex_type, ex_value, traceback;
+                PyErr_Fetch(ex_type.getRef(), ex_value.getRef(), traceback.getRef());
+                QoreStringNode* desc = new QoreStringNode("tzinfo.utcoffset() failed");
+                if (ex_value) {
+                    QorePythonReferenceHolder str(PyObject_Str(*ex_value));
+                    if (str) {
+                        desc->concat(": ");
+                        desc->concat(PyUnicode_AsUTF8(*str));
+                    }
+                }
+                xsink->raiseException("PYTHON-DATETIME-ERROR", desc);
+                return nullptr;
+            }
+            // No xsink provided - clear exception and proceed without timezone
+            PyErr_Clear();
+        } else if (*delta != Py_None && PyDelta_Check(*delta)) {
+            zone = findCreateOffsetZone(PyDateTime_DELTA_GET_SECONDS(*delta));
+        }
+    }
+#else
+    // Python 3.7-3.9: Use attribute-based access (PyDateTime_DATE_GET_TZINFO not available)
     if (PyObject_HasAttrString(val, "tzinfo")) {
-        // get UTC offset for time
         QorePythonReferenceHolder tzinfo(PyObject_GetAttrString(val, "tzinfo"));
         if (tzinfo && PyTZInfo_Check(*tzinfo)) {
-            assert(PyObject_HasAttrString(*tzinfo, "utcoffset"));
             QorePythonReferenceHolder utcoffset_func(PyObject_GetAttrString(*tzinfo, "utcoffset"));
-            assert(PyCallable_Check(*utcoffset_func));
-            QorePythonReferenceHolder args(PyTuple_New(1));
-            Py_INCREF(val);
-            PyTuple_SET_ITEM(*args, 0, val);
-
-            QorePythonReferenceHolder delta(PyEval_CallObject(*utcoffset_func, *args));
-            if (delta && PyDelta_Check(*delta)) {
-                zone = findCreateOffsetZone(PyDateTime_DELTA_GET_SECONDS(*delta));
-                //printd(5, "TZ RV: %p '%s' utcoffset: %d (%p)\n", *delta, Py_TYPE(*delta)->tp_name,
-                //  PyDateTime_DELTA_GET_SECONDS(*delta), zone);
+            if (utcoffset_func && PyCallable_Check(*utcoffset_func)) {
+                QorePythonReferenceHolder args(PyTuple_New(1));
+                Py_INCREF(val);
+                PyTuple_SET_ITEM(*args, 0, val);
+                QorePythonReferenceHolder delta(PyEval_CallObject(*utcoffset_func, *args));
+                if (!delta) {
+                    // utcoffset() raised an exception - propagate to caller if xsink provided
+                    if (xsink) {
+                        QorePythonReferenceHolder ex_type, ex_value, traceback;
+                        PyErr_Fetch(ex_type.getRef(), ex_value.getRef(), traceback.getRef());
+                        QoreStringNode* desc = new QoreStringNode("tzinfo.utcoffset() failed");
+                        if (ex_value) {
+                            QorePythonReferenceHolder str(PyObject_Str(*ex_value));
+                            if (str) {
+                                desc->concat(": ");
+                                desc->concat(PyUnicode_AsUTF8(*str));
+                            }
+                        }
+                        xsink->raiseException("PYTHON-DATETIME-ERROR", desc);
+                        return nullptr;
+                    }
+                    PyErr_Clear();
+                } else if (PyDelta_Check(*delta)) {
+                    zone = findCreateOffsetZone(PyDateTime_DELTA_GET_SECONDS(*delta));
+                }
             }
         }
     }
+#endif
+
     return DateTimeNode::makeAbsolute(zone ? zone : currentTZ(), PyDateTime_GET_YEAR(val), PyDateTime_GET_MONTH(val),
         PyDateTime_GET_DAY(val), PyDateTime_DATE_GET_HOUR(val), PyDateTime_DATE_GET_MINUTE(val),
         PyDateTime_DATE_GET_SECOND(val), PyDateTime_DATE_GET_MICROSECOND(val));
@@ -1901,7 +1983,7 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
     }
 
     if (type == PyDateTimeAPI->DateTimeType) {
-        return getQoreDateTimeFromDateTime(val);
+        return getQoreDateTimeFromDateTime(xsink, val);
     }
 
     if (type == PyDateTimeAPI->DeltaType) {
