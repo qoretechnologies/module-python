@@ -923,6 +923,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         // Use PyEval_AcquireThread which properly handles stale TSS values
         PyEval_AcquireThread(python);
         g_state = PyGILState_UNLOCKED;
+        _qore_gil_held = true;  // Track that we now hold the GIL
     }
 
     // Update our tracking
@@ -956,6 +957,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         PyEval_RestoreThread(python);
         // Set our tracking now that we have the GIL
         _qore_PyGILState_SetThisThreadState(python);
+        _qore_gil_held = true;  // Track that we now hold the GIL
         g_state = PyGILState_UNLOCKED;
     }
 
@@ -1089,6 +1091,7 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
         // Use PyEval_ReleaseThread which properly clears both TSS and fast TLS
         PyEval_ReleaseThread(python);
         _qore_PyGILState_SetThisThreadState(nullptr);
+        _qore_gil_held = false;  // Track that we no longer hold the GIL
     } else {
         // We already had the GIL - swap back to original thread state if needed
         if (oldstate.ceval_state != python && oldstate.ceval_state != nullptr) {

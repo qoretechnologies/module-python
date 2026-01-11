@@ -248,6 +248,11 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
 #endif
     }
 
+    if (!repeat) {
+        python_u_tld_key = q_get_unique_thread_local_data_key();
+        python_qobj_key = q_get_unique_thread_local_data_key();
+    }
+
     // initialize python library; do not register signal handlers
     if (!Py_IsInitialized()) {
         if (PyImport_AppendInittab("qoreloader", PyInit_qoreloader) == -1) {
@@ -266,6 +271,7 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     }
 
     if (!repeat) {
+
 #ifndef _Q_WINDOWS
         sig_vec_t new_sig_vec;
         for (int sig : sig_vec) {
@@ -288,9 +294,6 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
             pthread_sigmask(SIG_UNBLOCK, &mask, 0);
         }
 #endif
-
-        python_u_tld_key = q_get_unique_thread_local_data_key();
-        python_qobj_key = q_get_unique_thread_local_data_key();
     }
 
     // ensure that runtime version matches compiled version
@@ -317,6 +320,8 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
         mainThreadState = init_tstate;
     }
     _qore_PyGILState_SetThisThreadState(init_tstate);
+    // We have the GIL at this point after Py_InitializeEx()
+    _qore_gil_held = true;
 #endif
 
     if (init_global_qore_python_pgm()) {
@@ -386,12 +391,25 @@ static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns) {
     if (!pgm->getExternalData(QORE_PYTHON_MODULE_NAME)) {
         QoreNamespace* pyns = PNS->copy();
         rns->addNamespace(pyns);
-        // issue #4153: in case we only have the calling context here
-        ExceptionSink xsink;
-        QoreExternalProgramContextHelper pch(&xsink, pgm);
-        if (!xsink) {
-            pgm->setExternalData(QORE_PYTHON_MODULE_NAME, new QorePythonProgram(pgm, pyns));
-        }
+        // NOTE: Use QoreProgramContextHelper instead of QoreExternalProgramContextHelper
+        // because QoreExternalProgramContextHelper uses runtime=true which triggers
+        // doTopLevelInstantiation(), setting tlpd->inst = true. This happens before the
+        // user's top-level local variables are defined (during %requires processing), so
+        // no variables are actually instantiated. When the helper destructs, tlpd->inst
+        // stays true even though no variables were instantiated. Later when runTopLevel()
+        // is called, it skips doTopLevelInstantiation because tlpd->inst is true, causing
+        // crashes when accessing top-level local variables defined after %requires python.
+        // QoreProgramContextHelper just sets the current program without triggering
+        // thread-local variable instantiation.
+        //
+        // Exception handling note: QoreProgramContextHelper doesn't use ExceptionSink because
+        // it only manages program context (save/restore), which doesn't throw. The
+        // QorePythonProgram constructor handles its own exceptions internally - any Python
+        // initialization errors are logged and handled within the constructor. This differs
+        // from QoreExternalProgramContextHelper which needed ExceptionSink for its runtime
+        // thread-local operations, not for the external data setup itself.
+        QoreProgramContextHelper pch(pgm);
+        pgm->setExternalData(QORE_PYTHON_MODULE_NAME, new QorePythonProgram(pgm, pyns));
     }
 
 #ifndef Py_GIL_DISABLED

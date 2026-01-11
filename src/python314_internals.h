@@ -70,6 +70,10 @@ inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_lim
 */
 
 #ifdef Py_GIL_DISABLED
+// In free-threading mode, there's no GIL but we still need the variable for API compatibility
+// This flag is effectively always false since there's no GIL to hold
+inline thread_local bool _qore_gil_held = false;
+
 // The following functions are provided for API compatibility with GIL-enabled code paths
 // but may not be used in all compilation units in free-threading mode
 
@@ -215,12 +219,18 @@ typedef enum _Py_memory_order {
 // Using inline thread_local ensures a single instance shared across all compilation units (C++17)
 inline thread_local PyThreadState* _qore_tss_tstate = nullptr;
 
+// Track whether the current thread holds the GIL (independent of tstate tracking)
+// This is needed because QorePythonReleaseGilHelper uses this to track GIL state
+inline thread_local bool _qore_gil_held = false;
+
 // Get the current thread state from our thread-local tracking
 DLLLOCAL static PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
     return _qore_tss_tstate;
 }
 
 // Set this thread's state in thread-local storage
+// NOTE: This function does NOT update _qore_gil_held - that's only done by
+// _qore_acquire_thread_state and _qore_release_thread_state which actually change GIL ownership.
 DLLLOCAL static void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
     _qore_tss_tstate = state;
 }
@@ -258,12 +268,14 @@ DLLLOCAL static inline bool _qore_has_thread_state_attached() {
 
 DLLLOCAL static inline void _qore_acquire_thread_state(PyThreadState* tstate) {
     _qore_tss_tstate = tstate;
+    _qore_gil_held = true;
     PyEval_AcquireThread(tstate);
 }
 
 DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
     PyEval_ReleaseThread(tstate);
     _qore_tss_tstate = nullptr;
+    _qore_gil_held = false;
 }
 
 #endif // Py_GIL_DISABLED
