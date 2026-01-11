@@ -592,6 +592,8 @@ def stop():
             };
             WebSocketClient wsc(callback, {"url": "ws://localhost:" + port});
             wsc.connect();
+            # Ensure the client disconnects on error/exit for clean shutdown
+            on_exit wsc.disconnect();
             wsc.send("test");
             assertEq("default response", q.get(10s));
             p.callFunction("stop");
