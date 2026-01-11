@@ -83,6 +83,15 @@ DLLLOCAL extern bool python_shutdown;
 // In GIL-enabled mode, use standard PyThreadState_Swap
 #define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
 
+// Thread-local GIL ownership tracking
+// CRITICAL: This flag tracks whether the CURRENT THREAD holds the GIL, independent of
+// Python's internal tstate_current tracking. This is needed because:
+// 1. After PyInterpreterState_Clear/Delete, tstate_current can be NULL but GIL is still held
+// 2. With sub-interpreters, PyGILState_Check() can be unreliable
+// When using internal includes, _PyRuntime.ceval.gil.locked is reliable but we still need
+// this for consistent API with the non-internal path.
+inline thread_local bool _qore_gil_held = false;
+
 // gilstate_counter access macros - these are available in GIL-enabled Python
 #define _QORE_GILSTATE_COUNTER_INC(tstate) (++(tstate)->gilstate_counter)
 #define _QORE_GILSTATE_COUNTER_DEC(tstate) (--(tstate)->gilstate_counter)
@@ -167,10 +176,12 @@ DLLLOCAL static inline bool _qore_has_thread_state_attached() {
 
 DLLLOCAL static inline void _qore_acquire_thread_state(PyThreadState* tstate) {
     PyEval_AcquireThread(tstate);
+    _qore_gil_held = true;  // Track that we now hold the GIL
 }
 
 DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
     PyEval_ReleaseThread(tstate);
+    _qore_gil_held = false;  // Track that we no longer hold the GIL
 }
 
 // Check if this might be a Python-created thread that already has the GIL.
@@ -360,13 +371,26 @@ public:
         // This is critical for multi-threaded scenarios where another thread might check
         // _qore_PyCeval_GetGilLockedStatus() to see if it needs to acquire the GIL.
         _qore_PyGILState_SetThisThreadState(nullptr);
+        _qore_gil_held = false;  // Track that we no longer hold the GIL
         printd(5, "QorePythonReleaseGilHelper: released GIL, saved tstate: %p\n", _save);
     }
 
     DLLLOCAL ~QorePythonReleaseGilHelper() {
         printd(5, "~QorePythonReleaseGilHelper: acquiring GIL with saved tstate: %p\n", _save);
-        PyEval_RestoreThread(_save);
-        // Restore our tracking now that we have the GIL again
+        // CRITICAL: Check if the GIL was already reacquired (with a different thread state)
+        // by nested code during the Qore method execution. If so, we just need to swap to
+        // our saved thread state instead of trying to acquire the GIL again, which would
+        // deadlock because the same thread is trying to acquire the GIL twice.
+        if (_qore_PyCeval_GetGilLockedStatus()) {
+            // GIL is already held (by nested code) - just swap to our thread state
+            printd(5, "~QorePythonReleaseGilHelper: GIL already held, swapping to saved tstate\n");
+            PyThreadState_Swap(_save);
+        } else {
+            // GIL is not held - acquire it
+            PyEval_RestoreThread(_save);
+            _qore_gil_held = true;  // Track that we now hold the GIL
+        }
+        // Restore our tracking now that we have the GIL with our saved thread state
         _qore_PyGILState_SetThisThreadState(_save);
         printd(5, "~QorePythonReleaseGilHelper: GIL acquired\n");
     }

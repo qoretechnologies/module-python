@@ -448,28 +448,112 @@ typedef enum _Py_memory_order {
 #define _Py_atomic_store_relaxed(ATOMIC_VAL, NEW_VAL) \
     _Py_atomic_store_explicit((ATOMIC_VAL), (NEW_VAL), _Py_memory_order_relaxed)
 
-// equivalent to: PyThreadState_GET() == _PyThreadState_GET() == _PyRuntimeState_GetThreadState(&_PyRuntime.gilstate.tstate_current)
-DLLLOCAL static PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
+// Python 3.11 GIL Tracking
+// ========================
+// In Python 3.11, we need our own tracking because:
+// 1. After PyInterpreterState_Clear/Delete, tstate_current can be NULL even when the GIL
+//    is still held by the current thread. This corrupts the normal tracking.
+// 2. With sub-interpreters, PyGILState_Check() can return false even when we hold the GIL
+//    with a different thread state on the same OS thread.
+//
+// Solution: Maintain our own thread-local tracking of GIL ownership that's updated at
+// every acquire/release point and survives the corrupted-tracking scenario.
+
+// Thread-local state tracking
+inline thread_local PyThreadState* _qore_tss_tstate = nullptr;
+inline thread_local bool _qore_tss_initialized = false;
+// CRITICAL: This flag tracks whether the CURRENT THREAD holds the GIL, independent of
+// tstate_current. This handles the case where tstate_current becomes NULL after
+// PyInterpreterState_Clear/Delete but the GIL mutex is still locked by us.
+inline thread_local bool _qore_gil_held = false;
+
+// Get the current thread state - use Python's native function which is reliable in 3.11
+DLLLOCAL static inline PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
+    // In Python 3.11, PyGILState_GetThisThreadState() is reliable
+    // But during very early init it might return NULL, so fallback to runtime structure
+    PyThreadState* tss = PyGILState_GetThisThreadState();
+    if (tss) {
+        return tss;
+    }
+    // Fallback during early initialization
     return reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.gilstate.tstate_current));
 }
 
-DLLLOCAL static void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
+// Set this thread's state - update both our tracking and Python's TSS
+DLLLOCAL static inline void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
+    _qore_tss_tstate = state;
+    _qore_tss_initialized = true;
+    // Update Python's TSS for compatibility
     PyThread_tss_set(&_PyRuntime.gilstate.autoTSSkey, (void*)state);
 }
 
-DLLLOCAL static bool _qore_PyCeval_GetGilLockedStatus() {
-    return (bool)(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.locked));
+// GIL status check - check if the GIL is held by the CURRENT thread
+// NOTE: In Python 3.11, PyGILState_Check() is NOT reliable when multiple sub-interpreters
+// have different thread states on the same thread. PyGILState_Check() returns false when
+// tstate_current != PyGILState_GetThisThreadState(), but the GIL is actually held by
+// a different thread state on the same thread!
+//
+// Additionally, after PyInterpreterState_Clear/Delete, tstate_current can be NULL even
+// though the GIL mutex is still locked by the current thread. We must handle this case
+// to avoid deadlocking by trying to acquire an already-held GIL.
+//
+// Solution: Check our thread-local _qore_gil_held flag FIRST (handles corrupted-tracking),
+// then fallback to checking tstate_current->thread_id (handles sub-interpreter case).
+DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
+    // First check our own tracking - this handles the corrupted-tracking scenario
+    // where tstate_current is NULL but we still hold the GIL mutex
+    if (_qore_gil_held) {
+        return true;
+    }
+    // Check if tstate_current is non-NULL and belongs to our thread
+    PyThreadState* current = reinterpret_cast<PyThreadState*>(
+        _Py_atomic_load_relaxed(&_PyRuntime.gilstate.tstate_current));
+    if (!current) {
+        return false;
+    }
+    // Check if the GIL holder is on the same thread as us
+    // In Python 3.11, PyThreadState has thread_id field
+    unsigned long our_thread_id = PyThread_get_thread_ident();
+    return current->thread_id == our_thread_id;
 }
 
-DLLLOCAL static PyThreadState* _qore_PyCeval_GetThreadState() {
+// Check if this might be a Python-created thread that already has the GIL.
+// In Python 3.11, PyGILState_* functions are reliable so this is straightforward.
+DLLLOCAL static inline PyThreadState* _qore_check_python_created_thread_gil() {
+    // In Python 3.11, we can trust PyGILState_Check() and PyGILState_GetThisThreadState()
+    if (PyGILState_Check()) {
+        PyThreadState* tss_state = PyGILState_GetThisThreadState();
+        if (tss_state) {
+            _qore_tss_tstate = tss_state;
+            _qore_tss_initialized = true;
+            _qore_gil_held = true;  // Track that we hold the GIL
+            return tss_state;
+        }
+    }
+    return nullptr;
+}
+
+// Get the thread state that holds the GIL
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_GetThreadState() {
+    // In Python 3.11, PyGILState_GetThisThreadState() is reliable
+    PyThreadState* tss = PyGILState_GetThisThreadState();
+    if (tss) {
+        return tss;
+    }
+    // Fallback during early initialization
     return reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.last_holder));
 }
 
-DLLLOCAL static PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* gil_state) {
-    PyThreadState* old = reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.last_holder));
-    if (old != gil_state) {
-        _Py_atomic_store_relaxed(&_PyRuntime.ceval.gil.last_holder, (uintptr_t)gil_state);
-    }
+// Swap thread state for ceval purposes
+// NOTE: This updates our tracking, Python's TSS, and last_holder to maintain consistency
+// across all the different ways thread state is queried.
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* new_state) {
+    PyThreadState* old = _qore_tss_tstate;
+    _qore_tss_tstate = new_state;
+    // Update Python's TSS so PyGILState_GetThisThreadState() returns consistent value
+    PyThread_tss_set(&_PyRuntime.gilstate.autoTSSkey, (void*)new_state);
+    // Also update last_holder for consistency
+    _Py_atomic_store_relaxed(&_PyRuntime.ceval.gil.last_holder, (uintptr_t)new_state);
     return old;
 }
 
@@ -491,10 +575,41 @@ DLLLOCAL static inline bool _qore_has_thread_state_attached() {
 
 DLLLOCAL static inline void _qore_acquire_thread_state(PyThreadState* tstate) {
     PyEval_AcquireThread(tstate);
+    // Set our thread-local tracking since we acquired the GIL
+    _qore_tss_tstate = tstate;
+    _qore_tss_initialized = true;
+    _qore_gil_held = true;  // Track that we now hold the GIL
 }
 
 DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
-    PyEval_ReleaseThread(tstate);
+    // In Python 3.11, after PyInterpreterState_Clear/Delete, the GIL tracking
+    // (tstate_current) may be corrupted (set to NULL) even though the GIL mutex
+    // is still locked. We need to restore the tracking before releasing.
+    //
+    // Check if tstate_current is NULL - if so, restore it to our tstate
+    // so that PyEval_SaveThread can work correctly.
+    PyThreadState* current = reinterpret_cast<PyThreadState*>(
+        _Py_atomic_load_relaxed(&_PyRuntime.gilstate.tstate_current));
+    if (current == nullptr && tstate != nullptr) {
+        // Restore tstate_current so release functions work
+        _Py_atomic_store_relaxed(&_PyRuntime.gilstate.tstate_current, (uintptr_t)tstate);
+        // Also update the TSS
+        PyThread_tss_set(&_PyRuntime.gilstate.autoTSSkey, (void*)tstate);
+    }
+    // Use PyEval_SaveThread instead of PyEval_ReleaseThread for Python 3.11.
+    // PyEval_ReleaseThread checks that tstate matches the current thread state,
+    // but after certain Python operations, the current thread state may be
+    // different, causing "wrong thread state" errors.
+    // PyEval_SaveThread simply releases the GIL without this check.
+    PyEval_SaveThread();
+    // Clear our thread-local tracking since we released the GIL
+    _qore_tss_tstate = nullptr;
+    _qore_gil_held = false;  // Track that we no longer hold the GIL
+    // CRITICAL: Also clear Python's autoTSSkey. After releasing the GIL, if we don't clear this,
+    // PyGILState_GetThisThreadState() will return a stale thread state while tstate_current is NULL.
+    // This causes PyGILState_Check() to fail (stale != NULL) even when we later reacquire the GIL
+    // with a different thread state.
+    PyThread_tss_set(&_PyRuntime.gilstate.autoTSSkey, nullptr);
 }
 
 #endif

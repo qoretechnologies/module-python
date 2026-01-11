@@ -307,7 +307,16 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
         PyThreadState_Swap(mainThreadState);
     }
 #else
-    _qore_PyGILState_SetThisThreadState(PyGILState_GetThisThreadState());
+    // In GIL mode, PyGILState_GetThisThreadState() might return NULL during early init
+    // even though we have the GIL. Use PyThreadState_Get() which works when we have the GIL.
+    PyThreadState* init_tstate = PyGILState_GetThisThreadState();
+    if (!init_tstate) {
+        // TSS not set up yet - get the actual thread state and set it up
+        init_tstate = PyThreadState_Get();
+        // Also update mainThreadState for later use
+        mainThreadState = init_tstate;
+    }
+    _qore_PyGILState_SetThisThreadState(init_tstate);
 #endif
 
     if (init_global_qore_python_pgm()) {
@@ -620,13 +629,30 @@ bool QorePythonHelper::wasInterrupted() const {
 }
 
 bool _qore_has_gil(PyThreadState* t_state) {
-    return (_qore_PyCeval_GetGilLockedStatus() && _qore_PyCeval_GetThreadState() == t_state);
+    if (!_qore_PyCeval_GetGilLockedStatus()) {
+        return false;
+    }
+#if PY_VERSION_HEX < 0x030C0000
+    // In Python < 3.12, PyGILState_Check() is reliable. If it says we have the GIL,
+    // we have it even if t_state is NULL (can happen during early init before TSS is set).
+    if (t_state == nullptr && PyGILState_Check()) {
+        return true;
+    }
+#endif
+    return _qore_PyCeval_GetThreadState() == t_state;
 }
 
 static bool _qore_has_gil(PyThreadState* state0, PyThreadState* state1) {
     if (!_qore_PyCeval_GetGilLockedStatus()) {
         return false;
     }
+#if PY_VERSION_HEX < 0x030C0000
+    // In Python < 3.12, PyGILState_Check() is reliable. If it says we have the GIL,
+    // we have it even if both states are NULL (can happen during early init).
+    if (state0 == nullptr && state1 == nullptr && PyGILState_Check()) {
+        return true;
+    }
+#endif
     PyThreadState* gs = _qore_PyCeval_GetThreadState();
     return gs == state0 || gs == state1;
 }
@@ -732,8 +758,6 @@ QorePythonGilHelper::~QorePythonGilHelper() {
         _qore_PyGILState_SetThisThreadState(t_state);
     }
 #else
-    assert(_qore_has_gil());
-
     _QORE_GILSTATE_COUNTER_DEC(new_thread_state);
 
     if (release_gil) {
@@ -743,7 +767,9 @@ QorePythonGilHelper::~QorePythonGilHelper() {
         // During our lifetime, setContext() might have changed the ceval thread state to a different
         // PythonProgram's thread state. We need to ensure we release the correct state.
         // Swap to new_thread_state before releasing to avoid "wrong thread state" error.
-        PyThreadState* current = PyThreadState_Get();
+        // Use _qore_PyCeval_GetThreadState() instead of PyThreadState_Get() - the latter crashes
+        // in Python 3.11 if the GIL is not held properly (e.g., after PyInterpreterState_Delete).
+        PyThreadState* current = _qore_PyCeval_GetThreadState();
         if (current != new_thread_state) {
             PyThreadState_Swap(new_thread_state);
         }

@@ -470,8 +470,14 @@ protected:
     //! set of unique strings
     strset_t strset;
 
-    //! mutex for thread state map
+    //! mutex for thread state map and counter operations
     static QoreThreadLock py_thr_lck;
+    //! mutex for serializing mainThreadState access during GIL acquisition
+    //! Lock ordering: main_ts_lck -> GIL (acquire main_ts_lck before GIL)
+    //! This is separate from py_thr_lck to avoid deadlocks:
+    //! - Constructor: main_ts_lck -> GIL -> py_thr_lck
+    //! - setContext/releaseContext: py_thr_lck (brief, then released) -> GIL
+    static QoreThreadLock main_ts_lck;
     //! map of TIDs to the thread state
     typedef std::map<int, QorePythonThreadStateInfo> py_tid_map_t;
     //! map of QorePythonProgram objects to thread states for the current thread

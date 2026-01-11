@@ -74,6 +74,7 @@ static bool _qore_PyThreadState_IsCurrent(PyThreadState* tstate) {
 QorePythonProgram::py_thr_map_t QorePythonProgram::py_thr_map;
 QorePythonProgram::py_global_tid_map_t QorePythonProgram::py_global_tid_map;
 QoreThreadLock QorePythonProgram::py_thr_lck;
+QoreThreadLock QorePythonProgram::main_ts_lck;
 unsigned QorePythonProgram::pgm_count = 0;
 
 QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
@@ -118,6 +119,15 @@ QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
 QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
         : qpgm(qpgm), pyns(pyns), save_object_callback(nullptr) {
     qpy_global_register(this);
+
+    // Two-phase locking to avoid deadlocks:
+    // Phase 1: Use main_ts_lck to serialize mainThreadState access during GIL acquisition
+    // Phase 2: Use py_thr_lck for thread map updates (after we have our own thread state)
+    // This avoids deadlock because:
+    // - Constructor: main_ts_lck -> GIL -> py_thr_lck (acquires in this order)
+    // - setContext/releaseContext: py_thr_lck (brief) -> GIL (no conflict with main_ts_lck)
+    AutoLocker mts_al(main_ts_lck);
+
     QorePythonGilHelper qpgh;
 
     ExceptionSink xsink;
@@ -171,6 +181,15 @@ QorePythonProgram::QorePythonProgram(const QoreString& source_code, const QoreSt
     }
 
     //printd(5, "QorePythonProgram::QorePythonProgram() GIL thread state: %p\n", PyGILState_GetThisThreadState());
+
+    // Two-phase locking to avoid deadlocks:
+    // Phase 1: Use main_ts_lck to serialize mainThreadState access during GIL acquisition
+    // Phase 2: Use py_thr_lck for thread map updates (inside createInterpreter, after we have our own thread state)
+    // This avoids deadlock because:
+    // - Constructor: main_ts_lck -> GIL -> py_thr_lck (acquires in this order)
+    // - setContext/releaseContext: py_thr_lck (brief) -> GIL (no conflict with main_ts_lck)
+    AutoLocker mts_al(main_ts_lck);
+
     QorePythonGilHelper qpgh;
 
     //printd(5, "QorePythonProgram::QorePythonProgram() GIL thread state: %p\n", PyGILState_GetThisThreadState());
@@ -588,10 +607,9 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
 #endif
 #endif
     PyThreadState* python;
+    // NOTE: py_thr_lck must be held by caller to serialize interpreter creation
+    // and prevent multiple threads from using mainThreadState concurrently.
     {
-        // enforce serialization
-        AutoLocker al(py_thr_lck);
-
 #ifdef Py_GIL_DISABLED
         // In free-threading mode, use Py_NewInterpreterFromConfig with appropriate settings
         // Share main obmalloc to avoid per-interpreter heap issues
@@ -646,27 +664,32 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
     printd(5, "QorePythonProgram::createInterpreter() interpreter: %p\n", interpreter);
 
     // save thread state
+    // NOTE: Acquire py_thr_lck here for thread map updates.
+    // The caller holds main_ts_lck (not py_thr_lck) to serialize mainThreadState access.
+    // This allows setContext/releaseContext to use py_thr_lck without conflicting with main_ts_lck.
     int tid = q_gettid();
-    AutoLocker al(py_thr_lck);
     {
-        py_thr_map_t::iterator ti = py_thr_map.lower_bound(this);
-        if (ti == py_thr_map.end() || ti->first != this) {
-            py_thr_map.insert(ti, {this, {{tid, {python, true}}}});
-        } else {
-            ti->second[tid] = {python, true};
+        AutoLocker al(py_thr_lck);
+        {
+            py_thr_map_t::iterator ti = py_thr_map.lower_bound(this);
+            if (ti == py_thr_map.end() || ti->first != this) {
+                py_thr_map.insert(ti, {this, {{tid, {python, true}}}});
+            } else {
+                ti->second[tid] = {python, true};
+            }
         }
-    }
-    {
-        py_global_tid_map_t::iterator i = py_global_tid_map.lower_bound(tid);
-        if (i == py_global_tid_map.end() || i->first != tid) {
-            py_global_tid_map.insert(i, {tid, {python}});
-        } else {
-            i->second.insert(python);
+        {
+            py_global_tid_map_t::iterator i = py_global_tid_map.lower_bound(tid);
+            if (i == py_global_tid_map.end() || i->first != tid) {
+                py_global_tid_map.insert(i, {tid, {python}});
+            } else {
+                i->second.insert(python);
+            }
+            //printd(5, "QorePythonProgram::createInterpreter() inserted TID %d -> %p\n", tid, python);
         }
-        //printd(5, "QorePythonProgram::createInterpreter() inserted TID %d -> %p\n", tid, python);
-    }
 
-    ++pgm_count;
+        ++pgm_count;
+    }
 
     //printd(5, "QorePythonProgram::createInterpreter() this: %p\n", this);
     return setRecursionLimit(xsink);
@@ -760,7 +783,10 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         // Python-created threads. We MUST call it BEFORE PyThreadState_New() because in Python 3.12,
         // PyThreadState_New() modifies TSS (see bind_tstate/bind_gilstate_tstate in pystate.c),
         // which would corrupt our detection.
-#if PY_VERSION_HEX >= 0x030C0000 && !defined(QORE_PYTHON_INCLUDE_INTERNALS)
+        // NOTE: This detection is also needed for Python 3.11 - Python's threading.Thread creates
+        // threads that already have thread states and the GIL. Without this check, we'd create a
+        // duplicate thread state and deadlock trying to acquire an already-held GIL.
+#if !defined(QORE_PYTHON_INCLUDE_INTERNALS)
         PyThreadState* python_thread_state = _qore_check_python_created_thread_gil();
         if (python_thread_state != nullptr) {
             // This is a Python-created thread - use the existing thread state
@@ -901,7 +927,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 
     // Update our tracking
     _qore_PyGILState_SetThisThreadState(python);
-#else
+#elif PY_VERSION_HEX >= 0x030C0000
     // Python 3.12 with bundled internals
     // NOTE: Don't use _qore_has_gil(tss_state) here because tss_state (from Python's TSS)
     // can be stale in Python 3.12 after PyEval_ReleaseThread(). Instead, check our own
@@ -938,6 +964,37 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     if (t_state != python) {
         _QORE_PYTHREAD_STATE_SWAP(python);
     }
+#else
+    // Python < 3.12 (3.11 and earlier)
+    // In these versions, PyGILState_* functions are mostly reliable, but with sub-interpreters
+    // on the same thread, PyGILState_Check() can return false even when our thread holds the GIL
+    // with a different thread state. Use _qore_PyCeval_GetGilLockedStatus() which checks the
+    // actual thread ID instead of relying on TSS matching.
+    t_state = PyGILState_GetThisThreadState();
+    // IMPORTANT: If is_python_created_thread is true (set earlier when we detected a Python-created
+    // thread like threading.Thread), we already have the GIL and should not try to acquire it.
+    // Use _qore_PyCeval_GetGilLockedStatus() which checks if tstate_current->thread_id matches
+    // our thread ID, which correctly handles sub-interpreters on the same thread.
+    bool have_gil = is_python_created_thread || _qore_PyCeval_GetGilLockedStatus();
+    printd(5, "QorePythonProgram::setContext() Python <3.12 is_python_created_thread: %d have_gil: %d "
+        "t_state: %p tid: %d\n", is_python_created_thread, have_gil, t_state, q_gettid());
+
+    if (have_gil) {
+        // We already have the GIL - swap thread states if needed
+        ceval_state = t_state;
+        if (t_state != python) {
+            PyThreadState_Swap(python);
+        }
+        g_state = PyGILState_LOCKED;
+    } else {
+        // We don't have the GIL - acquire it
+        ceval_state = nullptr;
+        PyEval_RestoreThread(python);
+        g_state = PyGILState_UNLOCKED;
+        _qore_gil_held = true;  // Track that we now hold the GIL
+    }
+    // Update tracking for consistency
+    _qore_PyGILState_SetThisThreadState(python);
 #endif
 #endif
 
@@ -986,8 +1043,12 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
         return;
     }
 
-    //struct _gilstate_runtime_state* gilstate = &_PyRuntime.gilstate;
-    PyThreadState* python = getReleaseThreadState();
+    // CRITICAL: Get thread state from Python's internal tracking WITHOUT acquiring py_thr_lck.
+    // This avoids a deadlock: if we acquire py_thr_lck while holding the GIL, and another
+    // thread is in a constructor holding py_thr_lck while waiting for the GIL, we deadlock.
+    // Lock ordering: py_thr_lck -> GIL (constructor acquires lock first, then GIL)
+    // Here we release GIL first, then acquire py_thr_lck to decrement thread count.
+    PyThreadState* python = _qore_PyCeval_GetThreadState();
     assert(python);
 #ifndef Py_GIL_DISABLED
     assert(_qore_PyThreadState_IsCurrent(python));
@@ -1041,7 +1102,9 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
         // We acquired the GIL in setContext() with PyEval_RestoreThread(python).
         // During our context, nested setContext calls might have changed the ceval thread state.
         // Ensure we release the correct thread state by swapping back to python first.
-        PyThreadState* current = PyThreadState_Get();
+        // Use _qore_PyCeval_GetThreadState() instead of PyThreadState_Get() - the latter crashes
+        // in Python 3.11 if the GIL is not held properly (e.g., after PyInterpreterState_Delete).
+        PyThreadState* current = _qore_PyCeval_GetThreadState();
         if (current != python) {
             PyThreadState_Swap(python);
         }
@@ -1062,6 +1125,18 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
         // so we don't need to do it again here.
     }
 #endif
+
+    // Decrement thread count.
+    // In the nested case (g_state == LOCKED), we still have the GIL but this is safe because:
+    // - Constructors use main_ts_lck (not py_thr_lck) for GIL acquisition
+    // - getAcquireThreadState() in setContext only briefly holds py_thr_lck, releasing before GIL acquisition
+    // So no thread holds py_thr_lck while waiting for the GIL, avoiding deadlocks.
+    {
+        AutoLocker al(py_thr_lck);
+        if (!--pgm_thr_cnt && pgm_thr_waiting) {
+            pgm_thr_cond.signal();
+        }
+    }
 }
 
 PythonQoreClass* QorePythonProgram::findCreatePythonClass(const QoreClass& cls, const char* mod_name) {
