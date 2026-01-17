@@ -203,7 +203,9 @@ void qpy_deregister(QorePythonProgram* p) {
 }
 
 static PyObject* qoreloader_atexit(PyObject* self, PyObject* args) {
-    printd(5, "qoreloader_atexit() PyThreadState_Get(): %p\n", PyThreadState_Get());
+#ifndef Py_GIL_DISABLED
+    PyGILState_STATE gstate = PyGILState_Ensure();
+#endif
 
     if (!qpy_pgm_set.empty()) {
         assert(mainThreadState);
@@ -222,6 +224,9 @@ static PyObject* qoreloader_atexit(PyObject* self, PyObject* args) {
     _QORE_PYTHREAD_STATE_SWAP(mainThreadState);
 
     Py_INCREF(Py_None);
+#ifndef Py_GIL_DISABLED
+    PyGILState_Release(gstate);
+#endif
     return Py_None;
 }
 
@@ -274,8 +279,6 @@ static int slot_qoreloader_exec(PyObject *m) {
         }
 
         if (qore_needs_shutdown) {
-            printd(5, "slot_qoreloader_exec() PyThreadState_Get(): %p\n", PyThreadState_Get());
-
             // set cleanup function call
             QorePythonReferenceHolder atexit(PyImport_ImportModule("atexit"));
             if (!*atexit) {

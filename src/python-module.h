@@ -66,6 +66,7 @@ DLLLOCAL extern QorePythonClass* QC_PYTHONBASEOBJECT;
 DLLLOCAL extern qore_classid_t CID_PYTHONBASEOBJECT;
 
 DLLLOCAL extern bool python_shutdown;
+DLLLOCAL bool _qore_has_gil(PyThreadState* t_state);
 
 /** NOTE: depends on Python internals to work around limitations with the GIL and multiple thread states with multiple
           interpreters
@@ -221,6 +222,19 @@ DLLLOCAL static inline PyThreadState* _qore_check_python_created_thread_gil() {
 #endif
 #endif
 #endif
+
+// Safe thread state access: avoids PyThreadState_Get() when the GIL is not held
+DLLLOCAL static inline PyThreadState* _qore_safe_thread_state_get() {
+#ifdef Py_GIL_DISABLED
+    return PyThreadState_Get();
+#else
+    PyThreadState* tss = PyGILState_GetThisThreadState();
+    if (tss) {
+        return tss;
+    }
+    return _qore_PyCeval_GetThreadState();
+#endif
+}
 
 /*
     Python API compatibility layer for Python 3.13+
@@ -511,14 +525,28 @@ public:
     }
 
     DLLLOCAL ~QorePythonReferenceHolder() {
-        if (!python_shutdown) {
-            purge();
+        purge();
+    }
+
+    DLLLOCAL void purge() {
+        if (!obj) {
+            return;
         }
+        if (!python_shutdown) {
+            if (Py_IsInitialized() && !_qore_has_gil(_qore_PyRuntimeGILState_GetThreadState())) {
+                PyGILState_STATE gstate = PyGILState_Ensure();
+                py_deref();
+                PyGILState_Release(gstate);
+            } else {
+                py_deref();
+            }
+        }
+        obj = nullptr;
     }
 
     DLLLOCAL QorePythonReferenceHolder& operator=(PyObject* obj) {
         if (this->obj) {
-            py_deref();
+            purge();
         }
         this->obj = obj;
         return *this;
