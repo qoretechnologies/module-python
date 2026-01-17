@@ -375,7 +375,7 @@ PyObject* PythonQoreClass::wrap(QoreObject* obj) {
 
 PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* args) {
     // Save the thread state Python had when calling us - must restore before returning
-    PyThreadState* entry_tstate = PyThreadState_Get();
+    PyThreadState* entry_tstate = _qore_safe_thread_state_get();
 
     QoreForeignThreadHelper qfth;
 
@@ -461,7 +461,7 @@ PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* 
     // IMPORTANT: Restore the entry thread state before setting the exception.
     // QorePythonHelper may have changed thread states, but Python expects the
     // exception to be on the thread state it passed when calling us.
-    PyThreadState* exit_tstate = PyThreadState_Get();
+    PyThreadState* exit_tstate = _qore_safe_thread_state_get();
     if (exit_tstate != entry_tstate) {
         PyThreadState_Swap(entry_tstate);
     }
@@ -495,7 +495,7 @@ PyObject* PythonQoreClass::exec_qore_static_method(PyObject* method_capsule, PyO
 
 PyObject* PythonQoreClass::exec_qore_static_method(const QoreMethod& m, PyObject* args, size_t offset) {
     // Save the thread state Python had when calling us - must restore before returning
-    PyThreadState* entry_tstate = PyThreadState_Get();
+    PyThreadState* entry_tstate = _qore_safe_thread_state_get();
 
     ExceptionSink xsink;
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
@@ -536,7 +536,7 @@ PyObject* PythonQoreClass::exec_qore_static_method(const QoreMethod& m, PyObject
     // IMPORTANT: Restore the entry thread state before setting the exception.
     // QorePythonHelper may have changed thread states, but Python expects the
     // exception to be on the thread state it passed when calling us.
-    PyThreadState* exit_tstate = PyThreadState_Get();
+    PyThreadState* exit_tstate = _qore_safe_thread_state_get();
     if (exit_tstate != entry_tstate) {
         PyThreadState_Swap(entry_tstate);
     }

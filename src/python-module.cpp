@@ -303,7 +303,7 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     // This must be done before creating any QorePythonProgram instances
 #ifdef Py_GIL_DISABLED
     // In free-threading mode, ensure main thread state is attached before any Python API calls
-    mainThreadState = PyThreadState_Get();
+    mainThreadState = _qore_safe_thread_state_get();
     //printd(5, "python_module_init_intern() mainThreadState: %p current: %p\n",
     //    mainThreadState, PyGILState_GetThisThreadState());
     if (!PyGILState_GetThisThreadState()) {
@@ -311,7 +311,7 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     }
 #else
     // In GIL mode, PyGILState_GetThisThreadState() might return NULL during early init
-    // even though we have the GIL. Use PyThreadState_Get() which works when we have the GIL.
+    // even though we have the GIL. Use _qore_safe_thread_state_get() which tolerates missing TSS.
     PyThreadState* init_tstate = PyGILState_GetThisThreadState();
     if (!init_tstate) {
         // TSS not set up yet - get the actual thread state and set it up
@@ -711,7 +711,7 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
 #else
     if (release_gil) {
         _qore_acquire_thread_state(new_thread_state);
-        assert(PyThreadState_Get() == new_thread_state);
+        assert(_qore_safe_thread_state_get() == new_thread_state);
     } else {
         // NOTE: In Python 3.12, t_state (from PyGILState_GetThisThreadState()) may be stale
         // after PyEval_ReleaseThread() since Python's TSS isn't cleared.
