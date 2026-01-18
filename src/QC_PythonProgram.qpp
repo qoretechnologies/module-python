@@ -24,6 +24,14 @@
 
 #include "QC_PythonProgram.h"
 
+/** @defgroup python_constants Python Constants
+    Python module constants
+*/
+///@{
+//! The Python version string (e.g. "3.14.2")
+const PythonVersion = str(PY_VERSION);
+///@}
+
 //! Program for embedding and executing Python code
 /**
 */

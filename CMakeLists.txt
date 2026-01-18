@@ -52,26 +52,9 @@ message(STATUS "Found Python3 includes: ${Python3_INCLUDE_DIRS}")
 # Python 3.12 and earlier use bundled internals
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES ${Python3_INCLUDE_DIRS})
-set(CMAKE_REQUIRED_DEFINITIONS "-DPy_BUILD_CORE")
-if(${Python3_VERSION_MINOR} GREATER_EQUAL 13)
-    # Python 3.13+ requires additional internal headers for thread state management
-    check_cxx_source_compiles("
-    #include <Python.h>
-    #include <internal/pycore_pystate.h>
-    #include <internal/pycore_ceval.h>
-    #include <internal/pycore_gil.h>
-    int main() { return 0; }
-    " HAVE_PYTHON_INTERNAL_INCLUDES)
-    if(NOT HAVE_PYTHON_INTERNAL_INCLUDES)
-        message(FATAL_ERROR "Python 3.13+ requires internal includes (python3-devel with internal headers)")
-    endif()
-    message(STATUS "Found Python 3.13+ internal includes")
-    add_definitions(-DHAVE_PYTHON_INTERNAL_INCLUDES)
-else()
-    # Python 3.12 and earlier - use bundled internals
-    message(STATUS "Python ${Python3_VERSION} - using bundled internals")
-endif()
-set(CMAKE_REQUIRED_DEFINITIONS "")
+# Use bundled internal definitions for all Python versions
+# Our src/python*_internals.h files provide the necessary thread state management
+message(STATUS "Python ${Python3_VERSION} - using bundled internals")
 
 # Check for C++17 (required for Python 3.13+ and inline thread_local).
 include(CheckCXXCompilerFlag)

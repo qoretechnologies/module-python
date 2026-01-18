@@ -43,6 +43,19 @@ public:
 
     DLLLOCAL ~PythonQoreClass();
 
+    //! Release Python reference before interpreter is cleared
+    /** This must be called while the interpreter is still valid.
+        After this call, the PythonQoreClass can be safely deleted even after
+        the interpreter is deleted.
+    */
+    DLLLOCAL void release();
+
+    //! Clear method objects from the type dictionary
+    /** This removes all method objects from py_type->tp_dict.
+        Must be called with the correct interpreter's thread state active.
+    */
+    DLLLOCAL void clearMethods();
+
     DLLLOCAL PyTypeObject* getPythonType() {
         return py_type;
     }

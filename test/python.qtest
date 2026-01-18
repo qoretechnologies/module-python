@@ -1137,7 +1137,9 @@ class test:
             assertThrows("builtins.TypeError", sub () { x.__new__(); });
 
             delete pp;
-            assertThrows("PYTHON-ERROR", \x.dostatic());
+            # After the interpreter is deleted, calling Python callables should raise
+            # PYTHON-INTERPRETER-DELETED exception
+            assertThrows("PYTHON-INTERPRETER-DELETED", \x.dostatic());
         }
     }
 
