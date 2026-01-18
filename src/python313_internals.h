@@ -79,12 +79,14 @@ DLLLOCAL static inline void _qore_PyGILState_SetThisThreadState(PyThreadState* s
     }
 }
 
-// GIL status check - use our own tracking since PyGILState_Check() is unreliable
-// in Python 3.13 after GIL transitions with sub-interpreters
+// GIL status check - use _qore_gil_held which is set by _qore_acquire_thread_state()
+// and cleared by _qore_release_thread_state(). This is more accurate than checking
+// _qore_tss_tstate since the thread state can be set for tracking purposes before
+// the GIL is actually acquired.
+// IMPORTANT: PyGILState_Check() is unreliable in Python 3.13 after GIL transitions
+// with sub-interpreters, so we must use our own tracking.
 DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
-    // Use our own tracking - if we have a thread state set, we consider ourselves
-    // to be holding the GIL for the purposes of our API
-    return _qore_tss_tstate != nullptr;
+    return _qore_gil_held;
 }
 
 // Check if this might be a Python-created thread that already has the GIL.

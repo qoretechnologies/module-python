@@ -503,12 +503,11 @@ PythonProgram::setSaveObjectCallback(callback);
     @subsection python_1_3 python Module Version 1.3
     <b>New Features and Enhancements:</b>
     - Added support for Python 3.12, 3.13, and 3.14
-      (<a href="https://github.com/qoretechnologies/qore/issues/62">issue 62</a>)
     - Added support for Python 3.14 free-threading mode (PEP 703)
-      (<a href="https://github.com/qoretechnologies/qore/issues/62">issue 62</a>)
     - Added support for interruptible I/O for graceful termination of sandboxed programs; interrupt checks are
       performed before acquiring the Python GIL when a sandbox manager is active
       (<a href="https://github.com/qoretechnologies/qore/issues/5116">issue 5116</a>)
+    - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
 
     <b>Build System Changes:</b>
     - Requires a C++17-compatible compiler

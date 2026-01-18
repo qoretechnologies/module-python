@@ -250,7 +250,48 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
 
 PythonQoreClass::~PythonQoreClass() {
     printd(5, "PythonQoreClass::~PythonQoreClass() this: %p '%s'\n", this, name.c_str());
-    Py_DECREF(py_type);
+    // py_type should have been released via release() before interpreter deletion
+    // Only decref if it's still set (shouldn't happen in normal cleanup)
+    if (py_type) {
+        Py_DECREF(py_type);
+    }
+}
+
+void PythonQoreClass::release() {
+    // Release Python reference before interpreter is cleared
+    // This must be called while the interpreter is still valid
+    if (py_type) {
+        Py_DECREF(py_type);
+        py_type = nullptr;
+    }
+}
+
+void PythonQoreClass::clearMethods() {
+    // CRITICAL: Clear method objects from the type dictionary.
+    // Method objects created with PyCFunction_New reference PyMethodDef structures stored
+    // in py_normal_meth_vec and py_static_meth_vec. If the type survives (e.g., due to
+    // references from the main interpreter), these method objects will be traversed during
+    // GC after the PyMethodDef structures are freed, causing use-after-free crashes.
+    // By clearing the dict, we ensure method objects are decreffed while the interpreter
+    // is still valid.
+    if (py_type && py_type->tp_dict) {
+        // Remove all method objects we added
+        for (const auto& md : py_normal_meth_vec) {
+            if (md.ml_name) {
+                PyDict_DelItemString(py_type->tp_dict, md.ml_name);
+                PyErr_Clear();  // Ignore errors if key doesn't exist
+            }
+        }
+        for (const auto& md : py_static_meth_vec) {
+            if (md.ml_name) {
+                PyDict_DelItemString(py_type->tp_dict, md.ml_name);
+                PyErr_Clear();  // Ignore errors if key doesn't exist
+            }
+        }
+        // Also remove the Qore class capsule
+        PyDict_DelItemString(py_type->tp_dict, QCLASS_KEY);
+        PyErr_Clear();
+    }
 }
 
 void PythonQoreClass::populateClass(QorePythonProgram* pypgm, const QoreClass& qcls, clsset_t& cls_set,
@@ -601,16 +642,23 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
         if (!xsink) {
             QoreExternalProgramContextHelper pch(&xsink, qore_python_pgm->getQoreProgram());
             if (!xsink) {
-                QorePythonReleaseGilHelper prgh;
+                QoreObject* created_obj = nullptr;
+                {
+                    QorePythonReleaseGilHelper prgh;
 
-                QorePythonStackLocationHelper slh(qore_python_pgm);
+                    QorePythonStackLocationHelper slh(qore_python_pgm);
 
-                ReferenceHolder<QoreObject> qobj(constructor_cls->execConstructor(*qcls, *qargs, true, &xsink),
-                    &xsink);
-                if (!xsink) {
-                    printd(5, "PythonQoreClass::py_init() self: %p created Qore %s object (args: %p %d): %p (%s)\n",
-                        self, qcls->getName(), *qargs, qargs ? (int)qargs->size() : 0, *qobj, qobj->getClassName());
-                    return newQoreObject(xsink, pyself, qobj.release(), qcls == constructor_cls ? nullptr : qcls,
+                    ReferenceHolder<QoreObject> qobj(constructor_cls->execConstructor(*qcls, *qargs, true, &xsink),
+                        &xsink);
+                    if (!xsink) {
+                        printd(5, "PythonQoreClass::py_init() self: %p created Qore %s object (args: %p %d): %p (%s)\n",
+                            self, qcls->getName(), *qargs, qargs ? (int)qargs->size() : 0, *qobj, qobj->getClassName());
+                        created_obj = qobj.release();
+                    }
+                }
+                // GIL is now held again, safe to call newQoreObject which calls Py_INCREF
+                if (created_obj) {
+                    return newQoreObject(xsink, pyself, created_obj, qcls == constructor_cls ? nullptr : qcls,
                         qore_python_pgm);
                 }
             }

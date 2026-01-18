@@ -351,6 +351,14 @@ public:
 
     DLLLOCAL void set(PyThreadState* other_state);
 
+    //! Returns true if the GIL was successfully acquired
+    /** This returns false if Python is shutting down or not initialized when the
+        helper was constructed. Callers should check this before making Python API calls.
+    */
+    DLLLOCAL bool isInitialized() const {
+        return initialized;
+    }
+
 #ifdef Py_GIL_DISABLED
     //! Releases the GIL state before creating a sub-interpreter
     /** In free-threading mode, PyGILState_Ensure() initializes thread-local mimalloc heap data
@@ -371,6 +379,7 @@ protected:
     PyThreadState* state;
     PyThreadState* t_state;
     bool release_gil = true;
+    bool initialized = false;  // True if successfully initialized (Python is running)
 #ifdef Py_GIL_DISABLED
     PyGILState_STATE gstate;
     bool gstate_released = false;  // True if gstate was released for sub-interpreter creation
@@ -417,6 +426,7 @@ struct QorePythonThreadInfo {
     PyThreadState* tss_state;
     PyThreadState* t_state;
     PyThreadState* ceval_state;
+    PyThreadState* released_other_interp_tstate;  // Thread state from another interpreter we released
     PyGILState_STATE g_state;
     int recursion_depth;
     bool valid;
@@ -533,6 +543,42 @@ public:
             return;
         }
         if (!python_shutdown) {
+#if PY_VERSION_HEX >= 0x030D0000
+            // Python 3.13+: Always use PyGILState_Ensure/Release for cleanup.
+            // Our tracking (_qore_tss_tstate) may be out of sync with Python's actual
+            // GIL state if external code (like JNI) releases the GIL without going
+            // through our API. PyGILState_Ensure is safe to call even if we already
+            // have the GIL - it just increments the gilstate_counter.
+            if (Py_IsInitialized()) {
+                // CRITICAL: Before calling PyGILState_Ensure, check if the TSS thread state
+                // (if any) has a valid interpreter. If the interpreter was deleted (sub-interpreter
+                // cleanup), PyGILState_Ensure will crash with "_PyMem_IsPtrFreed(tstate->interp)".
+                PyThreadState* tss_tstate = PyGILState_GetThisThreadState();
+                if (tss_tstate) {
+                    // Check if the interpreter is still in the global list
+                    PyInterpreterState* interp = tss_tstate->interp;
+                    bool interp_valid = false;
+                    PyInterpreterState* check_interp = PyInterpreterState_Head();
+                    while (check_interp) {
+                        if (check_interp == interp) {
+                            interp_valid = true;
+                            break;
+                        }
+                        check_interp = PyInterpreterState_Next(check_interp);
+                    }
+                    if (!interp_valid) {
+                        // The TSS points to a thread state with a freed interpreter.
+                        // The Python object was part of a deleted sub-interpreter and is
+                        // already freed along with it - just clear our reference.
+                        obj = nullptr;
+                        return;
+                    }
+                }
+                PyGILState_STATE gstate = PyGILState_Ensure();
+                py_deref();
+                PyGILState_Release(gstate);
+            }
+#else
             if (Py_IsInitialized() && !_qore_has_gil(_qore_PyRuntimeGILState_GetThreadState())) {
                 PyGILState_STATE gstate = PyGILState_Ensure();
                 py_deref();
@@ -540,6 +586,7 @@ public:
             } else {
                 py_deref();
             }
+#endif
         }
         obj = nullptr;
     }

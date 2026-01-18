@@ -233,9 +233,24 @@ public:
             return -1;
         }
 #if PY_VERSION_HEX >= 0x030D0000
-        // Python 3.13+: PyGILState_Check() relies on Python's TSS which can be corrupted by
-        // external modules like JNI. Use our thread-local tracking which is always reliable.
-        assert(_qore_PyCeval_GetGilLockedStatus());
+        // Python 3.13+: Our tracking (_qore_tss_tstate) should be set by setContext().
+        // However, external modules like JNI can acquire/release the GIL without going through
+        // our APIs, causing our tracking to be out of sync. In such cases, fall back to
+        // PyGILState_Check() and sync our tracking if we actually have the GIL.
+        if (!_qore_PyCeval_GetGilLockedStatus()) {
+            // Our tracking says we don't have the GIL - check Python's actual state
+            if (PyGILState_Check()) {
+                // We actually have the GIL - sync our tracking
+                PyThreadState* tss_state = PyGILState_GetThisThreadState();
+                if (tss_state) {
+                    _qore_PyGILState_SetThisThreadState(tss_state);
+                    printd(5, "checkValid() synced _qore_tss_tstate to %p from PyGILState_Check\n", tss_state);
+                }
+            } else {
+                // We really don't have the GIL - this is an error
+                assert(false && "GIL not held when calling checkValid()");
+            }
+        }
 #else
         assert(PyGILState_Check());
 #endif
