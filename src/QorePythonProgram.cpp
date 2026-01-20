@@ -28,6 +28,25 @@
 #include "QoreLoader.h"
 #include "PythonQoreClass.h"
 #include "QoreMetaPathFinder.h"
+
+#include <cstdio>
+#include <string>
+
+static inline void qore_python_debug_init_log(const char* msg) {
+    const char* debug_init = getenv("QORE_PYTHON_DEBUG_INIT");
+    if (debug_init && *debug_init) {
+        fprintf(stderr, "qore-python init: %s\n", msg);
+        fflush(stderr);
+    }
+}
+
+static inline void qore_python_debug_init_log_symbol(const char* symbol) {
+    const char* debug_init = getenv("QORE_PYTHON_DEBUG_INIT");
+    if (debug_init && *debug_init) {
+        fprintf(stderr, "qore-python init: importing symbol '%s'\n", symbol ? symbol : "<null>");
+        fflush(stderr);
+    }
+}
 #include "PythonCallableCallReferenceNode.h"
 #include "PythonQoreCallable.h"
 #include "ModuleNamespace.h"
@@ -78,6 +97,7 @@ QoreThreadLock QorePythonProgram::main_ts_lck;
 unsigned QorePythonProgram::pgm_count = 0;
 
 QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
+    qore_python_debug_init_log("QorePythonProgram() default ctor");
     printd(5, "QorePythonProgram::QorePythonProgram() this: %p\n", this);
     qpy_global_register(this);
 #if PY_VERSION_HEX >= 0x030D0000
@@ -118,7 +138,9 @@ QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
 
 QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
         : qpgm(qpgm), pyns(pyns), save_object_callback(nullptr) {
+    qore_python_debug_init_log("QorePythonProgram() program ctor");
     qpy_global_register(this);
+    qore_python_debug_init_log("QorePythonProgram() after global register");
 
     // Two-phase locking to avoid deadlocks:
     // Phase 1: Use main_ts_lck to serialize mainThreadState access during GIL acquisition
@@ -128,29 +150,35 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
     // - setContext/releaseContext: py_thr_lck (brief) -> GIL (no conflict with main_ts_lck)
     AutoLocker mts_al(main_ts_lck);
 
+    qore_python_debug_init_log("QorePythonProgram() creating GIL helper");
     QorePythonGilHelper qpgh;
+    qore_python_debug_init_log("QorePythonProgram() GIL helper created");
 
     ExceptionSink xsink;
     if (createInterpreter(qpgh, &xsink)) {
         valid = false;
         return;
     }
+    qore_python_debug_init_log("QorePythonProgram() interpreter created");
 
     // ensure that the __main__ module is created
     // returns a borrowed reference
     module = PyImport_AddModule("__main__");
     module.py_ref();
+    qore_python_debug_init_log("QorePythonProgram() __main__ module ready");
 
     import(&xsink, "builtins");
     if (xsink) {
         valid = false;
         return;
     }
+    qore_python_debug_init_log("QorePythonProgram() builtins imported");
     //assert(!xsink);
 
     // returns a borrowed reference
     setGlobalDictionary(*module);
     assert(!PyErr_Occurred());
+    qore_python_debug_init_log("QorePythonProgram() global dict set");
 
     // import qoreloader module
     QorePythonReferenceHolder qoreloader(PyImport_ImportModule("qoreloader"));
@@ -160,6 +188,7 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
         }
         return;
     }
+    qore_python_debug_init_log("QorePythonProgram() qoreloader imported");
 
     PyDict_SetItemString(module_dict, "qoreloader", *qoreloader);
     needs_deregistration = qpy_register(this);
@@ -455,8 +484,8 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
             valid = false;
         }
         if (interpreter && owns_interpreter) {
-#if PY_VERSION_HEX >= 0x030E0000
-            // Python 3.14+ requires that when calling PyInterpreterState_Clear on a sub-interpreter,
+#if PY_VERSION_HEX >= 0x030D0000
+            // Python 3.13+ requires that when calling PyInterpreterState_Clear on a sub-interpreter,
             // the current thread must have a thread state from that interpreter attached.
             // Create a temporary thread state for the sub-interpreter.
             {
@@ -531,6 +560,12 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                 // attached to this interpreter. If we don't clear our cache, we'll have
                 // dangling pointers to freed memory.
                 py_thr_map.erase(this);
+                // Clear bound_gilstate for all thread states to avoid TSS assertions in 3.12+
+                PyThreadState* tstate = PyInterpreterState_ThreadHead(interpreter);
+                while (tstate) {
+                    tstate->_status.bound_gilstate = 0;
+                    tstate = PyThreadState_Next(tstate);
+                }
                 assert(_qore_PyRuntimeGILState_GetThreadState());
                 PyInterpreterState_Clear(interpreter);
             }
@@ -752,11 +787,70 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
         _QORE_PYTHON_REENABLE_GIL_CHECK
 
         qpgh.set(python);
+        // Ensure the sub-interpreter has a usable sys.path (stdlib + extension modules).
+        const char* pyhome = getenv("PYTHONHOME");
+        const char* pypath = getenv("PYTHONPATH");
+        if ((pyhome && *pyhome) || (pypath && *pypath)) {
+            std::string path;
+            if (pypath) {
+                path += pypath;
+            }
+            if (pyhome && *pyhome) {
+                if (!path.empty()) {
+                    path += ":";
+                }
+                path += pyhome;
+                path += "/Lib";
+                path += ":";
+                path += pyhome;
+                path += "/Modules";
+            }
+            PyObject* sys_path = PySys_GetObject("path");  // borrowed
+            if (!sys_path || !PyList_Check(sys_path)) {
+                sys_path = PyList_New(0);
+                if (sys_path) {
+                    PySys_SetObject("path", sys_path);
+                    Py_DECREF(sys_path);
+                }
+            }
+            if (sys_path && PyList_Check(sys_path)) {
+                size_t start = 0;
+                while (start <= path.size()) {
+                    size_t end = path.find(':', start);
+                    if (end == std::string::npos) {
+                        end = path.size();
+                    }
+                    std::string entry = path.substr(start, end - start);
+                    PyObject* py_entry = PyUnicode_DecodeFSDefault(entry.c_str());
+                    if (py_entry) {
+                        PyList_Append(sys_path, py_entry);
+                        Py_DECREF(py_entry);
+                    }
+                    start = end + 1;
+                }
+            }
+        }
+        // Ensure PyDateTimeAPI is initialized for this interpreter; the macro only runs if the
+        // global pointer is null, so clear it to avoid stale main-interpreter state.
+        PyDateTimeAPI = nullptr;
+        PyDateTime_IMPORT;
+        if (!PyDateTimeAPI) {
+            PyErr_Clear();
+            qore_python_debug_init_log("PyDateTime_IMPORT failed after sub-interpreter creation");
+        }
     }
 
     interpreter = python->interp;
     owns_interpreter = true;
     printd(5, "QorePythonProgram::createInterpreter() interpreter: %p\n", interpreter);
+    if (!PyDateTimeAPI) {
+        PyDateTime_IMPORT;
+        if (!PyDateTimeAPI) {
+            PyErr_Clear();
+            PyDateTimeAPI = nullptr;
+            qore_python_debug_init_log("PyDateTime_IMPORT failed in sub-interpreter");
+        }
+    }
 
     // save thread state
     // NOTE: Acquire py_thr_lck here for thread map updates.
@@ -902,40 +996,39 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // The thread state's interp pointer can become stale if:
     // 1. PyInterpreterState_Clear was called (sets tstate->interp = NULL)
     // 2. The thread state was somehow detached from the interpreter
-    // If there's a mismatch, discard the cached state and create a new one.
-    if (python && python->interp != interpreter) {
-        printd(5, "QorePythonProgram::setContext() cached thread state %p has wrong interpreter "
-            "(has %p, expected %p) - will create new\n", python, python->interp, interpreter);
-
-        // CRITICAL: The cached thread state has a different/deleted interpreter.
-        // If the interpreter was deleted, the thread state was also freed by zapthreads().
-        // We MUST NOT access python->_status because the memory might be freed.
-        // Check if the interpreter is still valid before accessing the thread state.
-        bool interp_valid = false;
-        PyInterpreterState* check_interp = PyInterpreterState_Head();
-        while (check_interp) {
-            if (check_interp == python->interp) {
-                interp_valid = true;
+    // If the cached thread state isn't in the interpreter's thread list, it's stale/invalid.
+    if (python) {
+        bool found = false;
+        PyThreadState* ts = PyInterpreterState_ThreadHead(interpreter);
+        while (ts) {
+            if (ts == python) {
+                found = true;
                 break;
             }
-            check_interp = PyInterpreterState_Next(check_interp);
+            ts = PyThreadState_Next(ts);
         }
-        if (interp_valid && python->interp != nullptr) {
-            // Interpreter is still valid - safe to clear bound_gilstate
-            python->_status.bound_gilstate = 0;
-        }
-        // If interpreter is invalid/deleted, DON'T touch the thread state (memory is freed)
-
-        // Remove this thread's entry from the cache - it's invalid
-        {
-            AutoLocker al(py_thr_lck);
-            py_thr_map_t::iterator i = py_thr_map.find(this);
-            if (i != py_thr_map.end()) {
-                i->second.erase(q_gettid());
+        if (!found) {
+            printd(5, "QorePythonProgram::setContext() cached thread state %p not found in interpreter %p "
+                "thread list - will create new\n", python, interpreter);
+            // Remove this thread's entry from the cache - it's invalid
+            {
+                int tid = q_gettid();
+                AutoLocker al(py_thr_lck);
+                py_thr_map_t::iterator i = py_thr_map.find(this);
+                if (i != py_thr_map.end()) {
+                    i->second.erase(tid);
+                }
+                py_global_tid_map_t::iterator gi = py_global_tid_map.find(tid);
+                if (gi != py_global_tid_map.end()) {
+                    gi->second.erase(python);
+                    if (gi->second.empty()) {
+                        py_global_tid_map.erase(gi);
+                    }
+                }
+                // Don't decrement pgm_thr_cnt here - getAcquireThreadState already incremented it
             }
-            // Don't decrement pgm_thr_cnt here - getAcquireThreadState already incremented it
+            python = nullptr;  // Force creation of new thread state below
         }
-        python = nullptr;  // Force creation of new thread state below
     }
 
     // CRITICAL: Also check if TSS points to a stale thread state (from a deleted interpreter).
@@ -1242,8 +1335,8 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
                 // Verify that the currently attached thread state is actually the current one
                 PyThreadState* fast_current = PyThreadState_GetUnchecked();
                 if (fast_current != currently_attached) {
-                    // Just swap to nullptr to clear, don't try to save
-                    PyThreadState_Swap(nullptr);
+                    // Avoid PyThreadState_Swap without the GIL; clear bound_gilstate instead
+                    currently_attached->_status.bound_gilstate = 0;
                 } else {
                     // Save the current thread state to restore later
                     released_other_interp_tstate = PyEval_SaveThread();  // Release GIL and detach
@@ -1251,7 +1344,6 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
             } else {
                 // The interpreter is gone - just clear the thread state
                 currently_attached->_status.bound_gilstate = 0;
-                PyThreadState_Swap(nullptr);
             }
         }
         PyEval_RestoreThread(python);
@@ -1275,6 +1367,10 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         _qore_PyCeval_GetThreadState(), _qore_tss_initialized, q_gettid());
     printd(5, "QorePythonProgram::setContext() final have_gil: %d\n", have_gil);
     if (have_gil) {
+        // If bound_gilstate is stale, clear it to avoid tstate_activate assertions.
+        if (python->_status.bound_gilstate && PyGILState_GetThisThreadState() != python) {
+            python->_status.bound_gilstate = 0;
+        }
         // We already have the GIL - swap thread states
         ceval_state = _qore_PyCeval_SwapThreadState(python);
         g_state = PyGILState_LOCKED;
@@ -1286,6 +1382,55 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         }
     } else {
         // We don't have the GIL - acquire it
+        // In Python 3.12, TSS state can be stale; clear it before activating the new
+        // thread state so bind_gilstate_tstate can safely rebind.
+        PyThreadState* tss_before_acquire = PyGILState_GetThisThreadState();
+        if (tss_before_acquire && tss_before_acquire != python) {
+            // Only clear the old bound_gilstate if the thread state is still valid.
+            bool found = false;
+            PyInterpreterState* interp = PyInterpreterState_Head();
+            while (interp && !found) {
+                PyThreadState* ts = PyInterpreterState_ThreadHead(interp);
+                while (ts) {
+                    if (ts == tss_before_acquire) {
+                        found = true;
+                        break;
+                    }
+                    ts = PyThreadState_Next(ts);
+                }
+                interp = PyInterpreterState_Next(interp);
+            }
+            if (found) {
+                tss_before_acquire->_status.bound_gilstate = 0;
+            }
+        }
+        // Bind our thread state to TSS directly to avoid tstate_activate assertions.
+        _qore_PyGILState_SetTSS(python);
+        PyThreadState* tss_after_set = PyGILState_GetThisThreadState();
+        if (tss_after_set == python) {
+            python->_status.bound_gilstate = 1;
+        } else {
+            // If TSS didn't update, clear it to avoid dereferencing stale thread states.
+            if (tss_after_set) {
+                bool tss_valid = false;
+                PyInterpreterState* interp = PyInterpreterState_Head();
+                while (interp && !tss_valid) {
+                    PyThreadState* ts = PyInterpreterState_ThreadHead(interp);
+                    while (ts) {
+                        if (ts == tss_after_set) {
+                            tss_valid = true;
+                            break;
+                        }
+                        ts = PyThreadState_Next(ts);
+                    }
+                    interp = PyInterpreterState_Next(interp);
+                }
+                if (!tss_valid) {
+                    _qore_PyGILState_ClearTSS();
+                }
+            }
+            python->_status.bound_gilstate = 0;
+        }
         ceval_state = nullptr;
         PyEval_RestoreThread(python);
         // Set our tracking now that we have the GIL
@@ -2358,12 +2503,26 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val) {
 }
 
 QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset) {
-    printd(5, "QorePythonBase::getQoreValue() this: %p PyDateTimeAPI: %p val: %p '%s'\n", this, PyDateTimeAPI, val,
-        Py_TYPE(val)->tp_name);
-    assert(PyDateTimeAPI);
     if (!val || val == Py_None) {
         return QoreValue();
     }
+    PyTypeObject* type = Py_TYPE(val);
+    if (!type) {
+        if (xsink) {
+            xsink->raiseException("PYTHON-IMPORT-ERROR", "Python object has null type");
+        }
+        return QoreValue();
+    }
+    printd(5, "QorePythonBase::getQoreValue() this: %p PyDateTimeAPI: %p val: %p '%s'\n", this, PyDateTimeAPI, val,
+        type->tp_name);
+    if (!PyDateTimeAPI) {
+        PyDateTime_IMPORT;
+        if (!PyDateTimeAPI) {
+            PyErr_Clear();
+            PyDateTimeAPI = nullptr;
+        }
+    }
+    bool have_datetime_api = (PyDateTimeAPI != nullptr);
 
     // if this is already a Qore object, then return it
     if (PyQoreObject_Check(val)) {
@@ -2371,7 +2530,6 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
         return pyobj->qobj ? pyobj->qobj->refSelf() : QoreValue();
     }
 
-    PyTypeObject* type = Py_TYPE(val);
     if (type == &PyBool_Type) {
         return QoreValue(val == Py_True);
     }
@@ -2419,19 +2577,19 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
         return getQoreBinaryFromByteArray(val);
     }
 
-    if (type == PyDateTimeAPI->DateType) {
+    if (have_datetime_api && type == PyDateTimeAPI->DateType) {
         return getQoreDateTimeFromDate(val);
     }
 
-    if (type == PyDateTimeAPI->TimeType) {
+    if (have_datetime_api && type == PyDateTimeAPI->TimeType) {
         return getQoreDateTimeFromTime(val);
     }
 
-    if (type == PyDateTimeAPI->DateTimeType) {
+    if (have_datetime_api && type == PyDateTimeAPI->DateTimeType) {
         return getQoreDateTimeFromDateTime(xsink, val);
     }
 
-    if (type == PyDateTimeAPI->DeltaType) {
+    if (have_datetime_api && type == PyDateTimeAPI->DeltaType) {
         return getQoreDateTimeFromDelta(val);
     }
 
@@ -2560,15 +2718,109 @@ PyObject* QorePythonProgram::getPythonDelta(ExceptionSink* xsink, const DateTime
     assert(dt->isRelative());
 
     // WARNING: years are converted to 365 days; months are converted to 30 days
-    return PyDelta_FromDSU(dt->getYear() * 365 + dt->getMonth() * 30 + dt->getDay(),
+    if (PyDateTimeAPI) {
+        return PyDelta_FromDSU(dt->getYear() * 365 + dt->getMonth() * 30 + dt->getDay(),
         dt->getHour() * 3600 + dt->getMinute() * 60 + dt->getSecond(), dt->getMicrosecond());
+    }
+
+    // Fallback: create datetime.timedelta via Python when PyDateTimeAPI is unavailable.
+    QorePythonReferenceHolder datetime_mod(PyImport_ImportModule("datetime"));
+    if (!datetime_mod) {
+        if (xsink) {
+            QorePythonProgram* ctx = QorePythonProgram::getContext();
+            if (!ctx || !ctx->checkPythonException(xsink)) {
+                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to import Python datetime module");
+            }
+        }
+        return nullptr;
+    }
+    QorePythonReferenceHolder timedelta_cls(PyObject_GetAttrString(*datetime_mod, "timedelta"));
+    if (!timedelta_cls) {
+        if (xsink) {
+            QorePythonProgram* ctx = QorePythonProgram::getContext();
+            if (!ctx || !ctx->checkPythonException(xsink)) {
+                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to resolve datetime.timedelta");
+            }
+        }
+        return nullptr;
+    }
+    PyObject* args = Py_BuildValue("(iii)", dt->getYear() * 365 + dt->getMonth() * 30 + dt->getDay(),
+        dt->getHour() * 3600 + dt->getMinute() * 60 + dt->getSecond(), dt->getMicrosecond());
+    if (!args) {
+        if (xsink) {
+            QorePythonProgram* ctx = QorePythonProgram::getContext();
+            if (!ctx || !ctx->checkPythonException(xsink)) {
+                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to build timedelta arguments");
+            }
+        }
+        return nullptr;
+    }
+    PyObject* rv = PyObject_CallObject(*timedelta_cls, args);
+    Py_DECREF(args);
+    if (!rv) {
+        if (xsink) {
+            QorePythonProgram* ctx = QorePythonProgram::getContext();
+            if (!ctx || !ctx->checkPythonException(xsink)) {
+                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to create datetime.timedelta");
+            }
+        }
+        return nullptr;
+    }
+    return rv;
 }
 
 PyObject* QorePythonProgram::getPythonDateTime(ExceptionSink* xsink, const DateTime* dt) {
     assert(dt->isAbsolute());
 
-    return PyDateTime_FromDateAndTime(dt->getYear(), dt->getMonth(), dt->getDay(), dt->getHour(), dt->getMinute(),
+    if (PyDateTimeAPI) {
+        return PyDateTime_FromDateAndTime(dt->getYear(), dt->getMonth(), dt->getDay(), dt->getHour(), dt->getMinute(),
         dt->getSecond(), dt->getMicrosecond());
+    }
+
+    // Fallback: create datetime.datetime via Python when PyDateTimeAPI is unavailable.
+    QorePythonReferenceHolder datetime_mod(PyImport_ImportModule("datetime"));
+    if (!datetime_mod) {
+        if (xsink) {
+            QorePythonProgram* ctx = QorePythonProgram::getContext();
+            if (!ctx || !ctx->checkPythonException(xsink)) {
+                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to import Python datetime module");
+            }
+        }
+        return nullptr;
+    }
+    QorePythonReferenceHolder datetime_cls(PyObject_GetAttrString(*datetime_mod, "datetime"));
+    if (!datetime_cls) {
+        if (xsink) {
+            QorePythonProgram* ctx = QorePythonProgram::getContext();
+            if (!ctx || !ctx->checkPythonException(xsink)) {
+                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to resolve datetime.datetime");
+            }
+        }
+        return nullptr;
+    }
+    PyObject* args = Py_BuildValue("(iiiiiii)", dt->getYear(), dt->getMonth(), dt->getDay(), dt->getHour(),
+        dt->getMinute(), dt->getSecond(), dt->getMicrosecond());
+    if (!args) {
+        if (xsink) {
+            QorePythonProgram* ctx = QorePythonProgram::getContext();
+            if (!ctx || !ctx->checkPythonException(xsink)) {
+                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to build datetime arguments");
+            }
+        }
+        return nullptr;
+    }
+    PyObject* rv = PyObject_CallObject(*datetime_cls, args);
+    Py_DECREF(args);
+    if (!rv) {
+        if (xsink) {
+            QorePythonProgram* ctx = QorePythonProgram::getContext();
+            if (!ctx || !ctx->checkPythonException(xsink)) {
+                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to create datetime.datetime");
+            }
+        }
+        return nullptr;
+    }
+    return rv;
 }
 
 PyObject* QorePythonProgram::getPythonCallable(ExceptionSink* xsink, const ResolvedCallReferenceNode* call) {
@@ -3619,6 +3871,7 @@ int QorePythonProgram::saveModule(const char* name, PyObject* mod) {
 }
 
 int QorePythonProgram::import(ExceptionSink* xsink, const char* module, const char* symbol) {
+    qore_python_debug_init_log("QorePythonProgram::import() entry");
     //printd(5, "QorePythonProgram::import() module: '%s' symbol: '%s'\n", module, symbol ? symbol : "n/a");
 
     QoreString mod_name(module);
@@ -3659,7 +3912,9 @@ int QorePythonProgram::import(ExceptionSink* xsink, const char* module, const ch
         }
     }
 
+    qore_python_debug_init_log("QorePythonProgram::import() calling PyImport_ImportModule");
     mod = PyImport_ImportModule(module);
+    qore_python_debug_init_log("QorePythonProgram::import() PyImport_ImportModule returned");
 
     if (!mod) {
         if (!checkPythonException(xsink)) {
@@ -3723,6 +3978,7 @@ int QorePythonProgram::importModule(ExceptionSink* xsink, PyObject* mod, const c
                     throw QoreStandardException("PYTHON-IMPORT-ERROR", "module '%s' __all__ has an invalid " \
                         "element with type '%s'; expecting 'str'", module, sv ? Py_TYPE(sv)->tp_name : "null");
                 }
+                qore_python_debug_init_log_symbol(PyUnicode_AsUTF8(sv));
                 if (checkImportSymbol(xsink, module, mod, is_package, PyUnicode_AsUTF8(sv), filter, true)) {
                     return -1;
                 }
@@ -3744,6 +4000,7 @@ int QorePythonProgram::importModule(ExceptionSink* xsink, PyObject* mod, const c
                     "element with type '%s'; expecting 'str'", module, sv ? Py_TYPE(sv)->tp_name : "null");
             }
 
+            qore_python_debug_init_log_symbol(PyUnicode_AsUTF8(sv));
             if (checkImportSymbol(xsink, module, mod, is_package, PyUnicode_AsUTF8(sv), filter, true)) {
                 return -1;
             }
@@ -3766,7 +4023,13 @@ int QorePythonProgram::checkImportSymbol(ExceptionSink* xsink, const char* modul
             symbol);
     }
     QorePythonReferenceHolder value(PyObject_GetAttrString(mod, symbol));
-    assert(value);
+    if (!value) {
+        if (!checkPythonException(xsink)) {
+            throw QoreStandardException("PYTHON-IMPORT-ERROR", "module '%s' failed to get symbol '%s'", module,
+                symbol);
+        }
+        return -1;
+    }
 
     bool is_class = PyType_Check(*value);
     if (is_class) {
@@ -3801,7 +4064,18 @@ int QorePythonProgram::findCreateQoreFunction(PyObject* value, const char* symbo
 
 int QorePythonProgram::importSymbol(ExceptionSink* xsink, PyObject* value, const char* module,
         const char* symbol, int filter) {
-    printd(5, "QorePythonProgram::importSymbol() %s.%s (type %s)\n", module, symbol, Py_TYPE(value)->tp_name);
+    if (!value) {
+        if (!checkPythonException(xsink)) {
+            xsink->raiseException("PYTHON-IMPORT-ERROR", "module '%s' returned null for symbol '%s'", module, symbol);
+        }
+        return -1;
+    }
+    PyTypeObject* value_type = Py_TYPE(value);
+    if (!value_type) {
+        xsink->raiseException("PYTHON-IMPORT-ERROR", "module '%s' symbol '%s' has null type", module, symbol);
+        return -1;
+    }
+    printd(5, "QorePythonProgram::importSymbol() %s.%s (type %s)\n", module, symbol, value_type->tp_name);
     // check for builtin functions -> static method
     if (PyCFunction_Check(value)) {
         // ignore errors

@@ -248,21 +248,36 @@ struct _time_runtime_state {
 #endif
 };
 
+#if defined(HAVE_PTHREAD_STUBS)
+# define QORE_PY_USE_PTHREADS 1
+#elif defined(HAVE_PTHREAD_H)
+# define QORE_PY_USE_PTHREADS 1
+#else
+# define QORE_PY_USE_PTHREADS 0
+#endif
+
+#if QORE_PY_USE_PTHREADS && defined(HAVE_PTHREAD_CONDATTR_SETCLOCK) && defined(HAVE_CLOCK_GETTIME) \
+    && defined(CLOCK_MONOTONIC)
+# define QORE_PY_CONDATTR_MONOTONIC 1
+#else
+# define QORE_PY_CONDATTR_MONOTONIC 0
+#endif
+
 struct _pythread_runtime_state {
     int initialized;
 
-#ifdef _USE_PTHREADS
+#if QORE_PY_USE_PTHREADS
     // This matches when thread_pthread.h is used.
     struct {
         /* NULL when pthread_condattr_setclock(CLOCK_MONOTONIC) is not supported. */
         pthread_condattr_t *ptr;
-# ifdef CONDATTR_MONOTONIC
+# if QORE_PY_CONDATTR_MONOTONIC
     /* The value to which condattr_monotonic is set. */
         pthread_condattr_t val;
 # endif
     } _condattr_monotonic;
 
-#endif  // USE_PTHREADS
+#endif  // QORE_PY_USE_PTHREADS
 
 #if defined(HAVE_PTHREAD_STUBS)
     struct {
@@ -270,6 +285,40 @@ struct _pythread_runtime_state {
     } stubs;
 #endif
 };
+
+struct pyhash_runtime_state {
+    struct {
+#ifndef MS_WINDOWS
+        int fd;
+        dev_t st_dev;
+        ino_t st_ino;
+#else
+        int _not_used;
+#endif
+    } urandom_cache;
+};
+
+struct _xidregitem;
+
+struct _xidregitem {
+    struct _xidregitem *prev;
+    struct _xidregitem *next;
+    PyTypeObject *cls;
+    PyObject *weakref;
+    size_t refcount;
+    crossinterpdatafunc getdata;
+};
+
+struct _xidregistry {
+    PyThread_type_lock mutex;
+    struct _xidregitem *head;
+};
+
+struct _getargs_runtime_state {
+    PyThread_type_lock mutex;
+    struct _PyArg_Parser *static_parsers;
+};
+
 
 #ifdef _SIG_MAXSIG
    // gh-91145: On FreeBSD, <signal.h> defines NSIG as 32: it doesn't include
@@ -331,6 +380,40 @@ struct _signals_runtime_state {
      * KeyboardInterrupt exception, suggesting the user pressed ^C. */
     int unhandled_keyboard_interrupt;
 };
+
+// Prefix of _PyRuntimeState up to autoTSSkey; matches Python 3.12 layout.
+// This lets us access autoTSSkey without including internal headers.
+struct _qore_runtime_state_prefix {
+    int _initialized;
+    int preinitializing;
+    int preinitialized;
+    int core_initialized;
+    int initialized;
+    _Py_atomic_address _finalizing;
+    struct {
+        PyThread_type_lock mutex;
+        PyInterpreterState *head;
+        PyInterpreterState *main;
+        int64_t next_id;
+    } interpreters;
+    unsigned long main_thread;
+    struct _xidregistry xidregistry;
+    struct _pymem_allocators allocators;
+    struct _obmalloc_global_state obmalloc;
+    struct pyhash_runtime_state pyhash_state;
+    struct _time_runtime_state time;
+    struct _pythread_runtime_state threads;
+    struct _signals_runtime_state signals;
+    Py_tss_t autoTSSkey;
+};
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern struct _qore_runtime_state_prefix _PyRuntime;
+#ifdef __cplusplus
+}
+#endif
 
 typedef void (*atexit_callbackfunc)(void);
 
@@ -617,6 +700,15 @@ DLLLOCAL static inline void _qore_PyGILState_SetThisThreadState(PyThreadState* s
     if (state != nullptr) {
         _qore_tss_initialized = true;
     }
+}
+
+// Clear or set Python's internal autoTSSkey (thread state TSS) for Python 3.12.
+DLLLOCAL static inline void _qore_PyGILState_ClearTSS() {
+    PyThread_tss_set(&_PyRuntime.autoTSSkey, nullptr);
+}
+
+DLLLOCAL static inline void _qore_PyGILState_SetTSS(PyThreadState* state) {
+    PyThread_tss_set(&_PyRuntime.autoTSSkey, state);
 }
 
 // GIL status check - use our own tracking since PyGILState_Check() in Python 3.12

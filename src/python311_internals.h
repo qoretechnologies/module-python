@@ -520,15 +520,38 @@ DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
 // Check if this might be a Python-created thread that already has the GIL.
 // In Python 3.11, PyGILState_* functions are reliable so this is straightforward.
 DLLLOCAL static inline PyThreadState* _qore_check_python_created_thread_gil() {
-    // In Python 3.11, we can trust PyGILState_Check() and PyGILState_GetThisThreadState()
-    if (PyGILState_Check()) {
-        PyThreadState* tss_state = PyGILState_GetThisThreadState();
-        if (tss_state) {
-            _qore_tss_tstate = tss_state;
-            _qore_tss_initialized = true;
-            _qore_gil_held = true;  // Track that we hold the GIL
-            return tss_state;
+    // If our tracking is already initialized, this is a Qore-managed thread.
+    if (_qore_tss_initialized) {
+        return nullptr;
+    }
+
+    // In Python 3.11, PyGILState_Check() can be unreliable with sub-interpreters, so
+    // also consult our GIL-locked check which uses thread IDs.
+    PyThreadState* tss_state = PyGILState_GetThisThreadState();
+    bool gil_check = PyGILState_Check() || _qore_PyCeval_GetGilLockedStatus();
+    if (tss_state != nullptr && gil_check) {
+        // Verify tss_state is still valid by checking interpreter thread lists.
+        bool found = false;
+        PyInterpreterState* interp = PyInterpreterState_Head();
+        while (interp != nullptr && !found) {
+            PyThreadState* ts = PyInterpreterState_ThreadHead(interp);
+            while (ts != nullptr) {
+                if (ts == tss_state) {
+                    found = true;
+                    break;
+                }
+                ts = PyThreadState_Next(ts);
+            }
+            interp = PyInterpreterState_Next(interp);
         }
+        if (!found) {
+            return nullptr;
+        }
+
+        _qore_tss_tstate = tss_state;
+        _qore_tss_initialized = true;
+        _qore_gil_held = true;  // Track that we hold the GIL
+        return tss_state;
     }
     return nullptr;
 }

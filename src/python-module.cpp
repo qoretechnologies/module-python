@@ -24,6 +24,16 @@
 #include "QorePythonProgram.h"
 #include "QorePythonStackLocationHelper.h"
 
+#include <cstdio>
+
+static inline void qore_python_debug_init_log(const char* msg) {
+    const char* debug_init = getenv("QORE_PYTHON_DEBUG_INIT");
+    if (debug_init && *debug_init) {
+        fprintf(stderr, "qore-python init: %s\n", msg);
+        fflush(stderr);
+    }
+}
+
 static QoreStringNode* python_module_init();
 static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns);
 static void python_module_delete();
@@ -233,6 +243,7 @@ static QoreStringNode* python_module_init() {
 
 static QoreStringNode* python_module_init_intern(bool repeat) {
     if (!PNS) {
+        qore_python_debug_init_log("creating Python namespace");
         PNS = new QoreNamespace("Python");
         PNS->addSystemClass(initPythonProgramClass(*PNS));
         QC_PYTHONBASEOBJECT = new QorePythonClass("__qore_base__", "::Python::__qore_base__");
@@ -255,11 +266,14 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
 
     // initialize python library; do not register signal handlers
     if (!Py_IsInitialized()) {
+        qore_python_debug_init_log("appending qoreloader to inittab");
         if (PyImport_AppendInittab("qoreloader", PyInit_qoreloader) == -1) {
             throw QoreStandardException("PYTHON-MODULE-ERROR", "cannot append the qoreloader module to Python");
         }
 
+        qore_python_debug_init_log("calling Py_InitializeEx");
         Py_InitializeEx(0);
+        qore_python_debug_init_log("Py_InitializeEx returned");
 #ifdef QORE_ALLOW_PYTHON_SHUTDOWN
         // issue# 4290: if we actively shut down Python on exit, then exit handlers in modules
         // (such as the h5py module in version 3.3.0) will cause a crash when the process exits,
@@ -297,7 +311,52 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     }
 
     // ensure that runtime version matches compiled version
+    qore_python_debug_init_log("checking Python version");
     check_python_version();
+
+    // Ensure sys.path is initialized when embedding (esp. for debug builds).
+    const char* pyhome = getenv("PYTHONHOME");
+    const char* pypath = getenv("PYTHONPATH");
+    if ((pyhome && *pyhome) || (pypath && *pypath)) {
+        std::string path;
+        if (pypath) {
+            path += pypath;
+        }
+        if (pyhome && *pyhome) {
+            if (!path.empty()) {
+                path += ":";
+            }
+            path += pyhome;
+            path += "/Lib";
+            path += ":";
+            path += pyhome;
+            path += "/Modules";
+        }
+        PyObject* sys_path = PySys_GetObject("path");  // borrowed
+        if (!sys_path || !PyList_Check(sys_path)) {
+            sys_path = PyList_New(0);
+            if (sys_path) {
+                PySys_SetObject("path", sys_path);
+                Py_DECREF(sys_path);
+            }
+        }
+        if (sys_path && PyList_Check(sys_path)) {
+            size_t start = 0;
+            while (start <= path.size()) {
+                size_t end = path.find(':', start);
+                if (end == std::string::npos) {
+                    end = path.size();
+                }
+                std::string entry = path.substr(start, end - start);
+                PyObject* py_entry = PyUnicode_DecodeFSDefault(entry.c_str());
+                if (py_entry) {
+                    PyList_Append(sys_path, py_entry);
+                    Py_DECREF(py_entry);
+                }
+                start = end + 1;
+            }
+        }
+    }
 
     // Initialize thread-local state tracking to match Python's state
     // This must be done before creating any QorePythonProgram instances
@@ -324,6 +383,7 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     _qore_gil_held = true;
 #endif
 
+    qore_python_debug_init_log("initializing global Qore Python program");
     if (init_global_qore_python_pgm()) {
         throw QoreStandardException("PYTHON-MODULE-ERROR", "failed to initialize \"python\" module");
     }
@@ -336,12 +396,14 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     //    PyGILState_GetThisThreadState(), (int)gstate);
 #endif
 
+    qore_python_debug_init_log("running static init helpers");
     if (QorePythonProgram::staticInit() || QorePythonStackLocationHelper::staticInit()) {
 #ifdef Py_GIL_DISABLED
         PyGILState_Release(gstate);
 #endif
         throw QoreStandardException("PYTHON-MODULE-ERROR", "failed to initialize \"python\" module");
     }
+    qore_python_debug_init_log("static init helpers done");
 
 #ifdef Py_GIL_DISABLED
     PyGILState_Release(gstate);
@@ -377,6 +439,7 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     // In free-threading mode, don't release the thread state after initialization
     // We keep the main thread state attached for Python operations
 #endif
+    qore_python_debug_init_log("python module init complete");
 
     if (!repeat) {
         tclist.push(QorePythonProgram::pythonThreadCleanup, nullptr);
@@ -386,9 +449,11 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
 }
 
 static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns) {
+    qore_python_debug_init_log("python_module_ns_init entry");
     QoreProgram* pgm = getProgram();
     assert(pgm->getRootNS() == rns);
     if (!pgm->getExternalData(QORE_PYTHON_MODULE_NAME)) {
+        qore_python_debug_init_log("python_module_ns_init creating program");
         QoreNamespace* pyns = PNS->copy();
         rns->addNamespace(pyns);
         // NOTE: Use QoreProgramContextHelper instead of QoreExternalProgramContextHelper
@@ -410,6 +475,7 @@ static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns) {
         // thread-local operations, not for the external data setup itself.
         QoreProgramContextHelper pch(pgm);
         pgm->setExternalData(QORE_PYTHON_MODULE_NAME, new QorePythonProgram(pgm, pyns));
+        qore_python_debug_init_log("python_module_ns_init program created");
     }
 
 #ifndef Py_GIL_DISABLED
@@ -712,6 +778,11 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     // Python 3.13+ GIL mode - use PyEval_AcquireThread/ReleaseThread which properly
     // handle TSS and fast TLS synchronization
     if (release_gil) {
+        // If bound_gilstate is stale, clear it to avoid tstate_activate assertions.
+        if (new_thread_state->_status.bound_gilstate
+            && PyGILState_GetThisThreadState() != new_thread_state) {
+            new_thread_state->_status.bound_gilstate = 0;
+        }
         // Need to acquire the GIL with our specific thread state
         // CRITICAL: If there's a stale TSS from a previous interpreter, we must clear it first.
         // PyEval_AcquireThread -> _PyThreadState_Attach tries to detach any existing thread state,
@@ -731,6 +802,20 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     _qore_PyGILState_SetThisThreadState(new_thread_state);
 #else
     if (release_gil) {
+#if PY_VERSION_HEX >= 0x030C0000
+        // Ensure bound_gilstate and TSS are consistent before acquiring the GIL in Python 3.12.
+        PyThreadState* tss_before = PyGILState_GetThisThreadState();
+        if (new_thread_state->_status.bound_gilstate && tss_before != new_thread_state) {
+            _qore_PyGILState_SetTSS(new_thread_state);
+            PyThreadState* tss_after = PyGILState_GetThisThreadState();
+            if (tss_after != new_thread_state) {
+                _qore_PyGILState_ClearTSS();
+                new_thread_state->_status.bound_gilstate = 0;
+            } else {
+                new_thread_state->_status.bound_gilstate = 1;
+            }
+        }
+#endif
         _qore_acquire_thread_state(new_thread_state);
         // Use _qore_tss_tstate for assertion since Python's TSS (PyGILState_GetThisThreadState)
         // might be stale from a deleted interpreter in Python 3.12
