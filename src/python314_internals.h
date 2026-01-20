@@ -52,6 +52,7 @@ inline int PyThreadState_GetRecursionLimit(PyThreadState* state) {
 inline PyInterpreterState* _PyGILState_GetInterpreterStateUnsafe() {
     return PyInterpreterState_Main();
 }
+#define QORE_PY_GILSTATE_UNSAFE_DEFINED 1
 
 inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_limit) {
     (void)state;  // unused in Python 3.14+

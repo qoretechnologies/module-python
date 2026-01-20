@@ -196,13 +196,8 @@ DLLLOCAL static inline PyThreadState* _qore_check_python_created_thread_gil() {
 #else
 #if PY_MAJOR_VERSION >= 3
 #if PY_MINOR_VERSION >= 14
-#ifdef Py_GIL_DISABLED
-// Free-threading Python 3.14+
+// Python 3.14+ (GIL or free-threading)
 #include "python314_internals.h"
-#else
-// GIL-enabled Python 3.14+ uses 3.12 internals
-#include "python312_internals.h"
-#endif
 #elif PY_MINOR_VERSION >= 13
 #include "python313_internals.h"
 #elif PY_MINOR_VERSION == 12
@@ -309,8 +304,7 @@ inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_lim
 #endif // PY_VERSION_HEX >= 0x030D0000
 
 // Python 3.14+ specific compatibility APIs
-#if PY_VERSION_HEX >= 0x030E0000
-
+#if PY_VERSION_HEX >= 0x030E0000 && !defined(QORE_PY_GILSTATE_UNSAFE_DEFINED)
 #ifndef Py_GIL_DISABLED
 // _PyGILState_GetInterpreterStateUnsafe was removed in Python 3.14
 // Use PyInterpreterState_Main() as a replacement when there's no thread state
@@ -318,8 +312,7 @@ inline PyInterpreterState* _PyGILState_GetInterpreterStateUnsafe() {
     return PyInterpreterState_Main();
 }
 #endif // !Py_GIL_DISABLED
-
-#endif // PY_VERSION_HEX >= 0x030E0000
+#endif // PY_VERSION_HEX >= 0x030E0000 && !QORE_PY_GILSTATE_UNSAFE_DEFINED
 
 /** Thread State Locations:
     - _PyRuntime.gilstate.tstate_current - must only be modified while holding the GIL

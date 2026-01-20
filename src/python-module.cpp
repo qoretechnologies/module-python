@@ -24,6 +24,8 @@
 #include "QorePythonProgram.h"
 #include "QorePythonStackLocationHelper.h"
 
+#include <string>
+
 static QoreStringNode* python_module_init();
 static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns);
 static void python_module_delete();
@@ -298,6 +300,56 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
 
     // ensure that runtime version matches compiled version
     check_python_version();
+
+    // Ensure sys.path is initialized when embedding (esp. for debug builds).
+    const char* pyhome = getenv("PYTHONHOME");
+    const char* pypath = getenv("PYTHONPATH");
+    if ((pyhome && *pyhome) || (pypath && *pypath)) {
+#ifdef _Q_WINDOWS
+        const char path_sep = ';';
+#else
+        const char path_sep = ':';
+#endif
+        std::string path;
+        if (pypath) {
+            path += pypath;
+        }
+        if (pyhome && *pyhome) {
+            if (!path.empty()) {
+                path += path_sep;
+            }
+            path += pyhome;
+            path += "/Lib";
+            path += path_sep;
+            path += pyhome;
+            path += "/Modules";
+        }
+        PyObject* sys_path = PySys_GetObject("path");  // borrowed
+        if (!sys_path || !PyList_Check(sys_path)) {
+            sys_path = PyList_New(0);
+            if (sys_path) {
+                PySys_SetObject("path", sys_path);
+                Py_DECREF(sys_path);
+            }
+        }
+        if (sys_path && PyList_Check(sys_path)) {
+            size_t start = 0;
+            // Preserve empty entries to keep CWD semantics (ex: leading/trailing separators).
+            while (start <= path.size()) {
+                size_t end = path.find(path_sep, start);
+                if (end == std::string::npos) {
+                    end = path.size();
+                }
+                std::string entry = path.substr(start, end - start);
+                PyObject* py_entry = PyUnicode_DecodeFSDefault(entry.c_str());
+                if (py_entry) {
+                    PyList_Append(sys_path, py_entry);
+                    Py_DECREF(py_entry);
+                }
+                start = end + 1;
+            }
+        }
+    }
 
     // Initialize thread-local state tracking to match Python's state
     // This must be done before creating any QorePythonProgram instances
@@ -712,6 +764,11 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     // Python 3.13+ GIL mode - use PyEval_AcquireThread/ReleaseThread which properly
     // handle TSS and fast TLS synchronization
     if (release_gil) {
+        // If bound_gilstate is stale, clear it to avoid tstate_activate assertions.
+        if (new_thread_state->_status.bound_gilstate
+            && PyGILState_GetThisThreadState() != new_thread_state) {
+            new_thread_state->_status.bound_gilstate = 0;
+        }
         // Need to acquire the GIL with our specific thread state
         // CRITICAL: If there's a stale TSS from a previous interpreter, we must clear it first.
         // PyEval_AcquireThread -> _PyThreadState_Attach tries to detach any existing thread state,
@@ -731,6 +788,20 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     _qore_PyGILState_SetThisThreadState(new_thread_state);
 #else
     if (release_gil) {
+#if PY_VERSION_HEX >= 0x030C0000
+        // Ensure bound_gilstate and TSS are consistent before acquiring the GIL in Python 3.12.
+        PyThreadState* tss_before = PyGILState_GetThisThreadState();
+        if (new_thread_state->_status.bound_gilstate && tss_before != new_thread_state) {
+            _qore_PyGILState_SetTSS(new_thread_state);
+            PyThreadState* tss_after = PyGILState_GetThisThreadState();
+            if (tss_after != new_thread_state) {
+                _qore_PyGILState_ClearTSS();
+                new_thread_state->_status.bound_gilstate = 0;
+            } else {
+                new_thread_state->_status.bound_gilstate = 1;
+            }
+        }
+#endif
         _qore_acquire_thread_state(new_thread_state);
         // Use _qore_tss_tstate for assertion since Python's TSS (PyGILState_GetThisThreadState)
         // might be stale from a deleted interpreter in Python 3.12
