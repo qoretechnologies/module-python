@@ -29,24 +29,6 @@
 #include "PythonQoreClass.h"
 #include "QoreMetaPathFinder.h"
 
-#include <cstdio>
-#include <string>
-
-static inline void qore_python_debug_init_log(const char* msg) {
-    const char* debug_init = getenv("QORE_PYTHON_DEBUG_INIT");
-    if (debug_init && *debug_init) {
-        fprintf(stderr, "qore-python init: %s\n", msg);
-        fflush(stderr);
-    }
-}
-
-static inline void qore_python_debug_init_log_symbol(const char* symbol) {
-    const char* debug_init = getenv("QORE_PYTHON_DEBUG_INIT");
-    if (debug_init && *debug_init) {
-        fprintf(stderr, "qore-python init: importing symbol '%s'\n", symbol ? symbol : "<null>");
-        fflush(stderr);
-    }
-}
 #include "PythonCallableCallReferenceNode.h"
 #include "PythonQoreCallable.h"
 #include "ModuleNamespace.h"
@@ -97,7 +79,6 @@ QoreThreadLock QorePythonProgram::main_ts_lck;
 unsigned QorePythonProgram::pgm_count = 0;
 
 QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
-    qore_python_debug_init_log("QorePythonProgram() default ctor");
     printd(5, "QorePythonProgram::QorePythonProgram() this: %p\n", this);
     qpy_global_register(this);
 #if PY_VERSION_HEX >= 0x030D0000
@@ -138,9 +119,7 @@ QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
 
 QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
         : qpgm(qpgm), pyns(pyns), save_object_callback(nullptr) {
-    qore_python_debug_init_log("QorePythonProgram() program ctor");
     qpy_global_register(this);
-    qore_python_debug_init_log("QorePythonProgram() after global register");
 
     // Two-phase locking to avoid deadlocks:
     // Phase 1: Use main_ts_lck to serialize mainThreadState access during GIL acquisition
@@ -150,35 +129,29 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
     // - setContext/releaseContext: py_thr_lck (brief) -> GIL (no conflict with main_ts_lck)
     AutoLocker mts_al(main_ts_lck);
 
-    qore_python_debug_init_log("QorePythonProgram() creating GIL helper");
     QorePythonGilHelper qpgh;
-    qore_python_debug_init_log("QorePythonProgram() GIL helper created");
 
     ExceptionSink xsink;
     if (createInterpreter(qpgh, &xsink)) {
         valid = false;
         return;
     }
-    qore_python_debug_init_log("QorePythonProgram() interpreter created");
 
     // ensure that the __main__ module is created
     // returns a borrowed reference
     module = PyImport_AddModule("__main__");
     module.py_ref();
-    qore_python_debug_init_log("QorePythonProgram() __main__ module ready");
 
     import(&xsink, "builtins");
     if (xsink) {
         valid = false;
         return;
     }
-    qore_python_debug_init_log("QorePythonProgram() builtins imported");
     //assert(!xsink);
 
     // returns a borrowed reference
     setGlobalDictionary(*module);
     assert(!PyErr_Occurred());
-    qore_python_debug_init_log("QorePythonProgram() global dict set");
 
     // import qoreloader module
     QorePythonReferenceHolder qoreloader(PyImport_ImportModule("qoreloader"));
@@ -188,7 +161,6 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
         }
         return;
     }
-    qore_python_debug_init_log("QorePythonProgram() qoreloader imported");
 
     PyDict_SetItemString(module_dict, "qoreloader", *qoreloader);
     needs_deregistration = qpy_register(this);
@@ -791,17 +763,22 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
         const char* pyhome = getenv("PYTHONHOME");
         const char* pypath = getenv("PYTHONPATH");
         if ((pyhome && *pyhome) || (pypath && *pypath)) {
+#ifdef _Q_WINDOWS
+            const char path_sep = ';';
+#else
+            const char path_sep = ':';
+#endif
             std::string path;
             if (pypath) {
                 path += pypath;
             }
             if (pyhome && *pyhome) {
                 if (!path.empty()) {
-                    path += ":";
+                    path += path_sep;
                 }
                 path += pyhome;
                 path += "/Lib";
-                path += ":";
+                path += path_sep;
                 path += pyhome;
                 path += "/Modules";
             }
@@ -815,8 +792,9 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
             }
             if (sys_path && PyList_Check(sys_path)) {
                 size_t start = 0;
+                // Preserve empty entries to keep CWD semantics (ex: leading/trailing separators).
                 while (start <= path.size()) {
-                    size_t end = path.find(':', start);
+                    size_t end = path.find(path_sep, start);
                     if (end == std::string::npos) {
                         end = path.size();
                     }
@@ -836,7 +814,6 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
         PyDateTime_IMPORT;
         if (!PyDateTimeAPI) {
             PyErr_Clear();
-            qore_python_debug_init_log("PyDateTime_IMPORT failed after sub-interpreter creation");
         }
     }
 
@@ -848,7 +825,6 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
         if (!PyDateTimeAPI) {
             PyErr_Clear();
             PyDateTimeAPI = nullptr;
-            qore_python_debug_init_log("PyDateTime_IMPORT failed in sub-interpreter");
         }
     }
 
@@ -3871,7 +3847,6 @@ int QorePythonProgram::saveModule(const char* name, PyObject* mod) {
 }
 
 int QorePythonProgram::import(ExceptionSink* xsink, const char* module, const char* symbol) {
-    qore_python_debug_init_log("QorePythonProgram::import() entry");
     //printd(5, "QorePythonProgram::import() module: '%s' symbol: '%s'\n", module, symbol ? symbol : "n/a");
 
     QoreString mod_name(module);
@@ -3912,9 +3887,7 @@ int QorePythonProgram::import(ExceptionSink* xsink, const char* module, const ch
         }
     }
 
-    qore_python_debug_init_log("QorePythonProgram::import() calling PyImport_ImportModule");
     mod = PyImport_ImportModule(module);
-    qore_python_debug_init_log("QorePythonProgram::import() PyImport_ImportModule returned");
 
     if (!mod) {
         if (!checkPythonException(xsink)) {
@@ -3978,7 +3951,6 @@ int QorePythonProgram::importModule(ExceptionSink* xsink, PyObject* mod, const c
                     throw QoreStandardException("PYTHON-IMPORT-ERROR", "module '%s' __all__ has an invalid " \
                         "element with type '%s'; expecting 'str'", module, sv ? Py_TYPE(sv)->tp_name : "null");
                 }
-                qore_python_debug_init_log_symbol(PyUnicode_AsUTF8(sv));
                 if (checkImportSymbol(xsink, module, mod, is_package, PyUnicode_AsUTF8(sv), filter, true)) {
                     return -1;
                 }
@@ -4000,7 +3972,6 @@ int QorePythonProgram::importModule(ExceptionSink* xsink, PyObject* mod, const c
                     "element with type '%s'; expecting 'str'", module, sv ? Py_TYPE(sv)->tp_name : "null");
             }
 
-            qore_python_debug_init_log_symbol(PyUnicode_AsUTF8(sv));
             if (checkImportSymbol(xsink, module, mod, is_package, PyUnicode_AsUTF8(sv), filter, true)) {
                 return -1;
             }
