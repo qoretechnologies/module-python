@@ -228,8 +228,8 @@ public:
     DLLLOCAL int checkValid(ExceptionSink* xsink) const {
         // the GIL must be held when this function is called
         if (!valid) {
-            xsink->raiseException("PYTHON-ERROR", "the given PythonProgram object is invalid or has already been " \
-                "deleted");
+            xsink->raiseException("PYTHON-INTERPRETER-DELETED",
+                "cannot execute Python callable: the Python interpreter has been deleted");
             return -1;
         }
 #if PY_VERSION_HEX >= 0x030D0000

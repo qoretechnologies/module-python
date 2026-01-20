@@ -303,6 +303,26 @@ inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_lim
 
 #endif // PY_VERSION_HEX >= 0x030D0000
 
+#if PY_VERSION_HEX >= 0x030C0000
+DLLLOCAL static inline int qore_py_get_bound_gilstate(PyThreadState* tstate) {
+    return tstate->_status.bound_gilstate;
+}
+
+DLLLOCAL static inline void qore_py_set_bound_gilstate(PyThreadState* tstate, int value) {
+    tstate->_status.bound_gilstate = value;
+}
+#else
+DLLLOCAL static inline int qore_py_get_bound_gilstate(PyThreadState* tstate) {
+    (void)tstate;
+    return 0;
+}
+
+DLLLOCAL static inline void qore_py_set_bound_gilstate(PyThreadState* tstate, int value) {
+    (void)tstate;
+    (void)value;
+}
+#endif
+
 // Python 3.14+ specific compatibility APIs
 #if PY_VERSION_HEX >= 0x030E0000 && !defined(QORE_PY_GILSTATE_UNSAFE_DEFINED)
 #ifndef Py_GIL_DISABLED

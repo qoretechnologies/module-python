@@ -765,9 +765,9 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     // handle TSS and fast TLS synchronization
     if (release_gil) {
         // If bound_gilstate is stale, clear it to avoid tstate_activate assertions.
-        if (new_thread_state->_status.bound_gilstate
+        if (qore_py_get_bound_gilstate(new_thread_state)
             && PyGILState_GetThisThreadState() != new_thread_state) {
-            new_thread_state->_status.bound_gilstate = 0;
+            qore_py_set_bound_gilstate(new_thread_state, 0);
         }
         // Need to acquire the GIL with our specific thread state
         // CRITICAL: If there's a stale TSS from a previous interpreter, we must clear it first.
@@ -791,14 +791,14 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
 #if PY_VERSION_HEX >= 0x030C0000
         // Ensure bound_gilstate and TSS are consistent before acquiring the GIL in Python 3.12.
         PyThreadState* tss_before = PyGILState_GetThisThreadState();
-        if (new_thread_state->_status.bound_gilstate && tss_before != new_thread_state) {
+        if (qore_py_get_bound_gilstate(new_thread_state) && tss_before != new_thread_state) {
             _qore_PyGILState_SetTSS(new_thread_state);
             PyThreadState* tss_after = PyGILState_GetThisThreadState();
             if (tss_after != new_thread_state) {
                 _qore_PyGILState_ClearTSS();
-                new_thread_state->_status.bound_gilstate = 0;
+                qore_py_set_bound_gilstate(new_thread_state, 0);
             } else {
-                new_thread_state->_status.bound_gilstate = 1;
+                qore_py_set_bound_gilstate(new_thread_state, 1);
             }
         }
 #endif
