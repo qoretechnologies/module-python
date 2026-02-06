@@ -26,8 +26,8 @@
 
 #include <string>
 
-static QoreStringNode* python_module_init();
-static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns);
+static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink);
+static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, ExceptionSink& xsink);
 static void python_module_delete();
 static void python_module_parse_cmd(const QoreString& cmd, ExceptionSink* xsink);
 
@@ -229,8 +229,11 @@ int q_reset_python(ExceptionSink* xsink) {
 }
 #endif
 
-static QoreStringNode* python_module_init() {
-    return python_module_init_intern(false);
+static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) {
+    QoreStringNode* err = python_module_init_intern(false);
+    if (err) {
+        xsink.raiseException("MODULE-INIT-ERROR", err);
+    }
 }
 
 static QoreStringNode* python_module_init_intern(bool repeat) {
@@ -437,7 +440,7 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     return nullptr;
 }
 
-static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns) {
+static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, ExceptionSink& xsink) {
     QoreProgram* pgm = getProgram();
     assert(pgm->getRootNS() == rns);
     if (!pgm->getExternalData(QORE_PYTHON_MODULE_NAME)) {
