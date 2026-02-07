@@ -268,9 +268,9 @@ void QorePythonProgram::createQoreProgram() {
 
     // Inherit sandbox manager from parent program
     if (pgm) {
-        QoreSandboxManager* sm = pgm->getSandboxManager();
-        if (sm) {
-            qpgm->setSandboxManager(sm);
+        QoreSandboxManagerHelper smh(pgm);
+        if (smh) {
+            qpgm->setSandboxManager(smh.get());
         }
     }
 
@@ -931,10 +931,10 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 
     // Check for interrupt before acquiring any state (only if requested)
     if (check_interrupt) {
-        QoreSandboxManager* sm = runtime_get_sandbox_manager();
-        QoreSandboxManager* qpgm_sm = qpgm ? qpgm->getSandboxManager() : nullptr;
-        bool sm_interrupted = sm && sm->isInterruptRequested();
-        bool qpgm_sm_interrupted = qpgm_sm && qpgm_sm != sm && qpgm_sm->isInterruptRequested();
+        QoreSandboxManagerHelper smh;
+        QoreSandboxManagerHelper qpgm_smh(qpgm);
+        bool sm_interrupted = smh && smh->isInterruptRequested();
+        bool qpgm_sm_interrupted = qpgm_smh && qpgm_smh.get() != smh.get() && qpgm_smh->isInterruptRequested();
         if (sm_interrupted || qpgm_sm_interrupted) {
             return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, 0, false};
         }
