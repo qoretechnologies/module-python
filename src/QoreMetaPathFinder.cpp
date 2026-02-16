@@ -281,6 +281,13 @@ PyObject* QoreMetaPathFinder::tryLoadModule(const QoreString& full_name, const c
         return getQoreRootModuleSpec(full_name);
     }
 
+    // Qore module names do not contain dots; dotted names (e.g. "DataProvider.AbstractDataProcessor") are Python
+    // sub-package lookups for classes/objects that should already be attributes of the parent module.
+    // runTimeLoadModule() would misinterpret the dot as a path separator and incorrectly match the parent module.
+    if (strchr(mod_name, '.')) {
+        return nullptr;
+    }
+
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
     ExceptionSink xsink;
     if (ModuleManager::runTimeLoadModule(mod_name, qore_python_pgm->getQoreProgram(), &xsink)) {

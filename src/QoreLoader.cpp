@@ -179,12 +179,18 @@ PyObject* QoreLoader::exec_module(PyObject* self, PyObject* args) {
         printd(5, "QoreLoader::exec_module() found '%s' NS %p: '::%s'\n", name_str, ns, ns->getName());
         QoreProgramContextHelper pch(mod_pgm);
         qore_python_pgm->importQoreToPython(mod, *ns, name_str);
+        if (PyErr_Occurred()) {
+            return nullptr;
+        }
         std::string nspath = ns->getPath();
         QorePythonReferenceHolder py_path(PyUnicode_FromStringAndSize(nspath.c_str(), nspath.size()));
-        PyObject_SetAttrString(mod, "__path__", *py_path);
+        if (PyObject_SetAttrString(mod, "__path__", *py_path)) {
+            return nullptr;
+        }
     } else {
         QoreStringMaker desc("cannot find Qore namespace for Python module '%s'", orig_name_str);
         PyErr_SetString(PyExc_NameError, desc.c_str());
+        return nullptr;
     }
 
     Py_INCREF(Py_None);
@@ -206,6 +212,7 @@ const QoreNamespace* QoreLoader::getModuleRootNs(const char* name, QoreProgram* 
 
 const QoreNamespace* QoreLoader::getModuleRootNsIntern(const char* name, const QoreNamespace& root_ns,
         const QoreHashNode* all_mod_info, mod_dep_map_t& mod_dep_map, bool check_mod) {
+    const QoreNamespace* candidate = nullptr;
     QoreNamespaceConstIterator i(root_ns);
     while (i.next()) {
         const QoreNamespace* ns = &i.get();
@@ -225,16 +232,29 @@ const QoreNamespace* QoreLoader::getModuleRootNsIntern(const char* name, const Q
         while (true) {
             const QoreNamespace* parent = ns->getParent();
             if (!isModule(parent, name, all_mod_info, mod_dep_map)) {
-                printd(5, "QoreLoader::getModuleRootNs('%s') invalid parent '%s'\n", name, parent->getPath().c_str());
+                printd(5, "QoreLoader::getModuleRootNs('%s') invalid parent '%s'\n", name,
+                    parent->getPath().c_str());
                 break;
             }
             ns = parent;
             printd(5, "QoreLoader::getModuleRootNs('%s') got parent '%s'\n", name, ns->getPath().c_str());
         }
-        printd(5, "QoreLoader::getModuleRootNs('%s') returning '%s'\n", name, ns->getPath().c_str());
-        return ns;
+        // prefer a namespace whose name matches the module name
+        if (!strcmp(ns->getName(), name)) {
+            printd(5, "QoreLoader::getModuleRootNs('%s') returning exact match '%s'\n", name,
+                ns->getPath().c_str());
+            return ns;
+        }
+        // save as fallback candidate and keep searching for an exact name match
+        if (!candidate) {
+            candidate = ns;
+        }
     }
-    return nullptr;
+    if (candidate) {
+        printd(5, "QoreLoader::getModuleRootNs('%s') returning fallback '%s'\n", name,
+            candidate->getPath().c_str());
+    }
+    return candidate;
 }
 
 bool QoreLoader::isModule(const QoreNamespace* parent, const char* name, const QoreHashNode* all_mod_info,
