@@ -259,7 +259,7 @@ int QorePythonProgram::setGlobalDictionary(PyObject* mod) {
 void QorePythonProgram::createQoreProgram() {
     // create Qore program object with the same restrictions as the parent
     QoreProgram* pgm = getProgram();
-    int64 parse_options = pgm ? pgm->getParseOptions64() : 0;
+    QoreParseOptions parse_options = pgm ? pgm->getParseOptions() : QoreParseOptions();
     qpgm = new QoreProgram(parse_options);
     owns_qore_program_ref = true;
     pyns = PNS->copy();
