@@ -589,10 +589,15 @@ def stop():
             };
             WebSocketClient wsc(callback, {"url": "ws://localhost:" + port});
             wsc.connect();
-            # Ensure the client disconnects on error/exit for clean shutdown
             on_exit wsc.disconnect();
             wsc.send("test");
             assertEq("default response", q.get(10s));
+            # stop() must be called from the main thread (Gate owner), but it
+            # waits for all connections to drain first.  Disconnect the client
+            # in a background thread so the main thread's stop() can complete.
+            # The main thread reaches p.callFunction("stop") before the new
+            # thread starts due to thread-creation overhead.
+            background wsc.disconnect();
             p.callFunction("stop");
         }
     }
