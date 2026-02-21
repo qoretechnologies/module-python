@@ -1462,12 +1462,13 @@ auto sub get() {
         }
 
         {
+            # test that abstract classes cannot be instantiated from Python
             PythonProgram pp("
 import qoreloader
-from qore.DataProvider import AbstractDataProcessor
+from qore.DataProvider import AbstractDataProvider
 
 def test():
-    return AbstractDataProcessor()
+    return AbstractDataProvider()
 ", "test.py");
             assertThrows("ABSTRACT-CLASS-ERROR", \pp.callFunction(), "test");
         }
