@@ -931,11 +931,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 
     // Check for interrupt before acquiring any state (only if requested)
     if (check_interrupt) {
-        QoreSandboxManagerHelper smh;
-        QoreSandboxManagerHelper qpgm_smh(qpgm);
-        bool sm_interrupted = smh && smh->isInterruptRequested();
-        bool qpgm_sm_interrupted = qpgm_smh && qpgm_smh.get() != smh.get() && qpgm_smh->isInterruptRequested();
-        if (sm_interrupted || qpgm_sm_interrupted) {
+        if (qore_check_cancel(nullptr, "Python execution")) {
             return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, 0, false};
         }
     }
