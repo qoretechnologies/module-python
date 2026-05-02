@@ -1711,16 +1711,17 @@ int QorePythonProgram::saveQoreObjectFromPython(const QoreValue& rv, ExceptionSi
 int QorePythonProgram::saveQoreObjectFromPythonDefault(const QoreValue& rv, ExceptionSink& xsink) {
     QoreHashNode* data = qpgm->getThreadData();
     assert(data);
-    const char* domain_name;
+    std::string domain_name;
     // get key name where to save the data if possible
     QoreValue v = data->getKeyValue("_python_save");
     if (v.getType() != NT_STRING) {
         domain_name = "_python_save";
     } else {
-        domain_name = v.get<const QoreStringNode>()->c_str();
+        QoreStringValueHelper str(v);
+        domain_name = str->c_str();
     }
 
-    QoreValue kv = data->getKeyValue(domain_name);
+    QoreValue kv = data->getKeyValue(domain_name.c_str());
     // ignore operation if domain exists but is not a list
     if (!kv || kv.getType() == NT_LIST) {
         QoreListNode* list;
@@ -1758,9 +1759,14 @@ void QorePythonProgram::raisePythonException(ExceptionSink& xsink) {
     QoreValue desc(xsink.getExceptionDesc());
     QoreValue arg(xsink.getExceptionArg());
 
-    printd(5, "QorePythonProgram::raisePythonException() this: %p owns_interpreter: %d err: %s\n",
-        this, owns_interpreter,
-        err.getType() == NT_STRING ? err.get<const QoreStringNode>()->c_str() : "N/A");
+    if (err.getType() == NT_STRING) {
+        QoreStringValueHelper err_str(err);
+        printd(5, "QorePythonProgram::raisePythonException() this: %p owns_interpreter: %d err: %s\n",
+            this, owns_interpreter, err_str->c_str());
+    } else {
+        printd(5, "QorePythonProgram::raisePythonException() this: %p owns_interpreter: %d err: N/A\n",
+            this, owns_interpreter);
+    }
 
     // In sub-interpreters (owns_interpreter == true), we cannot use PythonQoreException_Type
     // because it's a custom type initialized in the main interpreter. Using it in a sub-interpreter
@@ -2820,8 +2826,10 @@ PyObject* QorePythonProgram::getPythonValue(QoreValue val, ExceptionSink* xsink)
         case NT_FLOAT:
             return PyFloat_FromDouble(val.getAsFloat());
 
-        case NT_STRING:
-            return getPythonString(xsink, val.get<const QoreStringNode>());
+        case NT_STRING: {
+            QoreStringNodeValueHelper str(val);
+            return getPythonString(xsink, *str);
+        }
 
         case NT_LIST:
             return getPythonList(xsink, val.get<const QoreListNode>());

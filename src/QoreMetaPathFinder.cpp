@@ -293,9 +293,9 @@ PyObject* QoreMetaPathFinder::tryLoadModule(const QoreString& full_name, const c
     if (ModuleManager::runTimeLoadModule(mod_name, qore_python_pgm->getQoreProgram(), &xsink)) {
 #ifdef _QORE_PYTHON_DEBUG_MODULE_ERRORS
         // the exception message is lost, to get it for debugging purposes, enable this block
-        const char* err = xsink.getExceptionErr().get<const QoreStringNode>()->c_str();
-        const char* desc = xsink.getExceptionDesc().get<const QoreStringNode>()->c_str();
-        printf("%s: %s\n", err, desc);
+        QoreStringValueHelper err(xsink.getExceptionErr());
+        QoreStringValueHelper desc(xsink.getExceptionDesc());
+        printf("%s: %s\n", err->c_str(), desc->c_str());
 #endif
         // ignore exceptions and continue
         xsink.clear();

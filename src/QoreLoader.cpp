@@ -292,8 +292,11 @@ bool QoreLoader::isModule(const QoreNamespace* parent, const char* name, const Q
     ConstListIterator li(reexport_list);
     while (li.next()) {
         const QoreValue v = li.getValue();
-        if (v.getType() == NT_STRING && (*v.get<const QoreStringNode>() == mod)) {
-            return true;
+        if (v.getType() == NT_STRING) {
+            QoreStringValueHelper str(v);
+            if (mod && !strcmp(str->c_str(), mod)) {
+                return true;
+            }
         }
     }
 

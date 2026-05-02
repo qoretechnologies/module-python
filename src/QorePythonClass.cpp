@@ -90,7 +90,7 @@ QoreValue QorePythonClass::methodGate(const QoreMethod& meth, void* m, QoreObjec
     assert(args && args->size() >= 1);
     assert(args->retrieveEntry(0).getType() == NT_STRING);
 
-    const QoreStringNode* mname = args->retrieveEntry(0).get<QoreStringNode>();
+    QoreStringValueHelper mname(args->retrieveEntry(0));
 
     //printd(5, "QorePythonClass::methodGate() %s()\n", mname);
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
@@ -109,7 +109,7 @@ QoreValue QorePythonClass::memberGate(const QoreMethod& meth, void* m, QoreObjec
     assert(args && args->size() == 1);
     assert(args->retrieveEntry(0).getType() == NT_STRING);
 
-    const QoreStringNode* mname = args->retrieveEntry(0).get<QoreStringNode>();
+    QoreStringValueHelper mname(args->retrieveEntry(0));
 
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
     if (!pypgm) {
