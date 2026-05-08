@@ -1306,34 +1306,24 @@ def get_unicode():
         p.loadModule("python");
 
         p.parse("
-sub test_interrupted_python_call(Queue q, Counter signal_counter) {
-    try {
-        q.push({'step': -1, 'msg': 'about to create PythonProgram'});
-        PythonProgram pp('
+hash<auto> sub test_interrupted_python_call(SandboxManager sm) {
+    PythonProgram pp('
 def simple_func():
     return 42
 ', 'simple.py');
-        q.push({'step': -2, 'msg': 'PythonProgram created'});
 
-        # First call should succeed
-        q.push({'step': -3, 'msg': 'about to call simple_func'});
-        auto result = pp.callFunction('simple_func');
-        q.push({'step': 1, 'result': result});
+    # First call should succeed
+    auto first = pp.callFunction('simple_func');
 
-        # Wait for main thread to request interrupt
-        q.push({'step': -4, 'msg': 'waiting for signal'});
-        signal_counter.waitForZero();
-        q.push({'step': -5, 'msg': 'got signal, about to call again'});
-
-        # Second call should fail because interrupt was requested
-        try {
-            auto result2 = pp.callFunction('simple_func');
-            q.push({'step': 2, 'error': 'second call did not throw', 'result': result2});
-        } catch (hash<ExceptionInfo> ex) {
-            q.push({'step': 2, 'exception': ex});
-        }
+    # Second call should fail because interrupt was requested
+    try {
+        sm.requestInterrupt();
+        auto second = pp.callFunction('simple_func');
+        sm.clearInterrupt();
+        return {'step': 2, 'first': first, 'error': 'second call did not throw', 'result': second};
     } catch (hash<ExceptionInfo> ex) {
-        q.push({'step': 0, 'outer_exception': ex});
+        sm.clearInterrupt();
+        return {'step': 2, 'first': first, 'exception': ex};
     }
 }
 ", "test");
@@ -1341,57 +1331,12 @@ def simple_func():
         SandboxManager sm();
         p.setSandboxManager(sm);
 
-        Queue q();
-        Counter signal_counter(1);
-        background p.callFunction("test_interrupted_python_call", q, signal_counter);
-
-        # Print all debug messages until we see step 1
-        hash<auto> msg;
-        if (m_options.verbose > 2) {
-            while (True) {
-                msg = q.get(5s);
-                printf("DEBUG: msg = %y\n", msg);
-                if (msg.step >= 1) {
-                    break;
-                }
-            }
-        } else {
-            while (True) {
-                msg = q.get(5s);
-                if (msg.step >= 1) {
-                    break;
-                }
-            }
-        }
-        auto firstResult = msg;
-        assertEq(1, firstResult.step);
-        assertEq(42, firstResult.result);
-
-        # Request interrupt before second call
-        sm.requestInterrupt();
-        signal_counter.dec();  # signal to continue
-
-        # Print all debug messages until we see step 2
-        if (m_options.verbose > 2) {
-            while (True) {
-                msg = q.get(5s);
-                printf("DEBUG: msg = %y\n", msg);
-                if (msg.step >= 2) {
-                    break;
-                }
-            }
-        } else {
-            while (True) {
-                msg = q.get(5s);
-                if (msg.step >= 2) {
-                    break;
-                }
-            }
-        }
-        auto result = msg;
+        auto result = p.callFunction("test_interrupted_python_call", sm);
         assertEq(2, result.step);
+        assertEq(42, result.first);
         assertTrue(result.hasKey("exception"));
         assertEq("PROGRAM-INTERRUPTED", result.exception.err);
+        assertRegex("Python GIL", result.exception.desc);
     }
 
     importTest() {
