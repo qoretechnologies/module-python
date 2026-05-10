@@ -1448,7 +1448,7 @@ def test():
         ext.close();
 
         Program p(PO_NEW_STYLE);
-        p.parse(sprintf("%%prepend-module-path \"%s\"\n%%requires PyLoaderBase\n%%requires PyLoaderExt\n"
+        p.parse(sprintf("%%append-module-path %s\n%%requires PyLoaderBase\n%%requires PyLoaderExt\n"
             "int sub module_path_marker() { return 1; }\n", tmp.path), "module-path");
         p.loadModule("python");
         p.issueModuleCmd("python", "parse shared-ns-import import qoreloader\n"
