@@ -7,6 +7,7 @@
 %requires python
 %requires QUnit
 %requires reflection
+%requires FsUtil
 %try-module json
 %define NO_JSON
 %endtry
@@ -58,6 +59,7 @@ class PythonTest inherits Test {
         addTestCase("object lifecycle", \objectLifecycleTest());
         addTestCase("basic test", \basicTest());
         addTestCase("import test", \importTest());
+        addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("type conversion test", \typeConversionTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         # Set return value for compatibility with test harnesses that check the return value
@@ -1417,6 +1419,44 @@ def test():
 ", "test.py");
             assertThrows("ABSTRACT-CLASS-ERROR", \pp.callFunction(), "test");
         }
+    }
+
+    qoreloaderSharedNamespaceImportTest() {
+        TmpDir tmp("python-qoreloader-shared-ns-");
+
+        File base();
+        base.open2(tmp.path + "/PyLoaderBase.qm", O_WRONLY | O_CREAT | O_TRUNC);
+        base.write("%modern\n"
+            "module PyLoaderBase { version = \"1.0\"; desc = \"test\"; author = \"test\"; url = \"test\"; license = \"MIT\"; }\n"
+            "public namespace PyLoaderShared {\n"
+            "    public class BaseClass {\n"
+            "        string value() { return \"base\"; }\n"
+            "    }\n"
+            "}\n");
+        base.close();
+
+        File ext();
+        ext.open2(tmp.path + "/PyLoaderExt.qm", O_WRONLY | O_CREAT | O_TRUNC);
+        ext.write("%modern\n"
+            "%requires PyLoaderBase\n"
+            "module PyLoaderExt { version = \"1.0\"; desc = \"test\"; author = \"test\"; url = \"test\"; license = \"MIT\"; }\n"
+            "public namespace PyLoaderShared {\n"
+            "    public class ExtClass {\n"
+            "        string value() { return \"ext\"; }\n"
+            "    }\n"
+            "}\n");
+        ext.close();
+
+        Program p(PO_NEW_STYLE);
+        p.parse(sprintf("%%prepend-module-path \"%s\"\n%%requires PyLoaderBase\n%%requires PyLoaderExt\n"
+            "int sub module_path_marker() { return 1; }\n", tmp.path), "module-path");
+        p.loadModule("python");
+        p.issueModuleCmd("python", "parse shared-ns-import import qoreloader\n"
+            "from qore.PyLoaderExt import ExtClass\n"
+            "def shared_ns_value():\n"
+            "    return ExtClass().value()\n");
+        p.issueModuleCmd("python", "export-func shared_ns_value");
+        assertEq("ext", p.callFunction("shared_ns_value"));
     }
 }
 

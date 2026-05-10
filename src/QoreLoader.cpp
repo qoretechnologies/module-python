@@ -29,6 +29,49 @@
 QorePythonManualReferenceHolder QoreLoader::loader_cls;
 QorePythonManualReferenceHolder QoreLoader::loader;
 
+static bool moduleNameMatches(const char* item_mod, const char* name) {
+    return item_mod && !strcmp(item_mod, name);
+}
+
+static bool namespaceHasDirectItemFromModule(const QoreNamespace& ns, const char* name) {
+    QoreNamespaceFunctionIterator fi(ns);
+    while (fi.next()) {
+        if (moduleNameMatches(fi.get().getModuleName(), name)) {
+            return true;
+        }
+    }
+
+    QoreNamespaceConstantIterator ci(ns);
+    while (ci.next()) {
+        if (moduleNameMatches(ci.get().getModuleName(), name)) {
+            return true;
+        }
+    }
+
+    QoreNamespaceClassIterator class_i(ns);
+    while (class_i.next()) {
+        if (moduleNameMatches(class_i.get().getModuleName(), name)) {
+            return true;
+        }
+    }
+
+    QoreNamespaceTypedHashIterator hash_i(ns);
+    while (hash_i.next()) {
+        if (moduleNameMatches(hash_i.get().getModuleName(), name)) {
+            return true;
+        }
+    }
+
+    QoreNamespaceEnumIterator enum_i(ns);
+    while (enum_i.next()) {
+        if (moduleNameMatches(enum_i.get().getModuleName(), name)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static PyMethodDef QoreLoader_methods[] = {
     {"create_module", QoreLoader::create_module, METH_VARARGS, "QoreLoader.create_module() implementation"},
     {"exec_module", QoreLoader::exec_module, METH_VARARGS, "QoreLoader.exec_module() implementation"},
@@ -223,8 +266,7 @@ const QoreNamespace* QoreLoader::getModuleRootNsIntern(const char* name, const Q
             continue;
         }
 
-        const char* mod = ns->getModuleName();
-        if (!mod || strcmp(mod, name)) {
+        if (!isModule(ns, name, all_mod_info, mod_dep_map)) {
             continue;
         }
         printd(5, "QoreLoader::getModuleRootNs('%s') found '%s' (%p)\n", name, ns->getPath().c_str(), ns);
@@ -259,11 +301,11 @@ const QoreNamespace* QoreLoader::getModuleRootNsIntern(const char* name, const Q
 
 bool QoreLoader::isModule(const QoreNamespace* parent, const char* name, const QoreHashNode* all_mod_info,
         mod_dep_map_t& mod_dep_map) {
-    const char* mod = parent->getModuleName();
-    if (!mod) {
+    if (!parent || parent->isRoot()) {
         return false;
     }
-    if (!strcmp(mod, name)) {
+
+    if (parent->isFromModule(name) || namespaceHasDirectItemFromModule(*parent, name)) {
         return true;
     }
 
@@ -271,11 +313,12 @@ bool QoreLoader::isModule(const QoreNamespace* parent, const char* name, const Q
         return false;
     }
 
+    const char* mod = parent->getModuleName();
     const QoreListNode* reexport_list = nullptr;
 
     // see if we have the reexport list already
-    mod_dep_map_t::iterator i = mod_dep_map.lower_bound(mod);
-    if (i == mod_dep_map.end() || !strcmp(i->first, mod)) {
+    mod_dep_map_t::iterator i;
+    if (!mod || (i = mod_dep_map.lower_bound(mod)) == mod_dep_map.end() || strcmp(i->first, mod)) {
         const QoreHashNode* mod_info = all_mod_info->getKeyValue(name).get<QoreHashNode>();
         if (!mod_info) {
             return false;
@@ -284,7 +327,9 @@ bool QoreLoader::isModule(const QoreNamespace* parent, const char* name, const Q
         if (!reexport_list) {
             return false;
         }
-        mod_dep_map.insert(i, mod_dep_map_t::value_type(mod, reexport_list));
+        if (mod) {
+            mod_dep_map.insert(i, mod_dep_map_t::value_type(mod, reexport_list));
+        }
     } else {
         reexport_list = i->second;
     }
@@ -294,7 +339,7 @@ bool QoreLoader::isModule(const QoreNamespace* parent, const char* name, const Q
         const QoreValue v = li.getValue();
         if (v.getType() == NT_STRING) {
             QoreStringValueHelper str(v);
-            if (mod && !strcmp(str->c_str(), mod)) {
+            if (parent->isFromModule(str->c_str()) || namespaceHasDirectItemFromModule(*parent, str->c_str())) {
                 return true;
             }
         }
