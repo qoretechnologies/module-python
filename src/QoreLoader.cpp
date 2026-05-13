@@ -253,63 +253,22 @@ const QoreNamespace* QoreLoader::getModuleRootNs(const char* name, QoreProgram* 
     return rv;
 }
 
-const QoreNamespace* QoreLoader::getModuleRootNsIntern(const char* name, const QoreNamespace& root_ns,
-        const QoreHashNode* all_mod_info, mod_dep_map_t& mod_dep_map, bool check_mod) {
-    const QoreNamespace* candidate = nullptr;
-    QoreNamespaceConstIterator i(root_ns);
-    while (i.next()) {
-        const QoreNamespace* ns = &i.get();
-        if (!check_mod) {
-            if (!strcmp(ns->getName(), name)) {
-                return ns;
-            }
-            continue;
-        }
-
-        if (!isModule(ns, name, all_mod_info, mod_dep_map)) {
-            continue;
-        }
-        printd(5, "QoreLoader::getModuleRootNs('%s') found '%s' (%p)\n", name, ns->getPath().c_str(), ns);
-        // try to find parent ns
-        while (true) {
-            const QoreNamespace* parent = ns->getParent();
-            if (!isModule(parent, name, all_mod_info, mod_dep_map)) {
-                printd(5, "QoreLoader::getModuleRootNs('%s') invalid parent '%s'\n", name,
-                    parent->getPath().c_str());
-                break;
-            }
-            ns = parent;
-            printd(5, "QoreLoader::getModuleRootNs('%s') got parent '%s'\n", name, ns->getPath().c_str());
-        }
-        // prefer a namespace whose name matches the module name
-        if (!strcmp(ns->getName(), name)) {
-            printd(5, "QoreLoader::getModuleRootNs('%s') returning exact match '%s'\n", name,
-                ns->getPath().c_str());
-            return ns;
-        }
-        // save as fallback candidate and keep searching for an exact name match
-        if (!candidate) {
-            candidate = ns;
-        }
-    }
-    if (candidate) {
-        printd(5, "QoreLoader::getModuleRootNs('%s') returning fallback '%s'\n", name,
-            candidate->getPath().c_str());
-    }
-    return candidate;
-}
-
-bool QoreLoader::isModule(const QoreNamespace* parent, const char* name, const QoreHashNode* all_mod_info,
-        mod_dep_map_t& mod_dep_map) {
+// Returns true when the namespace is directly owned by the named module — either it was added
+// as a contributor (isFromModule) or it holds at least one direct item declared by the module.
+static bool namespaceMatchesModuleDirect(const QoreNamespace* parent, const char* name) {
     if (!parent || parent->isRoot()) {
         return false;
     }
+    return parent->isFromModule(name) || namespaceHasDirectItemFromModule(*parent, name);
+}
 
-    if (parent->isFromModule(name) || namespaceHasDirectItemFromModule(*parent, name)) {
-        return true;
-    }
-
-    if (!all_mod_info) {
+// Returns true when the namespace is matched to the named module *only* via the module's
+// reexport list — i.e. one of the module's reexported dependencies owns the namespace.  Kept
+// separate from the direct check so callers can prefer direct-ownership candidates and avoid
+// rooting an importing module's Python package at a reexported dependency's namespace.
+static bool namespaceMatchesModuleViaReexport(const QoreNamespace* parent, const char* name,
+        const QoreHashNode* all_mod_info, mod_dep_map_t& mod_dep_map) {
+    if (!parent || parent->isRoot() || !all_mod_info) {
         return false;
     }
 
@@ -345,7 +304,77 @@ bool QoreLoader::isModule(const QoreNamespace* parent, const char* name, const Q
         }
     }
 
-    //printd(5, "QoreLoader::isModule() NOT parent: '%s' mod: %s; not in reexport list\n", parent->getName(),
-    //  mod ? mod : "n/a");
     return false;
+}
+
+const QoreNamespace* QoreLoader::getModuleRootNsIntern(const char* name, const QoreNamespace& root_ns,
+        const QoreHashNode* all_mod_info, mod_dep_map_t& mod_dep_map, bool check_mod) {
+    // Track direct-ownership and reexport-only candidates separately.  A namespace that owns
+    // items declared by `name` is always a better root than a namespace that merely belongs to
+    // a module reexported by `name` — otherwise a Python `from qore.X import Y` for a module X
+    // that reexports dependency D would pick D's namespace as X's root and hide X's own items
+    // (e.g. QorusClientBase reexports HttpClientIo, so ::HttpClientIo wrongly displaces ::OMQ
+    // as the root for `qore.QorusClientBase` and import of `QorusClient` then fails).
+    const QoreNamespace* direct_candidate = nullptr;
+    const QoreNamespace* reexport_candidate = nullptr;
+    QoreNamespaceConstIterator i(root_ns);
+    while (i.next()) {
+        const QoreNamespace* ns = &i.get();
+        if (!check_mod) {
+            if (!strcmp(ns->getName(), name)) {
+                return ns;
+            }
+            continue;
+        }
+
+        if (!isModule(ns, name, all_mod_info, mod_dep_map)) {
+            continue;
+        }
+        printd(5, "QoreLoader::getModuleRootNs('%s') found '%s' (%p)\n", name, ns->getPath().c_str(), ns);
+        // try to find parent ns
+        while (true) {
+            const QoreNamespace* parent = ns->getParent();
+            if (!isModule(parent, name, all_mod_info, mod_dep_map)) {
+                printd(5, "QoreLoader::getModuleRootNs('%s') invalid parent '%s'\n", name,
+                    parent->getPath().c_str());
+                break;
+            }
+            ns = parent;
+            printd(5, "QoreLoader::getModuleRootNs('%s') got parent '%s'\n", name, ns->getPath().c_str());
+        }
+
+        // Classify the final namespace — a direct-ownership match always beats a reexport
+        // match, regardless of iteration order.  An exact name match short-circuits only for
+        // direct candidates; a reexported dependency's namespace that happens to match `name`
+        // by coincidence must not displace a later direct owner.
+        bool direct = namespaceMatchesModuleDirect(ns, name);
+        if (direct && !strcmp(ns->getName(), name)) {
+            printd(5, "QoreLoader::getModuleRootNs('%s') returning exact match '%s'\n", name,
+                ns->getPath().c_str());
+            return ns;
+        }
+        if (direct) {
+            if (!direct_candidate) {
+                direct_candidate = ns;
+            }
+        } else if (!reexport_candidate) {
+            reexport_candidate = ns;
+        }
+    }
+    if (direct_candidate) {
+        printd(5, "QoreLoader::getModuleRootNs('%s') returning direct candidate '%s'\n", name,
+            direct_candidate->getPath().c_str());
+        return direct_candidate;
+    }
+    if (reexport_candidate) {
+        printd(5, "QoreLoader::getModuleRootNs('%s') returning reexport candidate '%s'\n", name,
+            reexport_candidate->getPath().c_str());
+    }
+    return reexport_candidate;
+}
+
+bool QoreLoader::isModule(const QoreNamespace* parent, const char* name, const QoreHashNode* all_mod_info,
+        mod_dep_map_t& mod_dep_map) {
+    return namespaceMatchesModuleDirect(parent, name)
+        || namespaceMatchesModuleViaReexport(parent, name, all_mod_info, mod_dep_map);
 }
