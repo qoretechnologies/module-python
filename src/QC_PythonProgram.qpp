@@ -46,7 +46,7 @@ qclass PythonProgram [arg=QorePythonProgramData* pp; ns=Python; dom=EMBEDDED_LOG
     - The code is executed after parsing and compiling
     - Exceptions parsing, compiling, or running the Python code are thrown according to @ref python_exceptions
 */
-PythonProgram::constructor(string source_code, string source_label) {
+PythonProgram::constructor(string source_code, string source_label) [flags=NAMED_ARGS] {
     ReferenceHolder<QorePythonProgramData> pp(new QorePythonProgramData(*source_code, *source_label, Py_file_input, xsink),
         xsink);
     if (*xsink) {
@@ -89,8 +89,8 @@ auto PythonProgram::callFunction(string func_name, ...) {
 }
 
 //! Call the given function and return the result
-/** @param func_name the function name to call
-    @param argv arguments to the function as a list converted to Python values as per @ref python_qore_to_python
+/** @param function_name the function name to call
+    @param arguments arguments to the function as a list converted to Python values as per @ref python_qore_to_python
 
     @return the return value of the Python function converted to Qore as per @ref python_python_to_qore
 
@@ -98,8 +98,8 @@ auto PythonProgram::callFunction(string func_name, ...) {
 
     @see @ref python_exceptions
 */
-auto PythonProgram::callFunctionArgs(string func_name, *softlist<auto> argv) {
-    return pp->callFunction(xsink, func_name, argv);
+auto PythonProgram::callFunctionArgs(string function_name, *softlist<auto> arguments) [flags=NAMED_ARGS] {
+    return pp->callFunction(xsink, function_name, arguments);
 }
 
 //! Call the given method and return the result
@@ -121,7 +121,7 @@ auto PythonProgram::callMethod(string class_name, string method_name, ...) {
 //! Call the given method and return the result
 /** @param class_name the name of the class implementing the method to call
     @param method_name the method to call
-    @param argv arguments to the method as a list converted to Python values as per @ref python_qore_to_python
+    @param arguments arguments to the method as a list converted to Python values as per @ref python_qore_to_python
 
     @return the return value of the Python method call converted to Qore as per @ref python_python_to_qore
 
@@ -130,8 +130,8 @@ auto PythonProgram::callMethod(string class_name, string method_name, ...) {
 
     @see @ref python_exceptions
 */
-auto PythonProgram::callMethodArgs(string class_name, string method_name, *softlist<auto> argv) {
-    return pp->callMethod(xsink, class_name, method_name, argv);
+auto PythonProgram::callMethodArgs(string class_name, string method_name, *softlist<auto> arguments) [flags=NAMED_ARGS] {
+    return pp->callMethod(xsink, class_name, method_name, arguments);
 }
 
 //! Parse, compile, and evaluate the given statement and return any result; declarations are not persistent
@@ -142,7 +142,7 @@ auto PythonProgram::callMethodArgs(string class_name, string method_name, *softl
 
     @see evalStatementKeep()
  */
-auto PythonProgram::evalStatement(string source_code, string source_label = "stmt") {
+auto PythonProgram::evalStatement(string source_code, string source_label = "stmt") [flags=NAMED_ARGS] {
     return pp->eval(xsink, *source_code, *source_label, Py_file_input, true);
 }
 
@@ -154,7 +154,7 @@ auto PythonProgram::evalStatement(string source_code, string source_label = "stm
 
     @see evalStatement()
  */
-auto PythonProgram::evalStatementKeep(string source_code, string source_label = "stmt") {
+auto PythonProgram::evalStatementKeep(string source_code, string source_label = "stmt") [flags=NAMED_ARGS] {
     return pp->eval(xsink, *source_code, *source_label, Py_file_input, false);
 }
 
@@ -166,7 +166,7 @@ auto PythonProgram::evalStatementKeep(string source_code, string source_label = 
 
     @note This method uses a shared static PythonProgram object to parse, compile, and evaluate the input string
  */
-auto PythonProgram::evalExpression(string source_code, string source_label = "exp") {
+auto PythonProgram::evalExpression(string source_code, string source_label = "exp") [flags=NAMED_ARGS] {
     return pp->eval(xsink, *source_code, *source_label, Py_eval_input, false);
 }
 
@@ -193,18 +193,18 @@ pypgm.setSaveObjectCallback(callback);
 
     @see @ref python_qore_object_lifecycle_management for more information
 */
-PythonProgram::setSaveObjectCallback(*code save_object_callback) [dom=PROCESS] {
+PythonProgram::setSaveObjectCallback(*code save_object_callback) [dom=PROCESS;flags=NAMED_ARGS] {
     pp->setSaveObjectCallback(save_object_callback);
 }
 
 //! Imports the given Qore namespace to the Python program object under the given module path
-/** @param qore_ns_path the path to the Qore namespace (ex: \c "::Qore::Thread")
-    @param py_module_path the dot-separated path to the target Python module to be created (ex: \c "qore.qore.thread")
+/** @param qore_namespace_path the path to the Qore namespace (ex: \c "::Qore::Thread")
+    @param python_module_path the dot-separated path to the target Python module to be created (ex: \c "qore.qore.thread")
 
     @throw IMPORT-NS-ERROR Qore namespace could not be found or the root namespace was given for import
 */
-PythonProgram::importNamespace(string qore_ns_path, string py_module_path) {
-    TempEncodingHelper npath(qore_ns_path, QCS_DEFAULT, xsink);
+PythonProgram::importNamespace(string qore_namespace_path, string python_module_path) [flags=NAMED_ARGS] {
+    TempEncodingHelper npath(qore_namespace_path, QCS_DEFAULT, xsink);
     if (*xsink) {
         return QoreValue();
     }
@@ -217,7 +217,7 @@ PythonProgram::importNamespace(string qore_ns_path, string py_module_path) {
         return QoreValue();
     }
 
-    pp->importQoreNamespaceToPython(*ns, *py_module_path, xsink);
+    pp->importQoreNamespaceToPython(*ns, *python_module_path, xsink);
 }
 
 //! Creates an alias in the Python program for the given symbol
@@ -226,7 +226,7 @@ PythonProgram::importNamespace(string qore_ns_path, string py_module_path) {
 
     @throw PYTHON-ALIAS-ERROR there was an error finding the source object or creating the target
 */
-PythonProgram::aliasDefinition(string python_source_path, string python_target_path) {
+PythonProgram::aliasDefinition(string python_source_path, string python_target_path) [flags=NAMED_ARGS] {
     TempEncodingHelper srcpath(python_source_path, QCS_DEFAULT, xsink);
     if (*xsink) {
         return QoreValue();
@@ -256,7 +256,7 @@ PythonProgram::aliasDefinition(string python_source_path, string python_target_p
 
     @see evalStatementKeep()
  */
-static auto PythonProgram::evalStatement(string source_code, string source_label = "stmt") {
+static auto PythonProgram::evalStatement(string source_code, string source_label = "stmt") [flags=NAMED_ARGS] {
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
     assert(pypgm);
     return pypgm->eval(xsink, *source_code, *source_label, Py_file_input, true);
@@ -273,7 +273,7 @@ static auto PythonProgram::evalStatement(string source_code, string source_label
 
     @see evalStatement()
  */
-static auto PythonProgram::evalStatementKeep(string source_code, string source_label = "stmt") {
+static auto PythonProgram::evalStatementKeep(string source_code, string source_label = "stmt") [flags=NAMED_ARGS] {
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
     assert(pypgm);
     return pypgm->eval(xsink, *source_code, *source_label, Py_file_input, false);
@@ -287,7 +287,7 @@ static auto PythonProgram::evalStatementKeep(string source_code, string source_l
 
     @note This method uses a shared static PythonProgram object to parse, compile, and evaluate the input string
  */
-static auto PythonProgram::evalExpression(string source_code, string source_label = "exp") {
+static auto PythonProgram::evalExpression(string source_code, string source_label = "exp") [flags=NAMED_ARGS] {
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
     assert(pypgm);
     return pypgm->eval(xsink, *source_code, *source_label, Py_eval_input, false);
@@ -340,7 +340,7 @@ PythonProgram::setSaveObjectCallback(callback);
 
     @see @ref python_qore_object_lifecycle_management for more information
 */
-static PythonProgram::setSaveObjectCallback(*code save_object_callback) [dom=PROCESS] {
+static PythonProgram::setSaveObjectCallback(*code save_object_callback) [dom=PROCESS;flags=NAMED_ARGS] {
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
     assert(pypgm);
     pypgm->setSaveObjectCallback(save_object_callback);

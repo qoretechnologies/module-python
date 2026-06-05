@@ -58,6 +58,7 @@ class PythonTest inherits Test {
         addTestCase("python import", \pythonImportTest());
         addTestCase("object lifecycle", \objectLifecycleTest());
         addTestCase("basic test", \basicTest());
+        addTestCase("named argument calls", \namedArgumentTest());
         addTestCase("import test", \importTest());
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("type conversion test", \typeConversionTest());
@@ -1145,6 +1146,39 @@ class test:
             # PYTHON-INTERPRETER-DELETED exception
             assertThrows("PYTHON-INTERPRETER-DELETED", \x.dostatic());
         }
+    }
+
+    namedArgumentTest() {
+        PythonProgram pp(source_code: "
+def add(a, b):
+    return a + b
+
+class Calc:
+    @staticmethod
+    def inc(val):
+        return val + 1
+",
+            source_label: "named.py");
+
+        assertEq(5, pp.callFunctionArgs(function_name: "add", arguments: (2, 3)));
+        assertEq(7, pp.callMethodArgs(class_name: "Calc", method_name: "inc", arguments: (6,)));
+
+        pp.evalStatement(source_code: "temp_value = 8", source_label: "stmt.py");
+        pp.evalStatementKeep(source_code: "def mult(a, b):\n    return a * b", source_label: "keep.py");
+        assertEq(12, pp.callFunctionArgs(function_name: "mult", arguments: (3, 4)));
+        assertEq(9, pp.evalExpression(source_code: "4 + 5", source_label: "expr.py"));
+
+        pp.evalStatementKeep(source_code: "class Example:\n    pass", source_label: "alias.py");
+        pp.aliasDefinition(python_source_path: "Example", python_target_path: "aliases.Example");
+        assertEq("Example", pp.evalExpression(source_code: "aliases.Example.__name__", source_label: "alias_expr.py"));
+
+        pp.importNamespace(qore_namespace_path: "::Qore::Thread", python_module_path: "qore_named.thread");
+        pp.setSaveObjectCallback(save_object_callback: NOTHING);
+
+        PythonProgram::evalStatement(source_code: "static_temp = 1", source_label: "static_stmt.py");
+        PythonProgram::evalStatementKeep(source_code: "static_named_value = 11", source_label: "static_keep.py");
+        assertEq(11, PythonProgram::evalExpression(source_code: "static_named_value", source_label: "static_expr.py"));
+        PythonProgram::setSaveObjectCallback(save_object_callback: NOTHING);
     }
 
     typeConversionTest() {
