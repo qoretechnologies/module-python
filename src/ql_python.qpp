@@ -1,0 +1,59 @@
+/* -*- mode: c++; indent-tabs-mode: nil -*- */
+/** @file ql_python.qpp Definition of functions in the Python namespace */
+/*
+    ql_python.qpp
+
+    Qore Programming Language
+
+    Copyright 2020 - 2026 Qore Technologies, s.r.o.
+
+    This library is free software; you can redistribute it and/or
+    modify it under the terms of the GNU Lesser General Public
+    License as published by the Free Software Foundation; either
+    version 2.1 of the License, or (at your option) any later version.
+
+    This library is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+    Lesser General Public License for more details.
+
+    You should have received a copy of the GNU Lesser General Public
+    License along with this library; if not, write to the Free Software
+    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+#include "QC_PythonProgram.h"
+
+/** @defgroup python_functions Python Functions
+    Python module functions
+ */
+///@{
+namespace Python;
+
+//! Sets the callback used to give %Qore objects created from Python a deterministic lifetime
+/** This is the function form of @ref Python::PythonProgram::setSaveObjectCallback(), provided so
+    that object capture can be enabled the same way as for the \c jni module's
+    \c jni::set_save_object_callback(): a privileged parent %Program can enable capture on a
+    sandboxed interface %Program via @ref Qore::Program::callFunction() "Program::callFunction()",
+    which (unlike a cross-%Program static method call) evaluates this function's \c dom=PROCESS
+    functional-domain check against the calling (parent) %Program's parse options.  The callback is
+    registered on the calling %Program context.
+
+    @param save_object_callback the callback to save any %Qore objects created in Python code; must
+    take an argument of type @ref object_type "object".  If not set, the standard thread-local
+    implementation is used where %Qore objects are saved in a thread-local hash.
+
+    @see
+    - @ref Python::PythonProgram::setSaveObjectCallback()
+    - @ref python_qore_object_lifecycle_management
+*/
+set_save_object_callback(*code save_object_callback) [dom=PROCESS;flags=NAMED_ARGS] {
+    QorePythonProgram* pypgm = QorePythonProgram::getContext();
+    if (!pypgm) {
+        xsink->raiseException("PYTHON-ERROR", "cannot set the save object callback without a valid "
+            "Python program context");
+        return QoreValue();
+    }
+    pypgm->setSaveObjectCallback(save_object_callback);
+}
+///@}

@@ -236,10 +236,15 @@ static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink)
     }
 }
 
+// defined in the generated ql_python.cpp (from ql_python.qpp)
+DLLLOCAL void init_python_functions(QoreNamespace& ns);
+
 static QoreStringNode* python_module_init_intern(bool repeat) {
     if (!PNS) {
         PNS = new QoreNamespace("Python");
         PNS->addSystemClass(initPythonProgramClass(*PNS));
+        // register Python namespace functions (e.g. Python::set_save_object_callback())
+        init_python_functions(*PNS);
         QC_PYTHONBASEOBJECT = new QorePythonClass("__qore_base__", "::Python::__qore_base__");
         CID_PYTHONBASEOBJECT = QC_PYTHONBASEOBJECT->getID();
 

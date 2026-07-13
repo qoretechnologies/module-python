@@ -67,6 +67,7 @@ endif()
 
 set(QPP_SRC
     src/QC_PythonProgram.qpp
+    src/ql_python.qpp
 )
 
 set(CPP_SRC
