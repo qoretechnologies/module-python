@@ -1780,10 +1780,19 @@ void QorePythonProgram::raisePythonException(ExceptionSink& xsink) {
     if (owns_interpreter) {
         // Convert values to Python objects for the exception args
         // This matches the PythonQoreException behavior where args[0] is err, args[1] is desc, etc.
+        //
+        // NOTE: "err", "desc", and "arg" are owned by the exception in "xsink", so the exception must not be
+        // cleared until all of them have been converted; the error string is used in the fallback path below
+        // after the exception has been cleared, so it is copied here
         ExceptionSink xsink2;
         QorePythonReferenceHolder py_err(getPythonValue(err, &xsink2));
         QorePythonReferenceHolder py_desc(getPythonValue(desc, &xsink2));
-        xsink.clear();
+
+        std::string err_msg;
+        {
+            QoreStringValueHelper err_str(err);
+            err_msg = err_str->c_str();
+        }
 
         // Create args tuple: (err, desc) or (err, desc, arg)
         QorePythonReferenceHolder tuple(PyTuple_New(arg ? 3 : 2));
@@ -1809,6 +1818,9 @@ void QorePythonProgram::raisePythonException(ExceptionSink& xsink) {
             }
         }
 
+        // all values owned by the exception have been converted; "err", "desc", and "arg" are invalid after this
+        xsink.clear();
+
         // Get RuntimeError from the current interpreter's builtins
         PyObject* builtins = PyEval_GetBuiltins();
         if (builtins) {
@@ -1824,8 +1836,7 @@ void QorePythonProgram::raisePythonException(ExceptionSink& xsink) {
         }
 
         // Fallback - use error string as message
-        QoreStringValueHelper err_str(err);
-        PyErr_SetString(PyExc_RuntimeError, err_str->c_str());
+        PyErr_SetString(PyExc_RuntimeError, err_msg.c_str());
         return;
     }
 
