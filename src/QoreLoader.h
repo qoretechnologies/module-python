@@ -59,10 +59,17 @@ private:
     DLLLOCAL static QorePythonManualReferenceHolder loader_cls;
     DLLLOCAL static QorePythonManualReferenceHolder loader;
 
-    DLLLOCAL static const QoreNamespace* getModuleRootNs(const char* name, QoreProgram* mod_pgm);
+    //! A Qore module can declare items in more than one root namespace, so a Python module can be backed by several
+    typedef std::vector<const QoreNamespace*> nsvec_t;
 
-    DLLLOCAL static const QoreNamespace* getModuleRootNsIntern(const char* name, const QoreNamespace& root_ns,
-        const QoreHashNode* all_mod_info, mod_dep_map_t& mod_dep_map, bool check_mod);
+    //! Returns every root namespace holding items declared by the given module
+    /** A Qore module is not restricted to a single namespace, so returning only one of them would hide the items
+        the module declares in all the others; @ref exec_module() imports all of them into the Python module
+    */
+    DLLLOCAL static void getModuleRootNsList(const char* name, QoreProgram* mod_pgm, nsvec_t& nsvec);
+
+    DLLLOCAL static void getModuleRootNsListIntern(const char* name, const QoreNamespace& root_ns,
+        const QoreHashNode* all_mod_info, mod_dep_map_t& mod_dep_map, bool check_mod, nsvec_t& nsvec);
 
     //! checks if "parent" is in the same module as "name" with a possible reexport list
     DLLLOCAL static bool isModule(const QoreNamespace* parent, const char* name, const QoreHashNode* all_mod_info,

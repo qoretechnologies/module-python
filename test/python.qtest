@@ -61,6 +61,7 @@ class PythonTest inherits Test {
         addTestCase("named argument calls", \namedArgumentTest());
         addTestCase("import test", \importTest());
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
+        addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
         addTestCase("type conversion test", \typeConversionTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         # Set return value for compatibility with test harnesses that check the return value
@@ -1491,6 +1492,48 @@ def test():
             "    return ExtClass().value()\n");
         p.issueModuleCmd("python", "export-func shared_ns_value");
         assertEq("ext", p.callFunction("shared_ns_value"));
+    }
+
+    #! A Qore module can declare items in more than one root namespace; all of them must be importable
+    /** Only one namespace used to back the Python module, and which one it was depended on namespace iteration
+        order, so everything the module declared in the other namespaces was invisible to Python.  Neither
+        namespace here is named after the module, so neither can win by an exact name match.
+    */
+    qoreloaderMultiNamespaceImportTest() {
+        TmpDir tmp("python-qoreloader-multi-ns-");
+
+        File multi();
+        multi.open2(tmp.path + "/PyLoaderMulti.qm", O_WRONLY | O_CREAT | O_TRUNC);
+        multi.write("%modern\n"
+            "module PyLoaderMulti { version = \"1.0\"; desc = \"test\"; author = \"test\"; url = \"test\"; "
+            "license = \"MIT\"; }\n"
+            "public namespace PyLoaderAlpha {\n"
+            "    public class AlphaClass {\n"
+            "        string value() { return \"alpha\"; }\n"
+            "    }\n"
+            "}\n"
+            "public namespace PyLoaderOmega {\n"
+            "    public class OmegaClass {\n"
+            "        string value() { return \"omega\"; }\n"
+            "    }\n"
+            "}\n");
+        multi.close();
+
+        Program p(PO_NEW_STYLE);
+        p.parse(sprintf("%%append-module-path %s\n%%requires PyLoaderMulti\n"
+            "int sub multi_ns_marker() { return 1; }\n", tmp.path), "multi-ns-module-path");
+        p.loadModule("python");
+        # both classes must be importable, whichever namespace backs the Python module
+        p.issueModuleCmd("python", "parse multi-ns-import import qoreloader\n"
+            "from qore.PyLoaderMulti import AlphaClass, OmegaClass\n"
+            "def multi_ns_alpha():\n"
+            "    return AlphaClass().value()\n"
+            "def multi_ns_omega():\n"
+            "    return OmegaClass().value()\n");
+        p.issueModuleCmd("python", "export-func multi_ns_alpha");
+        p.issueModuleCmd("python", "export-func multi_ns_omega");
+        assertEq("alpha", p.callFunction("multi_ns_alpha"), "class from the first namespace is importable");
+        assertEq("omega", p.callFunction("multi_ns_omega"), "class from the second namespace is importable");
     }
 }
 
