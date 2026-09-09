@@ -50,6 +50,8 @@ class PythonTest inherits Test {
         addTestCase("python thread test", \pythonThreadTest());
         addTestCase("super test", \superTest());
         addTestCase("java test", \javaTest());
+        addTestCase("date range test", \dateRangeTest());
+        addTestCase("java date constant test", \javaDateConstantTest());
         addTestCase("exception test", \exceptionTest());
         addTestCase("qore test", \qoreTest());
         addTestCase("stack test", \stackTest());
@@ -332,6 +334,70 @@ QoreTest sub get_object() {
             object obj = p.callFunction("get_object");
             assertEq(2, obj.get(1));
         }
+    }
+
+    dateRangeTest() {
+        PythonProgram p("
+def echo(v):
+    return v
+", "date-range-test");
+
+        # in-range date/time values must round-trip unchanged; note that datetime.datetime values created
+        # from Qore dates are naive (the time zone is dropped), so a local date/time value is used here
+        date in_range = 2024-12-25T12:00:00;
+        assertEq(in_range, p.callFunction("echo", in_range));
+        assertEq((1, in_range), p.callFunction("echo", (1, in_range)));
+        assertEq({"k": in_range}, p.callFunction("echo", {"k": in_range}));
+
+        # date/time values outside the range supported by datetime.datetime (year 1 - 9999) have no Python
+        # representation; the conversion must raise a Qore exception
+        # NOTE: DateTime::getYear() returns a short, so years outside the range of a 16-bit integer used to be
+        # silently truncated; 67506 truncated to a short is 1970 and 65537 is 1, both of which are accepted by
+        # datetime.datetime, meaning that these values were silently converted to the wrong date
+        foreach string ds in (("171978-04-10T12:04:02Z", "67506-01-01T00:00:00Z", "65537-06-15T10:20:30Z")) {
+            date d = date(ds);
+            assertThrows("builtins.ValueError", \p.callFunction(), ("echo", d), "scalar " + ds);
+            assertThrows("builtins.ValueError", \p.callFunction(), ("echo", (1, d)), "list " + ds);
+            assertThrows("builtins.ValueError", \p.callFunction(), ("echo", {"k": d}), "hash " + ds);
+        }
+    }
+
+    javaDateConstantTest() {
+        # JNI is not compatible with Python free-threading mode due to mimalloc conflicts
+        if (Python::FreeThreading) {
+            testSkip("JNI not supported with Python free-threading (PEP 703)");
+        }
+
+        try {
+            load_module("jni");
+        } catch () {
+            testSkip("no jni module");
+        }
+
+        # java.time.Instant declares EPOCH, MIN, and MAX as static final fields, which the jni module imports
+        # as Qore class constants; MIN and MAX lie outside the range supported by datetime.datetime, and used
+        # to crash the process when the class was imported into Python
+        PythonProgram p("
+import qoreloader
+import qore.__root__.Jni.java.time as jt
+
+def get_attrs():
+    i = jt.Instant
+    return {
+        'name': i.__name__,
+        'epoch': hasattr(i, 'EPOCH'),
+        'min': hasattr(i, 'MIN'),
+        'max': hasattr(i, 'MAX'),
+    }
+", "java-date-constant-test");
+
+        hash<auto> h = p.callFunction("get_attrs");
+        assertEq("Instant", h.name);
+        # a representable constant must still be imported
+        assertTrue(h.epoch, "Instant.EPOCH must be imported");
+        # constants with no Python representation are skipped rather than aborting the class import
+        assertFalse(h.min, "Instant.MIN must be skipped");
+        assertFalse(h.max, "Instant.MAX must be skipped");
     }
 
     javaTest() {

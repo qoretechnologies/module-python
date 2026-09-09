@@ -393,7 +393,14 @@ public:
     DLLLOCAL static PyObject* getPythonCallable(ExceptionSink* xsink, const ResolvedCallReferenceNode* call);
 
     //! Returns a new reference
+    /** if this method returns nullptr, then a Qore exception is guaranteed to have been raised in \a xsink;
+        any pending Python exception is converted to a Qore exception, so that callers can rely on \a xsink
+        alone to detect conversion failures
+    */
     DLLLOCAL PyObject* getPythonValue(QoreValue val, ExceptionSink* xsink);
+
+    //! Returns a new reference; may return nullptr with only a Python exception set
+    DLLLOCAL PyObject* getPythonValueIntern(QoreValue val, ExceptionSink* xsink);
 
     //! Inserts a new class in the map
     DLLLOCAL void insertClass(py_cls_map_t::iterator i, const QoreClass* qcls, PythonQoreClass* pycls) {

@@ -439,6 +439,11 @@ from qore.__root__.Jni.org.qore.lang.restclient import RestClient
     |\c string|\c str
     |\c code (closure or call reference)|\c callable
 
+    @note \c datetime.datetime supports years 1 - 9999 only; converting an absolute %Qore date/time value with a
+    year outside this range raises an exception, as the value has no %Python representation.  When such a value is
+    a %Qore class constant being imported into %Python, the constant is skipped and the rest of the class is
+    imported normally.
+
     @subsection python_python_to_qore Type Conversions From Python to Qore
 
     |!Source Python Type|!Target %Qore Type
@@ -508,6 +513,15 @@ PythonProgram::setSaveObjectCallback(callback);
       performed before acquiring the Python GIL when a sandbox manager is active
       (<a href="https://github.com/qoretechnologies/qore/issues/5116">issue 5116</a>)
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
+
+    <b>Bug Fixes:</b>
+    - fixed a crash importing %Qore classes into %Python when a class constant has no %Python representation;
+      such constants (ex: \c java.time.Instant::MIN, whose year lies outside the range supported by
+      \c datetime.datetime) are now skipped instead of terminating the process
+    - fixed %Qore date/time values with a year outside the range of a 16-bit integer being silently converted to
+      an unrelated date/time value; such values are now reported as errors
+    - fixed error reporting when a %Qore value cannot be converted to a %Python value; conversion failures now
+      always raise a %Qore exception
 
     <b>Build System Changes:</b>
     - Requires a C++17-compatible compiler

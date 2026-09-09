@@ -363,12 +363,23 @@ void PythonQoreClass::populateClass(QorePythonProgram* pypgm, const QoreClass& q
             if (mi == meth_set.end() || strcmp(*mi, c.getName())) {
                 meth_set.insert(mi, c.getName());
                 ValueHolder qoreval(c.getReferencedValue(), &xsink);
+                if (xsink) {
+                    // a constant that cannot be read must not abort the import of the entire class; skip it
+                    xsink.clear();
+                    continue;
+                }
                 QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
                 QorePythonReferenceHolder val(qore_python_pgm->getPythonValue(*qoreval, &xsink));
-                if (!xsink) {
-                    assert(val);
-                    PyDict_SetItemString(py_type->tp_dict, c.getName(), *val);
+                if (xsink) {
+                    // a constant that has no Python representation (ex: java.time.Instant::MIN, whose year lies
+                    // outside the range supported by datetime.datetime) must not abort the import of the entire
+                    // class; skip the constant instead
+                    xsink.clear();
+                    PyErr_Clear();
+                    continue;
                 }
+                assert(val);
+                PyDict_SetItemString(py_type->tp_dict, c.getName(), *val);
             }
         }
     }

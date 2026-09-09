@@ -2623,9 +2623,12 @@ PyObject* QorePythonProgram::getPythonList(ExceptionSink* xsink, const QoreListN
     while (i.next()) {
         QorePythonReferenceHolder val(getPythonValue(i.getValue(), xsink));
         if (*xsink) {
-            raisePythonException(*xsink);
+            // the Qore exception must be left in place; all callers detect the error with the ExceptionSink,
+            // and converting it to a Python exception here would clear the sink and leave them with a nullptr
+            // that they treat as success
             return nullptr;
         }
+        assert(val);
         PyList_SetItem(*list, i.index(), val.release());
     }
 
@@ -2657,9 +2660,10 @@ PyObject* QorePythonProgram::getPythonTupleValue(ExceptionSink* xsink, const Qor
         while (i.next()) {
             QorePythonReferenceHolder val(getPythonValue(i.getValue(), xsink));
             if (*xsink) {
-                raisePythonException(*xsink);
+                // the Qore exception must be left in place; see the comment in getPythonList()
                 return nullptr;
             }
+            assert(val);
             PyTuple_SET_ITEM(*tuple, i.index() - arg_offset + offset, val.release());
         }
     }
@@ -2680,7 +2684,7 @@ PyObject* QorePythonProgram::getPythonDict(ExceptionSink* xsink, const QoreHashN
         }
         QorePythonReferenceHolder val(getPythonValue(i.get(), xsink));
         if (*xsink) {
-            raisePythonException(*xsink);
+            // the Qore exception must be left in place; see the comment in getPythonList()
             return nullptr;
         }
         assert(val);
@@ -2707,9 +2711,15 @@ PyObject* QorePythonProgram::getPythonDelta(ExceptionSink* xsink, const DateTime
     assert(dt->isRelative());
 
     // WARNING: years are converted to 365 days; months are converted to 30 days
+    // getInfo() is used rather than getYear(), which returns a short and therefore silently truncates years
+    // outside the range of a 16-bit integer
+    qore_tm info;
+    dt->getInfo(info);
+    int days = info.year * 365 + info.month * 30 + info.day;
+    int secs = info.hour * 3600 + info.minute * 60 + info.second;
+
     if (PyDateTimeAPI) {
-        return PyDelta_FromDSU(dt->getYear() * 365 + dt->getMonth() * 30 + dt->getDay(),
-        dt->getHour() * 3600 + dt->getMinute() * 60 + dt->getSecond(), dt->getMicrosecond());
+        return PyDelta_FromDSU(days, secs, info.us);
     }
 
     // Fallback: create datetime.timedelta via Python when PyDateTimeAPI is unavailable.
@@ -2733,8 +2743,7 @@ PyObject* QorePythonProgram::getPythonDelta(ExceptionSink* xsink, const DateTime
         }
         return nullptr;
     }
-    PyObject* args = Py_BuildValue("(iii)", dt->getYear() * 365 + dt->getMonth() * 30 + dt->getDay(),
-        dt->getHour() * 3600 + dt->getMinute() * 60 + dt->getSecond(), dt->getMicrosecond());
+    PyObject* args = Py_BuildValue("(iii)", days, secs, info.us);
     if (!args) {
         if (xsink) {
             QorePythonProgram* ctx = QorePythonProgram::getContext();
@@ -2761,9 +2770,16 @@ PyObject* QorePythonProgram::getPythonDelta(ExceptionSink* xsink, const DateTime
 PyObject* QorePythonProgram::getPythonDateTime(ExceptionSink* xsink, const DateTime* dt) {
     assert(dt->isAbsolute());
 
+    // DateTime::getYear() returns a short, which silently truncates years outside the range of a 16-bit
+    // integer; a truncated year can land inside the range accepted by datetime.datetime and therefore produce
+    // a silently incorrect value, so the broken-down date is retrieved with getInfo() instead, which reports
+    // the year as an int (this is also faster, as the date is broken down only once)
+    qore_tm info;
+    dt->getInfo(info);
+
     if (PyDateTimeAPI) {
-        return PyDateTime_FromDateAndTime(dt->getYear(), dt->getMonth(), dt->getDay(), dt->getHour(), dt->getMinute(),
-        dt->getSecond(), dt->getMicrosecond());
+        return PyDateTime_FromDateAndTime(info.year, info.month, info.day, info.hour, info.minute, info.second,
+            info.us);
     }
 
     // Fallback: create datetime.datetime via Python when PyDateTimeAPI is unavailable.
@@ -2787,8 +2803,8 @@ PyObject* QorePythonProgram::getPythonDateTime(ExceptionSink* xsink, const DateT
         }
         return nullptr;
     }
-    PyObject* args = Py_BuildValue("(iiiiiii)", dt->getYear(), dt->getMonth(), dt->getDay(), dt->getHour(),
-        dt->getMinute(), dt->getSecond(), dt->getMicrosecond());
+    PyObject* args = Py_BuildValue("(iiiiiii)", info.year, info.month, info.day, info.hour, info.minute,
+        info.second, info.us);
     if (!args) {
         if (xsink) {
             QorePythonProgram* ctx = QorePythonProgram::getContext();
@@ -2818,6 +2834,22 @@ PyObject* QorePythonProgram::getPythonCallable(ExceptionSink* xsink, const Resol
 }
 
 PyObject* QorePythonProgram::getPythonValue(QoreValue val, ExceptionSink* xsink) {
+    PyObject* rv = getPythonValueIntern(val, xsink);
+    // ensure that a nullptr return always corresponds to a Qore exception in xsink; Python C API calls
+    // (ex: PyDateTime_FromDateAndTime() with a year outside the range supported by datetime.datetime) fail
+    // by setting a Python exception, which leaves the ExceptionSink untouched; callers use the ExceptionSink
+    // alone to detect errors, so without this conversion they would dereference a nullptr
+    if (!rv && xsink && !*xsink) {
+        if (!checkPythonException(xsink)) {
+            xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert a Qore value of type '%s' to a Python "
+                "value", val.getFullTypeName());
+        }
+    }
+    assert(rv || !xsink || *xsink);
+    return rv;
+}
+
+PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* xsink) {
     //printd(5, "QorePythonProgram::getPythonValue() type '%s'\n", val.getFullTypeName());
     switch (val.getType()) {
         case NT_NOTHING:
