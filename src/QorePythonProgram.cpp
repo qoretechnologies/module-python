@@ -2834,6 +2834,12 @@ PyObject* QorePythonProgram::getPythonCallable(ExceptionSink* xsink, const Resol
 }
 
 PyObject* QorePythonProgram::getPythonValue(QoreValue val, ExceptionSink* xsink) {
+    // A member assigned with the weak reference operator ":=" or the opaque reference operator
+    // "@=" is stored in its container as the reference itself, and getPythonList(),
+    // getPythonTuple() and getPythonDict() pass what the container holds straight back here.
+    // Resolve it, or an ordinary convertible hash or list is reported as a Qore value that
+    // cannot be converted to Python.
+    val = val.resolveIndirect();
     PyObject* rv = getPythonValueIntern(val, xsink);
     // ensure that a nullptr return always corresponds to a Qore exception in xsink; Python C API calls
     // (ex: PyDateTime_FromDateAndTime() with a year outside the range supported by datetime.datetime) fail

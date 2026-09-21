@@ -4,6 +4,10 @@
 %modern
 %no-child-restrictions
 
+# conversion to Python has to resolve these; see indirectReferencesTest()
+%allow-weak-references
+%allow-opaque-references
+
 %requires python
 %requires QUnit
 %requires reflection
@@ -57,6 +61,7 @@ class PythonTest inherits Test {
         addTestCase("stack test", \stackTest());
         addTestCase("thread test", \threadTest());
         addTestCase("python callbacks", \pythonCallbackTest());
+        addTestCase("indirect references", \indirectReferencesTest());
         addTestCase("python import", \pythonImportTest());
         addTestCase("object lifecycle", \objectLifecycleTest());
         addTestCase("basic test", \basicTest());
@@ -741,6 +746,45 @@ def test_code(code):
         };
         p.callFunction("test_code", inc);
         assertEq(1, i);
+    }
+
+    #! A container member holding a weak or opaque reference must convert as its target
+    /** A member assigned with ":=" or "@=" is stored in its container as the reference itself, and
+        getPythonDict()/getPythonList() pass what the container holds back to getPythonValue().
+        Without QoreValue::resolveIndirect() the reference reaches the fall-through at the end of
+        getPythonValueIntern(), which returns None for anything it does not recognise -- so the
+        member silently arrived in Python as None instead of its hash or list.
+    */
+    indirectReferencesTest() {
+        hash<auto> inner = {"a": 1, "b": "two"};
+        list<auto> ilist = (1, "two", 3);
+
+        PythonProgram p("def probe(v):
+    return v
+", "indirect-references");
+
+        # dict and list are walked separately, so cover both as holder and as target
+        hash<auto> weak = {};
+        weak{"h"} := inner;
+        weak{"l"} := ilist;
+        assertEq({"h": inner, "l": ilist}, p.callFunction("probe", weak),
+            "weak references in a hash convert as their targets");
+
+        list<auto> weak_list = ();
+        weak_list[0] := inner;
+        assertEq((inner,), p.callFunction("probe", weak_list),
+            "a weak reference in a list converts as its target");
+
+        hash<auto> opaque = {};
+        opaque{"h"} @= inner;
+        opaque{"l"} @= ilist;
+        assertEq({"h": inner, "l": ilist}, p.callFunction("probe", opaque),
+            "opaque references in a hash convert as their targets");
+
+        list<auto> opaque_list = ();
+        opaque_list[0] @= ilist;
+        assertEq((ilist,), p.callFunction("probe", opaque_list),
+            "an opaque reference in a list converts as its target");
     }
 
     pythonImportTest() {
