@@ -1,0 +1,18 @@
+#!/bin/sh
+# Copyright (C) 2026 David Nichols
+# SPDX-License-Identifier: MIT
+set -eu
+unset QORE_MODULE_DIR QORE_MODULE_DIR_ONLY QORE_INCLUDE_DIR LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME
+export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+cd "$AUTOPKGTEST_TMP"
+cat > python-smoke.q <<'EOF'
+%modern
+%requires python
+PythonProgram program(source_code: "def add(a, b):\n    return a + b", source_label: "package.py");
+if (program.callFunction("add", 20, 22) != 42
+        || program.evalExpression(source_code: "[1, 2, 3]", source_label: "list.py") != (1, 2, 3)) {
+    throw "PACKAGE-TEST-ERROR", "Installed Python conversion or named-argument call failed";
+}
+EOF
+/usr/bin/qcc -o python-smoke python-smoke.q
+./python-smoke

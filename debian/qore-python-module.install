@@ -1,0 +1,3 @@
+usr/lib/*/qore-modules/python-api-*.qmod
+usr/lib/python3/dist-packages/qoreloader*.so
+usr/share/qore/metadata/python/*.meta.json

@@ -1,3 +1,14 @@
 .vscode
 build*
 __pycache__
+# Debian package build products
+/obj-*/
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper
+/debian/qore-python-module/
+/debian/qore-python-module-doc/
+/debian/tmp/
+**/__pycache__/

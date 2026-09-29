@@ -9,9 +9,9 @@ This module provides bidirectional integration between Qore and Python, allowing
 ## Requirements
 
 - Qore 1.0+
-- Python 3.7 - 3.11
-- CMake 3.5+
-- C++11 compatible compiler
+- Python 3.7 - 3.14
+- CMake 3.12+
+- C++17 compatible compiler
 
 ## Building
 
@@ -52,7 +52,10 @@ Full documentation is available in the module's Doxygen documentation, generated
 
 ## License
 
-MIT License - see COPYING.MIT for details.
+Most source files are licensed under LGPL 2.1 or later; see COPYING.LGPL.
+Several supporting files also permit MIT licensing. The bundled CPython
+internal definitions retain Python's license; see COPYING.Python.
+The Debian copyright file identifies these components and their notices.
 
 ## Links
 

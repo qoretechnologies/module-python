@@ -8,13 +8,12 @@
 %allow-weak-references
 %allow-opaque-references
 
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
 %requires python
 %requires QUnit
 %requires reflection
 %requires FsUtil
-%try-module json
-%define NO_JSON
-%endtry
+%requires json
 %requires WebSocketClient
 # JNI is loaded dynamically at runtime in javaTest() to avoid conflicts with
 # Python free-threading mode (PEP 703) - mimalloc is not compatible with JNI threads
@@ -1532,9 +1531,7 @@ auto sub get() {
 
             assertEq(Type::Object, p.callFunction("get").type());
             object o = p.callFunction("get");
-%ifndef NO_JSON
             assertEq({"a": 1}, parse_json(o.encode({"a": 1})));
-%endif
         }
 
         {
@@ -1548,9 +1545,7 @@ auto sub get() {
 
             assertEq(Type::Object, p.callFunction("get").type());
             object o = p.callFunction("get");
-%ifndef NO_JSON
             assertEq({"a": 1}, parse_json(o.encode({"a": 1})));
-%endif
         }
 
         {

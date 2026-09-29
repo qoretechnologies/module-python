@@ -1,0 +1,9 @@
+qore-python-module (1.3.0~git20260928.1-0qore1~ubuntu26.04) resolute; urgency=medium
+
+  * Package the native module, Python qoreloader alias, compiler metadata,
+    documentation, examples and debug symbols using the distribution Python.
+  * Add offline build profiles, installed tests and a fresh compiler client.
+  * Correct LGPL/MIT/CPython notices and outdated build requirements.
+  * Require bundled JSON in tests while retaining optional XML/JNI handling.
+
+ -- David Nichols <david@qore.org>  Tue, 29 Sep 2026 02:45:53 -0000

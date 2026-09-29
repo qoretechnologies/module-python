@@ -1,0 +1,35 @@
+Qore Python module packages
+===========================
+
+This is a development snapshot for qore-testing, not a final release.
+The runtime package contains the native Qore Python module, QPP compiler
+metadata and an ABI-tagged qoreloader extension alias in Python dist-packages.
+Both entry points use the same shared object. python3-qore is also provided.
+The doc package supplies the API reference and test/example programs.
+
+Build with dpkg-buildpackage -us -uc and the matching Qore 3 SDK. Builds use
+the distribution default Python development library; no downloads or host
+Python environment are used. dh_python3 constrains the interpreter dependency
+to that minor version because the bridge uses CPython's full ABI. An interpreter
+minor-version transition requires rebuilding this package. This package does
+not certify Python free-threading builds or other interpreter versions.
+
+Full, arch-only, indep-only, nocheck and nodoc builds are supported; cross
+builds require a separate host Qore SDK and are rejected. Test builds require
+the packaged XML module. Source tests gracefully skip XML when unavailable;
+JNI checks load it dynamically and explicitly skip when absent. JNI interop
+needs separate qualification with the future JNI package.
+
+Tests cover Qore embedding Python, a separate Python process importing
+qoreloader, and installed fresh qcc compilation with named arguments.
+Installed tests exclude checkout module paths and use temporary workspaces.
+Runtime use requires neither the SDK nor XML/JNI.
+
+Most upstream sources specify LGPL 2.1 or later. MIT supporting files and
+adapted CPython internals retain their notices; see debian/copyright and the
+COPYING files. Metadata and documentation are corrected to match these notices.
+
+Before general release, qualify other Debian/Ubuntu targets and architectures,
+freeze the Qore ABI and test relevant upgrades. No prior module package is
+available for upgrade testing. PPA publication requires a published matching
+Qore SDK and XML test package, plus source signing and upload.

@@ -46,8 +46,8 @@ void python_qore_module_desc(QoreModuleInfo& mod_info) {
     mod_info.ns_init = python_module_ns_init;
     mod_info.del = python_module_delete;
     mod_info.parse_cmd = python_module_parse_cmd;
-    mod_info.license = QL_MIT;
-    mod_info.license_str = "MIT";
+    mod_info.license = QL_LGPL;
+    mod_info.license_str = "LGPL-2.1-or-later";
 
     mod_info.info = new QoreHashNode(autoTypeInfo);
     mod_info.info->setKeyValue("python_version", new QoreStringNodeMaker(PY_VERSION), nullptr);

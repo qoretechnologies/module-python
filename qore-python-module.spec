@@ -9,7 +9,7 @@ Name:           qore-python-module
 Version:        1.3.0
 Release:        1
 Summary:        Qorus Integration Engine - Qore Python module
-License:        MIT
+License:        LGPL-2.1-or-later AND MIT AND Python-2.0
 Group:          Productivity/Networking/Other
 Url:            https://qoretechnologies.com
 Source:         qore-python-module-%{version}.tar.bz2
@@ -17,7 +17,7 @@ BuildRequires:  gcc-c++
 %if 0%{?el7}
 BuildRequires:  devtoolset-7-gcc-c++
 %endif
-BuildRequires:  cmake >= 3.5
+BuildRequires:  cmake >= 3.12
 %if 0%{?suse_version} || 0%{?fedora} || 0%{?sles_version} || 0%{?el9}
 BuildRequires:  python3-devel >= 3.8
 Requires:       python3 >= 3.8

@@ -1,0 +1,7 @@
+Tests: runtime
+Depends: qore-python-module, qore-xml-module
+Restrictions: allow-stderr
+
+Tests: compiler
+Depends: qore-python-module, libqore-dev
+Restrictions: allow-stderr

@@ -1,0 +1,9 @@
+Document: qore-python-module
+Title: Qore Python Module Reference
+Author: Qore Technologies, s.r.o.
+Abstract: API reference for calling Python from Qore and Qore from Python.
+Section: Programming
+
+Format: HTML
+Index: /usr/share/doc/qore-python-module-doc/html/index.html
+Files: /usr/share/doc/qore-python-module-doc/html/*.html
