@@ -61,3 +61,9 @@ The Debian copyright file identifies these components and their notices.
 
 - [Qore Programming Language](https://qore.org)
 - [Issue Tracker](https://github.com/qorelanguage/qore/issues)
+
+## RPM packages
+
+The canonical `qore-python-module.spec` builds the Qore module and the `qoreloader`
+Python extension alias for Fedora, Enterprise Linux and openSUSE. See
+[rpm/README.rst](rpm/README.rst) for source preparation and installed-package tests.
