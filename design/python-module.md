@@ -123,6 +123,74 @@ Python 3.12 has similar TSS issues but different internal structures:
 - Our tracking variables (`_qore_tss_tstate`, etc.) are authoritative
 - `PyGILState_Check()` results should not be trusted after GIL transitions
 
+## Ownership during interpreter finalization
+
+A `PythonProgram` owns its Python subinterpreter even when it shares the parent
+`QoreProgram`. The executing Python context takes precedence over the parent's
+external module context when importing Qore wrappers. The constructor establishes
+that context before evaluating Python source, so classes, functions, and constants
+are cached with the interpreter that allocates them.
+Python-created threads locate that owner from their attached interpreter before
+entering Qore, because those threads have no Qore execution context yet.
+
+Owned subinterpreters finish through `Py_EndInterpreter`, including free-threaded builds.
+Calling `PyInterpreterState_Clear` and `PyInterpreterState_Delete` alone does not
+run the complete module, `atexit`, thread, and allocator finalization sequence.
+Qore records the thread states it creates and retires idle states before ending
+the interpreter. Borrowed states from Python-created threads remain owned by
+Python. Python 3.12 requires the initial state to survive until shutdown so that
+`threading._shutdown` can release its main-thread completion sentinel. Python 3.13
+and newer use a state belonging to the finalizing native thread when destruction
+runs on a different thread. Reusing the original state on another thread prevents
+Python 3.14 from collecting the interpreter's object graph.
+
+After a Qore call releases the GIL, its auto-TSS binding points at the long-lived
+main state. A different thread can then destroy the subinterpreter without leaving
+a dangling auto-TSS pointer in the caller. Free-threaded context helpers instead
+save and restore the actual attached state, including a detached (`nullptr`) state.
+
+Qore objects and call references can outlive a Python interpreter. Their persistent
+Python references register with the owning `QorePythonProgram`, retaining a weak
+C++ program reference. Finalization detaches and releases these references while
+that interpreter is still usable. Destroying a Qore wrapper later releases its
+C++ data without touching a dead interpreter. Calls through surviving wrappers
+report `PYTHON-INTERPRETER-DELETED`.
+
+When an object passes to another interpreter, its Qore proxy stays between the
+two Python runtimes. Calls through that proxy enter the owning interpreter, and
+returning it to Qore preserves object identity. Only an object belonging to the
+receiving interpreter can be unwrapped to its original `PyObject`. Sharing raw
+objects would let one interpreter's garbage collector traverse another's heap.
+
+Import specifications and stack-inspection callables are resolved in the active
+interpreter. They are not cached across interpreters: `ModuleSpec`, Python
+functions, and module dictionaries belong to the interpreter that creates them.
+Import-spec allocation failures propagate as Python exceptions and leave imports
+retryable.
+
+The persistent-reference registry uses `py_thr_lck`; Python reference operations
+run in the owning interpreter context. Each entry is removed before `Py_DECREF`,
+and the lock is released before that call, because Python finalizers may destroy
+other registered Qore objects. Cleanup fetches the next entry after each callback.
+
+Python return values remain in RAII holders while their values are converted to
+Qore. Conversion borrows its input and retains any references needed by the result.
+Exception stack conversion owns each new reference returned by `PyFrame_GetBack`
+and copies function names before releasing the frame that supplied them.
+For Qore objects constructed from Python, the constructor's owning reference is
+released after the saved-object list or user callback has acquired its own reference.
+Wrapper heap types implement Python's garbage-collection protocol and traverse the
+instance's reference to its type, allowing cycles through class constants to be
+collected.
+
+Python-hosted processes release the same bridge references and generated classes
+without ending Python's main interpreter. Each generated Python callable owns its
+method definition and copied name through its capsule. This allows a bound method
+or imported function to survive Qore shutdown until Python collects it; a later
+call raises `RuntimeError` before accessing the deleted Qore program. Capsule
+references keep the C++ program record alive without keeping its interpreter or
+Qore program alive.
+
 ## Python Shutdown Handling
 
 ### The Problem

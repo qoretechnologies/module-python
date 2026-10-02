@@ -2,7 +2,7 @@
 /*
     qore Python module
 
-    Copyright (C) 2020 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -103,6 +103,7 @@ private:
     DLLLOCAL static int py_init(PyObject* self, PyObject* args, PyObject* kwds);
     DLLLOCAL static PyObject* py_new(PyTypeObject* type, PyObject* args, PyObject* kw);
     DLLLOCAL static void py_dealloc(PyQoreObject* self);
+    DLLLOCAL static int py_traverse(PyObject* self, visitproc visit, void* arg);
     DLLLOCAL static PyObject* py_repr(PyObject* obj);
     DLLLOCAL static void py_free(PyQoreObject* self);
     // get attribute

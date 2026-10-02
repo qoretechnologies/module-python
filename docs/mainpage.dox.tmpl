@@ -515,6 +515,19 @@ PythonProgram::setSaveObjectCallback(callback);
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
 
     <b>Bug Fixes:</b>
+    - fixed incomplete finalization of Python subinterpreters, including atexit hooks, free-threaded builds,
+      and destruction on a different native thread
+    - fixed interpreter ownership of imported Qore wrappers when independent PythonProgram objects share a Qore program
+    - preserve Qore proxies for Python objects passed between interpreters, preventing cross-interpreter garbage
+      collection while preserving object identity
+    - resolve import specifications and stack-inspection callables in their owning interpreter and propagate
+      import-spec allocation failures without corrupting subsequent imports
+    - fixed retained return values, constructed Qore objects, and Python references held by wrappers or callbacks after
+      their interpreter is deleted
+    - fixed heap-type reference counting and garbage collection of Qore wrapper instances
+    - fixed retained traceback frames after converting Python exceptions to Qore exceptions
+    - release generated wrapper metadata when hosted by native Python; retained Python functions and bound methods
+      now own their metadata and report an error if called after Qore shutdown
     - fixed a crash importing %Qore classes into %Python when a class constant has no %Python representation;
       such constants (ex: \c java.time.Instant::MIN, whose year lies outside the range supported by
       \c datetime.datetime) are now skipped instead of terminating the process

@@ -5,7 +5,7 @@
 
     Qore Programming Language
 
-    Copyright 2020 - 2022 Qore Technologies, s.r.o.
+    Copyright 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -30,37 +30,6 @@
 std::string QorePythonStackLocationHelper::python_no_call_name = "<python_module_no_runtime_stack_info>";
 QoreExternalProgramLocationWrapper QorePythonStackLocationHelper::python_loc_builtin("<python_module_unknown>", -1,
     -1);
-
-QorePythonReferenceHolder QorePythonStackLocationHelper::_getframe;
-QorePythonReferenceHolder QorePythonStackLocationHelper::normpath;
-
-int QorePythonStackLocationHelper::staticInit() {
-    {
-        QorePythonReferenceHolder sys(PyImport_ImportModule("sys"));
-        if (!sys) {
-            PyErr_Clear();
-            return -1;
-        }
-        _getframe = PyObject_GetAttrString(*sys, "_getframe");
-        if (!_getframe || !PyCallable_Check(*_getframe)) {
-            PyErr_Clear();
-            return -1;
-        }
-    }
-    {
-        QorePythonReferenceHolder path(PyImport_ImportModule("os.path"));
-        if (!path) {
-            PyErr_Clear();
-            return -1;
-        }
-        normpath = PyObject_GetAttrString(*path, "normpath");
-        if (!normpath || !PyCallable_Check(*normpath)) {
-            PyErr_Clear();
-            return -1;
-        }
-    }
-    return 0;
-}
 
 QorePythonStackLocationHelper::QorePythonStackLocationHelper(QorePythonProgram* py_pgm) : py_pgm(py_pgm) {
 }
@@ -120,13 +89,20 @@ void QorePythonStackLocationHelper::checkInit() const {
 
     QorePythonHelper qph(py_pgm);
 
+    // Resolve callables in the current interpreter. A cached main-interpreter
+    // function carries its module dictionary and code objects into other interpreters.
+    QorePythonReferenceHolder sys(PyImport_ImportModule("sys"));
+    QorePythonReferenceHolder getframe(sys ? PyObject_GetAttrString(*sys, "_getframe") : nullptr);
+    if (!getframe) {
+        PyErr_Clear();
+    }
     // start at depth = 1 or the first two entries will be identical
     int depth = 1;
-    while (true) {
+    while (getframe) {
         QorePythonReferenceHolder args(PyTuple_New(1));
         PyTuple_SET_ITEM(*args, 0, PyLong_FromLong(depth));
 
-        QorePythonReferenceHolder frame_obj(PyEval_CallObject(*_getframe, *args));
+        QorePythonReferenceHolder frame_obj(PyObject_CallObject(*getframe, *args));
         if (PyErr_Occurred()) {
             PyErr_Clear();
             break;
@@ -177,15 +153,23 @@ PyObject* QorePythonStackLocationHelper::normalizePath(const char* path) {
 }
 
 PyObject* QorePythonStackLocationHelper::normalizePath(PyObject* path_obj) {
-    // normalize path
-    QorePythonReferenceHolder normpath_args(PyTuple_New(1));
-    PyTuple_SET_ITEM(*normpath_args, 0, path_obj);
-
-    // get normalized path
-    QorePythonReferenceHolder np_obj(PyEval_CallObject(*normpath, *normpath_args));
-    if (PyErr_Occurred()) {
+    QorePythonReferenceHolder argument(path_obj);
+    if (!argument) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder path_module(PyImport_ImportModule("os.path"));
+    QorePythonReferenceHolder normpath(path_module ? PyObject_GetAttrString(*path_module, "normpath") : nullptr);
+    if (!normpath) {
         PyErr_Clear();
         return nullptr;
     }
-    return np_obj.release();
+    QorePythonReferenceHolder normpath_args(PyTuple_Pack(1, *argument));
+    if (!normpath_args) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder normalized(PyObject_CallObject(*normpath, *normpath_args));
+    if (!normalized) {
+        PyErr_Clear();
+    }
+    return normalized.release();
 }

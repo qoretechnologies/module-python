@@ -81,7 +81,11 @@ unsigned QorePythonProgram::pgm_count = 0;
 QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
     printd(5, "QorePythonProgram::QorePythonProgram() this: %p\n", this);
     qpy_global_register(this);
-#if PY_VERSION_HEX >= 0x030D0000
+#ifdef Py_GIL_DISABLED
+    PyThreadState* python = PyThreadState_GetUnchecked();
+    assert(python);
+    interpreter = python->interp;
+#elif PY_VERSION_HEX >= 0x030D0000
     // Python 3.13+: PyGILState_Check() and PyGILState_GetThisThreadState() check Python's
     // Thread Specific Storage (TSS/autoTSSkey). When external modules like JNI are loaded,
     // they can clear or corrupt Python's TSS without affecting actual GIL ownership.
@@ -198,6 +202,18 @@ QorePythonProgram::QorePythonProgram(const QoreString& source_code, const QoreSt
         return;
     }
 
+    // use the parent Program object as the source for importing
+    qpgm = getProgram();
+    owns_qore_program_ref = false;
+    pyns = qpgm->findNamespace(QORE_PYTHON_NS_NAME);
+    assert(pyns);
+    // Imports executed by the source belong to this interpreter. Establish its
+    // execution context before Python calls back into the Qore module loader.
+    QorePythonHelper qph(this, xsink);
+    if (*xsink) {
+        return;
+    }
+
     // import qoreloader module
     QorePythonReferenceHolder qoreloader(PyImport_ImportModule("qoreloader"));
     if (!qoreloader) {
@@ -235,11 +251,6 @@ QorePythonProgram::QorePythonProgram(const QoreString& source_code, const QoreSt
 
     PyDict_SetItemString(module_dict, "qoreloader", *qoreloader);
 
-    // use the parent Program object as the source for importing
-    qpgm = getProgram();
-    owns_qore_program_ref = false;
-    pyns = qpgm->findNamespace(QORE_PYTHON_NS_NAME);
-    assert(pyns);
     //printd(5, "QorePythonProgram::QorePythonProgram() this: %p pgm: %p rootns: %p\n", this, qpgm,
     //  qpgm->getRootNS());
     // create Qore program object with the same restrictions as the parent
@@ -279,17 +290,35 @@ void QorePythonProgram::createQoreProgram() {
 }
 
 QorePythonProgram* QorePythonProgram::getExecutionContext() {
-    QorePythonProgram* pypgm = reinterpret_cast<QorePythonProgram*>(q_get_thread_local_data(python_u_tld_key));
-    if (pypgm && pypgm->qpgm) {
-        return pypgm;
-    }
-    //printd(5, "QorePythonProgram::getExecutionContext() current pypgm context %p has no Qore Program context\n",
-    //  pypgm);
     return getContext();
 }
 
 QorePythonProgram* QorePythonProgram::getContext() {
-    QorePythonProgram* pypgm;
+    // A PythonProgram can share its parent QoreProgram while owning a different
+    // Python interpreter. Its wrappers must be cached in the executing program.
+    QorePythonProgram* pypgm = reinterpret_cast<QorePythonProgram*>(q_get_thread_local_data(python_u_tld_key));
+#if PY_VERSION_HEX >= 0x030D0000
+    PyThreadState* current = PyThreadState_GetUnchecked();
+#else
+    PyThreadState* current = PyGILState_Check() ? _PyThreadState_UncheckedGet() : nullptr;
+    if (current && current->thread_id != PyThread_get_thread_ident()) {
+        current = nullptr;
+    }
+#endif
+    if (pypgm && pypgm->qpgm && (!current || pypgm->interpreter == current->interp)) {
+        return pypgm;
+    }
+    if (current) {
+        // Python-created threads have no Qore execution context yet. Locate the
+        // owner of their attached interpreter instead of falling back to the main
+        // interpreter. CPython owns the attached state for the duration of this call.
+        AutoLocker al(py_thr_lck);
+        for (const auto& entry : py_thr_map) {
+            if (entry.first->interpreter == current->interp && entry.first->qpgm) {
+                return const_cast<QorePythonProgram*>(entry.first);
+            }
+        }
+    }
     // first try to get the actual Program context
     QoreProgram* pgm = getProgram();
     if (pgm) {
@@ -325,6 +354,61 @@ void QorePythonProgram::waitForThreadsIntern() {
     }
 }
 
+QorePythonPersistentReferenceHolder::QorePythonPersistentReferenceHolder(QorePythonProgram* owner, PyObject* obj)
+        : owner(obj ? owner : nullptr) {
+    QorePythonReferenceHolder reference(obj);
+    if (this->owner) {
+        owner->registerPersistentReference(this);
+        owner->weakRef();
+        this->obj = reference.release();
+    }
+}
+
+QorePythonPersistentReferenceHolder::~QorePythonPersistentReferenceHolder() {
+    if (owner) {
+        owner->releasePersistentReference(this);
+        owner->weakDeref();
+    }
+}
+
+void QorePythonProgram::registerPersistentReference(QorePythonManualReferenceHolder* reference) {
+    AutoLocker al(py_thr_lck);
+    assert(valid);
+    assert(persistent_references.find(reference) == persistent_references.end());
+    persistent_references.insert(reference);
+}
+
+void QorePythonProgram::releasePersistentReference(QorePythonManualReferenceHolder* reference) {
+    QorePythonHelper qph(this);
+    PyObject* object;
+    {
+        AutoLocker al(py_thr_lck);
+        persistent_references.erase(reference);
+        object = reference->release();
+    }
+    // Finalization clears every registered reference before invalidating this context.
+    assert(!object || (valid && qph.isValid()));
+    Py_XDECREF(object);
+}
+
+void QorePythonProgram::clearPersistentReferences() {
+    // A Python finalizer can destroy another Qore holder. Remove each entry before
+    // DECREF and fetch the next entry afresh so that reentrant removal is safe.
+    while (true) {
+        PyObject* object;
+        {
+            AutoLocker al(py_thr_lck);
+            if (persistent_references.empty()) {
+                break;
+            }
+            auto entry = persistent_references.begin();
+            object = (*entry)->release();
+            persistent_references.erase(entry);
+        }
+        Py_XDECREF(object);
+    }
+}
+
 void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
     if (destroyed) {
         return;
@@ -351,231 +435,134 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
     }
     qpgm = nullptr;
 
-    // remove all thread states; the objects will be deleted by Python when the interpreter is destroyed
-    {
-        AutoLocker al(py_thr_lck);
-        if (interpreter) {
-            // wait for threads to complete before deleting entries
+    if (interpreter) {
+        {
+            AutoLocker al(py_thr_lck);
             waitForThreadsIntern();
-
-            py_thr_map_t::iterator i = py_thr_map.find(this);
-            assert(i != py_thr_map.end());
-            //printd(5, "QorePythonProgram::deleteIntern() this: %p removing all thread states for pgm (delta: %d)\n",
-            //  this, (int)i->second.size());
-            for (auto& ti : i->second) {
-                //printd(5, "QorePythonProgram::deleteIntern() this: %p removing TID %d\n", this, ti.first);
-                py_global_tid_map_t::iterator gi = py_global_tid_map.find(ti.first);
-                assert(gi != py_global_tid_map.end());
-                py_thr_set_t::iterator thr_i = gi->second.find(ti.second.state);
-                if (thr_i != gi->second.end()) {
-                    gi->second.erase(thr_i);
-                }
-            }
-            py_thr_map.erase(i);
-
-            assert(pgm_count > 0);
-            --pgm_count;
         }
-    }
-
-    if ((interpreter && owns_interpreter)) {
-#ifdef Py_GIL_DISABLED
-        // In free-threading mode, we need a thread state for this interpreter during cleanup
-        // Create one before any cleanup operations
-        PyThreadState* cleanup_tstate = PyThreadState_New(interpreter);
-        if (cleanup_tstate) {
-            PyThreadState_Swap(cleanup_tstate);
-        }
-
-        // Clean up Python objects with proper thread state active
-        for (auto& i : obj_sink) {
-            Py_DECREF(i);
-        }
-        obj_sink.clear();
-
-        for (auto& i : meth_vec) {
-            delete i;
-        }
-        meth_vec.clear();
-
-        module.purge();
-        python_code.purge();
-
-        for (auto& i : py_cls_map) {
-            delete i.second;
-        }
-        py_cls_map.clear();
-
-        valid = false;
-
-        // Properly clean up thread state before interpreter deletion
-        // Must detach and delete thread state before clearing/deleting interpreter
-        PyThreadState_Swap(nullptr);
-        PyThreadState_Clear(cleanup_tstate);
-        PyThreadState_Delete(cleanup_tstate);
-
-        // Use PyInterpreterState_Clear and PyInterpreterState_Delete
-        // Py_EndInterpreter causes issues with weak references
-        PyInterpreterState_Clear(interpreter);
-        PyInterpreterState_Delete(interpreter);
-        // Signal that an interpreter has been destroyed - must be AFTER deletion
-        qpy_interpreter_destroyed();
-
-        interpreter = nullptr;
-        owns_interpreter = false;
-#else
         {
             QorePythonHelper qph(this);
+            clearPersistentReferences();
 
             for (auto& i : obj_sink) {
                 Py_DECREF(i);
             }
-
-            // NOTE: Do NOT delete meth_vec items here - Python function objects still reference them
-            // They will be deleted after PyInterpreterState_Clear below
+            obj_sink.clear();
 
             module.purge();
             python_code.purge();
 
-            // CRITICAL: Clear method objects from type dictionaries BEFORE releasing py_type.
-            // Method objects reference PyMethodDef structures that will be freed after cleanup.
-            // If method objects survive (e.g., due to references from the main interpreter),
-            // they'll be traversed during GC and cause use-after-free crashes.
+            // Remove bridge methods before releasing the types. Bound methods
+            // that survive own their metadata through their Python capsules.
             for (auto& i : py_cls_map) {
                 i.second->clearMethods();
             }
 
-            // Release Python references from PythonQoreClass objects BEFORE interpreter cleanup.
-            // We must do this while the interpreter is still valid.
-            // The actual deletion of PythonQoreClass objects (and their PyMethodDef structures)
-            // happens AFTER PyInterpreterState_Clear to avoid use-after-free during GC.
+            // Release references in both embedded and Python-hosted processes.
             for (auto& i : py_cls_map) {
                 i.second->release();
             }
 
             valid = false;
         }
+        // remove all thread states; the objects will be deleted by Python when the interpreter is destroyed
+        {
+            AutoLocker al(py_thr_lck);
+            if (interpreter) {
+                py_thr_map_t::iterator i = py_thr_map.find(this);
+                assert(i != py_thr_map.end());
+                //printd(5, "QorePythonProgram::deleteIntern() this: %p removing all thread states for pgm (delta: %d)\n",
+                //  this, (int)i->second.size());
+                for (auto& ti : i->second) {
+                    //printd(5, "QorePythonProgram::deleteIntern() this: %p removing TID %d\n", this, ti.first);
+                    py_global_tid_map_t::iterator gi = py_global_tid_map.find(ti.first);
+                    assert(gi != py_global_tid_map.end());
+                    py_thr_set_t::iterator thr_i = gi->second.find(ti.second.state);
+                    if (thr_i != gi->second.end()) {
+                        gi->second.erase(thr_i);
+                    }
+                }
+                py_thr_map.erase(i);
+
+                assert(pgm_count > 0);
+                --pgm_count;
+            }
+        }
+
         if (interpreter && owns_interpreter) {
-#if PY_VERSION_HEX >= 0x030D0000
-            // Python 3.13+ requires that when calling PyInterpreterState_Clear on a sub-interpreter,
-            // the current thread must have a thread state from that interpreter attached.
-            // Create a temporary thread state for the sub-interpreter.
+            // PyInterpreterState_Clear/Delete only discard interpreter storage. They
+            // do not run atexit hooks, finalize modules, or release interpreter free lists.
+            // Finish with Py_EndInterpreter while this interpreter is current instead.
             {
-                // Acquire the GIL with main interpreter - keep it held through entire cleanup
                 QorePythonGilHelper pgh;
-                // CRITICAL: If Python is shutting down, pgh won't acquire the GIL.
-                // Skip all Python API cleanup in this case to avoid crashes.
                 if (!pgh.isInitialized()) {
-                    printd(5, "QorePythonProgram::deleteIntern() skipping cleanup - Python is shutting down\n");
-                    // Clear the interpreter pointer to prevent double-cleanup attempts
                     interpreter = nullptr;
                     return;
                 }
-                PyThreadState* sub_tstate = PyThreadState_New(interpreter);
-                assert(sub_tstate);
-
-                // Swap to the sub-interpreter's thread state
-                PyThreadState* old_tstate = PyThreadState_Swap(sub_tstate);
-
-                {
-                    // enforce serialization
-                    AutoLocker al(py_thr_lck);
-                    // CRITICAL: Clear our thread state cache BEFORE PyInterpreterState_Clear/Delete.
-                    // PyInterpreterState_Delete() calls zapthreads() which frees all thread states
-                    // attached to this interpreter. If we don't clear our cache, we'll have
-                    // dangling pointers to freed memory.
-                    py_thr_map.erase(this);
-                    PyInterpreterState_Clear(interpreter);
+                // Python 3.12 keeps threading._shutdown's completion sentinel in the
+                // initial state, so it must survive until Py_EndInterpreter. Newer
+                // runtimes require a state belonging to the finalizing native thread;
+                // reusing another thread's state leaves interpreter objects uncollected.
+                PyThreadState* sub_tstate = initial_thread_state;
+#if PY_VERSION_HEX >= 0x030D0000
+                if (sub_tstate->thread_id != PyThread_get_thread_ident()) {
+                    sub_tstate = PyThreadState_New(interpreter);
                 }
-
-                // CRITICAL: Before calling PyInterpreterState_Delete, we must clear bound_gilstate
-                // for ALL thread states of this interpreter (including sub_tstate).
-                // PyInterpreterState_Delete calls zapthreads which deletes remaining thread states,
-                // and each delete will call unbind_gilstate_tstate which asserts TSS == tstate.
-                // Since we'll swap TSS to main interpreter before delete, these assertions will fail.
-                //
-                // The _status.bound_gilstate field is in the public cpython/pystate.h header,
-                // so this works without internal Python headers.
-                PyThreadState* tstate = PyInterpreterState_ThreadHead(interpreter);
-                while (tstate) {
-                    qore_py_set_bound_gilstate(tstate, 0);
-                    tstate = PyThreadState_Next(tstate);
-                }
-
-                // Now swap back to the main interpreter's thread state
-                PyThreadState_Swap(old_tstate);
-
-                // Delete sub_tstate - its bound_gilstate is already 0 so no TSS assertion
-                PyThreadState_Delete(sub_tstate);
-
-                // Now delete the interpreter - all thread states have bound_gilstate=0
-                PyInterpreterState_Delete(interpreter);
-                interpreter = nullptr;  // Clear pointer to prevent dangling reference
-            }
-            // QorePythonGilHelper destructor releases the GIL here
-#else
-            // grab the GIL with the main thread lock
-            QorePythonGilHelper pgh;
-            // CRITICAL: If Python is shutting down, pgh won't acquire the GIL.
-            // Skip all Python API cleanup in this case to avoid crashes.
-            if (!pgh.isInitialized()) {
-                printd(5, "QorePythonProgram::deleteIntern() skipping cleanup - Python is shutting down\n");
-                // Clear the interpreter pointer to prevent double-cleanup attempts
-                interpreter = nullptr;
-                return;
-            }
-            {
-                // enforce serialization
-                AutoLocker al(py_thr_lck);
-                // CRITICAL: Clear our thread state cache BEFORE PyInterpreterState_Clear/Delete.
-                // PyInterpreterState_Delete() calls zapthreads() which frees all thread states
-                // attached to this interpreter. If we don't clear our cache, we'll have
-                // dangling pointers to freed memory.
-                py_thr_map.erase(this);
-                // Clear bound_gilstate for all thread states to avoid TSS assertions in 3.12+
-                PyThreadState* tstate = PyInterpreterState_ThreadHead(interpreter);
-                while (tstate) {
-                    qore_py_set_bound_gilstate(tstate, 0);
-                    tstate = PyThreadState_Next(tstate);
-                }
-                assert(_qore_PyRuntimeGILState_GetThreadState());
-                PyInterpreterState_Clear(interpreter);
-            }
-            PyInterpreterState_Delete(interpreter);
-            interpreter = nullptr;  // Clear pointer to prevent dangling reference
 #endif
+                if (!sub_tstate) {
+                    PyErr_Clear();
+                    xsink->raiseException("PYTHON-MEMORY-ERROR", "cannot allocate interpreter cleanup state");
+                    return;
+                }
+                qore_py_set_bound_gilstate(sub_tstate, 0);
+                PyThreadState* old_tstate = PyThreadState_Swap(sub_tstate);
+                _qore_PyGILState_SetThisThreadState(sub_tstate);
+                py_thr_set_t states;
+                {
+                    AutoLocker al(py_thr_lck);
+                    // QorePythonHelper may have created a cleanup state after the
+                    // first cache removal. Remove its reverse lookup as well.
+                    auto program_states = py_thr_map.find(this);
+                    if (program_states != py_thr_map.end()) {
+                        for (const auto& entry : program_states->second) {
+                            auto global_states = py_global_tid_map.find(entry.first);
+                            assert(global_states != py_global_tid_map.end());
+                            global_states->second.erase(entry.second.state);
+                            if (global_states->second.empty()) {
+                                py_global_tid_map.erase(global_states);
+                            }
+                        }
+                        py_thr_map.erase(program_states);
+                    }
+                    states.swap(owned_thread_states);
+                }
+                // Python 3.12 requires the finalizing state to be the only remaining
+                // state after joining Python threads. These idle states belong to Qore;
+                // Python-created threads retain their states and are joined by Python.
+                for (PyThreadState* state : states) {
+                    if (state == sub_tstate) {
+                        continue;
+                    }
+                    qore_py_set_bound_gilstate(state, 0);
+                    PyThreadState_Clear(state);
+                    PyThreadState_Delete(state);
+                }
+                Py_EndInterpreter(sub_tstate);
+                initial_thread_state = nullptr;
+                interpreter = nullptr;
+                PyThreadState_Swap(old_tstate);
+                _qore_PyGILState_SetThisThreadState(old_tstate);
+            }
             // Signal that an interpreter has been destroyed - must be AFTER deletion
             qpy_interpreter_destroyed();
 
-            // Now it's safe to delete PyMethodDef structures since the interpreter is gone
-            // and Python function objects no longer reference them
-            for (auto& i : meth_vec) {
-                delete i;
-            }
-            meth_vec.clear();
-
-            // Now it's safe to delete PythonQoreClass objects since the interpreter is gone
-            // and Python method objects no longer reference their PyMethodDef structures
-            for (auto& i : py_cls_map) {
-                delete i.second;
-            }
-            py_cls_map.clear();
-
             interpreter = nullptr;
             owns_interpreter = false;
-        } else {
-            // If we don't own the interpreter, still need to clean up
-            for (auto& i : meth_vec) {
-                delete i;
-            }
-            meth_vec.clear();
-
-            for (auto& i : py_cls_map) {
-                delete i.second;
-            }
-            py_cls_map.clear();
         }
-#endif
+        for (auto& i : py_cls_map) {
+            delete i.second;
+        }
+        py_cls_map.clear();
     }
 
     if (save_object_callback) {
@@ -726,12 +713,8 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
             .gil = PyInterpreterConfig_SHARED_GIL,  // Shared GIL (no real GIL in free-threading)
         };
 
-        // CRITICAL: Release the GIL state before creating the sub-interpreter.
-        // PyGILState_Ensure() (called in QorePythonGilHelper constructor) initializes thread-local
-        // mimalloc heap data for the main interpreter. If we don't release it, the new sub-interpreter's
-        // thread state will have a NULL mimalloc heap, causing crashes on any memory allocation.
-        // This releases the main interpreter's thread state so that Py_NewInterpreterFromConfig can
-        // properly initialize mimalloc for the new sub-interpreter.
+        // Creation attaches the new interpreter. Detach first so allocator and
+        // thread-local state are initialized for that interpreter.
         qpgh.releaseBeforeSubInterpreter();
 
         PyStatus status = Py_NewInterpreterFromConfig(&python, &config);
@@ -818,6 +801,7 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
     }
 
     interpreter = python->interp;
+    initial_thread_state = python;
     owns_interpreter = true;
     printd(5, "QorePythonProgram::createInterpreter() interpreter: %p\n", interpreter);
     if (!PyDateTimeAPI) {
@@ -853,6 +837,7 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
             //printd(5, "QorePythonProgram::createInterpreter() inserted TID %d -> %p\n", tid, python);
         }
 
+        owned_thread_states.insert(python);
         ++pgm_count;
     }
 
@@ -899,7 +884,7 @@ int QorePythonProgram::setRecursionLimit(ExceptionSink* xsink) {
     // use the q_thread_stack_remaining() API if Qore >= 1.0.8
     QorePythonReferenceHolder py_args(PyTuple_New(1));
     PyTuple_SET_ITEM(*py_args, 0, PyLong_FromLongLong(getRecursionLimit()));
-    QorePythonReferenceHolder return_value(PyCFunction_Call(*func, *py_args, nullptr));
+    QorePythonReferenceHolder return_value(PyObject_Call(*func, *py_args, nullptr));
     return checkPythonException(xsink);
 }
 
@@ -1007,7 +992,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // This can happen when an interpreter is deleted but TSS still points to one of its thread states.
     // When we create a new thread state with PyThreadState_New(), it will try to bind to TSS,
     // but if TSS already has a stale thread state with bound_gilstate=1, tstate_activate will fail.
-#if PY_VERSION_HEX >= 0x030D0000
+#if PY_VERSION_HEX >= 0x030D0000 && !defined(Py_GIL_DISABLED)
     // CRITICAL: Check for stale TSS from deleted interpreters BEFORE creating new thread states.
     // This can happen when an interpreter is deleted but TSS still points to one of its thread states.
     {
@@ -1077,9 +1062,13 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         // NOTE: This detection is also needed for Python 3.11 - Python's threading.Thread creates
         // threads that already have thread states and the GIL. Without this check, we'd create a
         // duplicate thread state and deadlock trying to acquire an already-held GIL.
-#if !defined(QORE_PYTHON_INCLUDE_INTERNALS)
+#ifdef Py_GIL_DISABLED
+        PyThreadState* python_thread_state = PyThreadState_GetUnchecked();
+#elif !defined(QORE_PYTHON_INCLUDE_INTERNALS)
         PyThreadState* python_thread_state = _qore_check_python_created_thread_gil();
-        if (python_thread_state != nullptr) {
+#endif
+#if defined(Py_GIL_DISABLED) || !defined(QORE_PYTHON_INCLUDE_INTERNALS)
+        if (python_thread_state && python_thread_state->interp == interpreter) {
             // This is a Python-created thread - use the existing thread state
             // The thread already has the GIL, so we don't need to acquire it
             python = python_thread_state;
@@ -1138,16 +1127,20 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 #endif
         }
 
-        // the thread state will be deleted when the thread terminates or the interpreter is deleted
+        // Keep ownership independently of the per-thread lookup: Qore thread exit
+        // removes that lookup, but the state must still be finalized with its interpreter.
         int tid = q_gettid();
         AutoLocker al(py_thr_lck);
+        if (!is_python_created_thread) {
+            owned_thread_states.insert(python);
+        }
         {
             py_thr_map_t::iterator i = py_thr_map.find(this);
             if (i == py_thr_map.end()) {
-                py_thr_map[this] = {{tid, {python, owns_interpreter}}};
+                py_thr_map[this] = {{tid, {python, !is_python_created_thread}}};
             } else {
                 assert(i->second.find(tid) == i->second.end());
-                i->second[tid] = {python, owns_interpreter};
+                i->second[tid] = {python, !is_python_created_thread};
             }
             assert(py_thr_map.find(this) != py_thr_map.end());
         }
@@ -1173,43 +1166,15 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     PyThreadState* released_other_interp_tstate = nullptr;  // Track if we released another interpreter's thread state
 
 #ifdef Py_GIL_DISABLED
-    // In free-threading mode only: set new TSS thread state before thread state operations.
-    // This is needed because free-threading requires thread state setup before attachment.
-    // NOTE: For GIL-enabled Python (3.12, 3.13, 3.14), we set TSS AFTER acquiring the GIL
-    // to avoid confusing _qore_has_gil() which uses our tracking (_qore_tss_tstate).
-    // Setting TSS before the GIL check could cause _qore_has_gil() to incorrectly return true
-    // when we don't actually hold the GIL.
-    if (tss_state != python) {
-        _qore_PyGILState_SetThisThreadState(python);
-    }
-#endif
-
-    // are we currently holding the GIL?
-#ifdef Py_GIL_DISABLED
-    // In free-threading mode, there's no GIL to hold, but we need a valid attached thread state
-    // for Python operations to work
+    // PyGILState_GetThisThreadState() is an auto-TSS cache, not the attached
+    // state. Save the actual attachment, including nullptr, and restore it
+    // when leaving this context.
     ceval_state = nullptr;
-    t_state = PyGILState_GetThisThreadState();
-
-    //printd(5, "QorePythonProgram::setContext() free-threading: t_state: %p python: %p\n", t_state, python);
-
-    if (t_state == nullptr) {
-        // No thread state attached - we need to attach our specific interpreter's thread state
-        // PyThreadState_Swap will call _PyThreadState_Attach internally
+    t_state = PyThreadState_GetUnchecked();
+    g_state = t_state == python ? PyGILState_LOCKED : PyGILState_UNLOCKED;
+    if (t_state != python) {
         PyThreadState_Swap(python);
-        t_state = python;
-        g_state = PyGILState_UNLOCKED;  // Mark that we need to detach in releaseContext
-    } else if (t_state != python) {
-        // Different thread state is attached - swap to ours
-        // NOTE: In free-threading, we need to detach current and attach new
-        PyThreadState_Swap(python);
-        g_state = PyGILState_UNLOCKED;  // Mark that we need to restore in releaseContext
-    } else {
-        // Our thread state is already attached
-        g_state = PyGILState_LOCKED;  // Mark as "locked" since we don't need to change it
     }
-    //printd(5, "QorePythonProgram::setContext() free-threading: after swap, current: %p g_state: %d\n",
-    //    PyGILState_GetThisThreadState(), (int)g_state);
 #else
 #if PY_VERSION_HEX >= 0x030D0000
     // Python 3.13+ changed thread state management - use PyEval_AcquireThread/ReleaseThread
@@ -1565,9 +1530,7 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
             PyThreadState_Swap(release_tstate);
         }
         // Use PyEval_ReleaseThread which properly clears both TSS and fast TLS
-        PyEval_ReleaseThread(release_tstate);
-        _qore_PyGILState_SetThisThreadState(nullptr);
-        _qore_gil_held = false;  // Track that we no longer hold the GIL
+        qore_python_release_context();
 
         // If we released another interpreter's thread state in setContext, restore it now
         if (oldstate.released_other_interp_tstate) {
@@ -1595,7 +1558,7 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
         if (current != python) {
             PyThreadState_Swap(python);
         }
-        _qore_release_thread_state(python);
+        qore_python_release_context();
         // NOTE we cannot assert !PyGILState_Check() here, as we have released the GIL, and another thread may have
         // created a new interpreter, which will temporarily disbale the GIL check, which would cause
         // PyGILState_Check() to return 1
@@ -1646,9 +1609,17 @@ PythonQoreClass* QorePythonProgram::findCreatePythonClass(const QoreClass& cls, 
 struct func_capsule_t {
     const QoreExternalFunction& func;
     QorePythonProgram* py_pgm;
+    const std::string name;
+    PyMethodDef definition;
 
-    DLLLOCAL func_capsule_t(const QoreExternalFunction& func, QorePythonProgram* py_pgm)
-            : func(func), py_pgm(py_pgm) {
+    DLLLOCAL func_capsule_t(const QoreExternalFunction& func, QorePythonProgram* py_pgm, PyCFunction callback)
+            : func(func), py_pgm(py_pgm), name(func.getName()),
+              definition{name.c_str(), callback, METH_VARARGS, nullptr} {
+        py_pgm->weakRef();
+    }
+
+    DLLLOCAL ~func_capsule_t() {
+        py_pgm->weakDeref();
     }
 };
 
@@ -1660,20 +1631,16 @@ static void func_capsule_destructor(PyObject* func_capsule) {
 int QorePythonProgram::importQoreFunctionToPython(PyObject* mod, const QoreExternalFunction& func) {
     printd(5, "QorePythonProgram::importQoreFunctionToPython() %s()\n", func.getName());
 
-    std::unique_ptr<func_capsule_t> fc(new func_capsule_t(func, this));
-
-    QorePythonReferenceHolder capsule(PyCapsule_New((void*)fc.release(), nullptr, func_capsule_destructor));
-
-    std::unique_ptr<PyMethodDef> funcdef(new PyMethodDef);
-    funcdef->ml_name = func.getName();
-    funcdef->ml_meth = callQoreFunction;
-    funcdef->ml_flags = METH_VARARGS;
-    funcdef->ml_doc = nullptr;
-
-    meth_vec.push_back(funcdef.get());
-
-    QorePythonReferenceHolder pyfunc(PyCFunction_New(funcdef.release(), *capsule));
-    assert(pyfunc);
+    std::unique_ptr<func_capsule_t> fc(new func_capsule_t(func, this, callQoreFunction));
+    QorePythonReferenceHolder capsule(PyCapsule_New(fc.get(), nullptr, func_capsule_destructor));
+    if (!capsule) {
+        return -1;
+    }
+    func_capsule_t* data = fc.release();
+    QorePythonReferenceHolder pyfunc(PyCFunction_New(&data->definition, *capsule));
+    if (!pyfunc) {
+        return -1;
+    }
     if (PyObject_SetAttrString(mod, func.getName(), *pyfunc)) {
         assert(PyErr_Occurred());
         printd(5, "QorePythonProgram::importQoreFunctionToPython() error setting function %s in %p (%s)\n",
@@ -1697,7 +1664,7 @@ int QorePythonProgram::saveQoreObjectFromPython(const QoreValue& rv, ExceptionSi
     if (save_object_callback) {
         ReferenceHolder<QoreListNode> args(new QoreListNode(autoTypeInfo), &xsink);
         args->push(rv.refSelf(), &xsink);
-        save_object_callback->execValue(*args, &xsink);
+        ValueHolder result(save_object_callback->execValue(*args, &xsink), &xsink);
         if (xsink) {
             raisePythonException(xsink);
             return -1;
@@ -1921,7 +1888,7 @@ int QorePythonProgram::importQoreConstantToPython(PyObject* mod, const QoreExter
     ExceptionSink xsink;
     ValueHolder qoreval(constant.getReferencedValue(), &xsink);
     if (!xsink) {
-        QorePythonReferenceHolder val(qore_python_pgm->getPythonValue(*qoreval, &xsink));
+        QorePythonReferenceHolder val(getPythonValue(*qoreval, &xsink));
         if (!xsink) {
             if (!PyObject_SetAttrString(mod, constant.getName(), *val)) {
                 return 0;
@@ -2418,7 +2385,7 @@ DateTimeNode* QorePythonProgram::getQoreDateTimeFromDateTime(ExceptionSink* xsin
                 QorePythonReferenceHolder args(PyTuple_New(1));
                 Py_INCREF(val);
                 PyTuple_SET_ITEM(*args, 0, val);
-                QorePythonReferenceHolder delta(PyEval_CallObject(*utcoffset_func, *args));
+                QorePythonReferenceHolder delta(PyObject_CallObject(*utcoffset_func, *args));
                 if (!delta) {
                     // utcoffset() raised an exception - propagate to caller if xsink provided
                     if (xsink) {
@@ -2472,7 +2439,9 @@ ResolvedCallReferenceNode* QorePythonProgram::getQoreCallRefFromMethod(Exception
     assert(PyMethod_Check(val));
     PyMethodObject* m = reinterpret_cast<PyMethodObject*>(val);
     Py_INCREF(m->im_func);
-    Py_INCREF(m->im_self);
+    if (!PyType_Check(m->im_self)) {
+        Py_INCREF(m->im_self);
+    }
     weakRef();
     // NOTE: classmethods will have their "self" arg = the class / type
     return new PythonCallableCallReferenceNode(this, m->im_func, PyType_Check(m->im_self) ? nullptr : m->im_self);
@@ -2601,7 +2570,7 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
     }
 
     Py_INCREF(val);
-    QoreObject* obj = new QoreObject(cls, qpgm, new QorePythonPrivateData(val));
+    QoreObject* obj = new QoreObject(cls, qpgm, new QorePythonPrivateData(this, val));
     //printd(5, "QorePythonProgram::getQoreValue() obj: %p cls: %p '%s' id: %d\n", obj, cls, cls->getName(),
     //  cls->getID());
     return obj;
@@ -2640,15 +2609,15 @@ PyObject* QorePythonProgram::getPythonTupleValue(ExceptionSink* xsink, const Qor
     //printd(5, "QorePythonProgram::getPythonTupleValue() l: %d first: %p\n", l ? (int)l->size() : 0, first);
     bool has_list = (l && l->size() >= arg_offset);
 
-    if (!first && !has_list) {
-        return PyTuple_New(0);
-    }
-
     Py_ssize_t size = has_list ? (l->size() - arg_offset) : 0;
     if (first) {
         ++size;
     }
     QorePythonReferenceHolder tuple(PyTuple_New(size));
+    if (!tuple) {
+        checkPythonException(xsink);
+        return nullptr;
+    }
     size_t offset = 0;
     if (first) {
         Py_INCREF(first);
@@ -2909,12 +2878,15 @@ PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* 
             }
 
             TryPrivateDataRefHolder<QorePythonPrivateData> pypd(o, CID_PYTHONBASEOBJECT, xsink);
-            if (pypd) {
+            if (pypd && sharesInterpreter(pypd->getOwner())) {
                 PyObject* rv = pypd->get();
                 Py_XINCREF(rv);
                 return rv;
             }
 
+            // A foreign interpreter's Python object must remain behind its Qore
+            // proxy. Passing the raw object lets the receiving interpreter's GC
+            // traverse and corrupt the owner's object graph during finalization.
             PythonQoreClass* py_cls = findCreatePythonClass(*o->getClass(), "qore");
             return py_cls->wrap(o);
         }
@@ -3040,7 +3012,7 @@ QoreValue QorePythonProgram::callInternal(ExceptionSink* xsink, PyObject* callab
     //printd(5, "QorePythonProgram::callInternal() f: %p args: %d (%d) self: %p\n", callable,
     //    args ? (int)args->size() : 0, (int)arg_offset, first);
     QorePythonReferenceHolder rv(callPythonInternal(xsink, callable, args, arg_offset, first));
-    return *xsink ? QoreValue() : getQoreValue(xsink, rv.release());
+    return *xsink ? QoreValue() : getQoreValue(xsink, rv);
 }
 
 PyObject* QorePythonProgram::callPythonInternal(ExceptionSink* xsink, PyObject* callable, const QoreListNode* args,
@@ -3054,7 +3026,7 @@ PyObject* QorePythonProgram::callPythonInternal(ExceptionSink* xsink, PyObject* 
 
     //printd(5, "QorePythonProgram::callPythonInternal(): this: %p valid: %d argcount: %d (first: %p)\n", this, valid,
     //    (args && args->size() > arg_offset) ? args->size() - arg_offset : 0, first);
-    QorePythonReferenceHolder return_value(PyEval_CallObjectWithKeywords(callable, *py_args, kwargs));
+    QorePythonReferenceHolder return_value(PyObject_Call(callable, *py_args, kwargs));
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
         return nullptr;
@@ -3087,7 +3059,7 @@ QoreValue QorePythonProgram::callFunctionObject(ExceptionSink* xsink, PyObject* 
     if (!return_value && checkPythonException(xsink)) {
         return QoreValue();
     }
-    return getQoreValue(xsink, return_value.release());
+    return getQoreValue(xsink, return_value);
 }
 
 void QorePythonProgram::clearPythonException() {
@@ -3146,6 +3118,8 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
         PyFrameObject* frame = tb->tb_frame;
         const char* funcname = nullptr;
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION > 10
+        QorePythonReferenceHolder owned_frame;
+        QoreString function_name;
         while (frame) {
             // get line number
             QorePythonReferenceHolder code((PyObject*)PyFrame_GetCode(frame));
@@ -3166,9 +3140,14 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
                 callstack.add(CT_USER, filename, line, line, funcname, QORE_PYTHON_LANG_NAME);
             }
             QorePythonReferenceHolder funcname_obj(PyObject_GetAttrString(*code, "co_qualname"));
-            funcname = PyUnicode_AsUTF8(*funcname_obj);
+            function_name = PyUnicode_AsUTF8(*funcname_obj);
+            funcname = function_name.c_str();
 
-            frame = PyFrame_GetBack(frame);
+            // PyFrame_GetBack returns a new reference; keep it owned while walking
+            // the stack so the frame and its entire module graph can be collected.
+            PyFrameObject* next = PyFrame_GetBack(frame);
+            owned_frame = reinterpret_cast<PyObject*>(next);
+            frame = next;
         }
 #else
         while (frame) {
@@ -3685,7 +3664,7 @@ QoreValue QorePythonProgram::callCFunctionMethod(ExceptionSink* xsink, PyObject*
 
     //printd(5, "QorePythonProgram::callCMethod(): argcount: %d\n",
     //    (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
-    QorePythonReferenceHolder return_value(PyCFunction_Call(func, *py_args, nullptr));
+    QorePythonReferenceHolder return_value(PyObject_Call(func, *py_args, nullptr));
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
         return QoreValue();
@@ -3721,48 +3700,14 @@ void QorePythonProgram::execPythonConstructor(const QoreMethod& meth, PyObject* 
     }
 
     // check base class initialization
-    self->setPrivate(meth.getClass()->getID(), new QorePythonPrivateData(pyobj.release()));
+    self->setPrivate(meth.getClass()->getID(), new QorePythonPrivateData(pypgm, pyobj.release()));
 }
 
 void QorePythonProgram::execPythonDestructor(const QorePythonClass& thisclass, PyObject* pycls, QoreObject* self,
         QorePythonPrivateData* pd, ExceptionSink* xsink) {
-    if (q_libqore_exiting()) {
-        return;
-    }
-    QorePythonProgram* pypgm = thisclass.getPythonProgram();
-
-    // Check if the Python program pointer is still valid - it may have been destroyed
-    // during program cleanup, leaving a dangling pointer in the QorePythonClass
-    if (!qpy_is_valid(pypgm)) {
-        return;
-    }
-
-    // Check the destroyed flag (safe now that we know pypgm is a valid pointer)
-    // The destroyed flag is set at the very start of deleteIntern(), before any cleanup
-    if (pypgm->isDestroyed()) {
-        return;
-    }
-
-    // Also check the valid flag for good measure
-    if (!pypgm->isValid()) {
-        return;
-    }
-
-    // Check if any sub-interpreters have been destroyed
-    // When sub-interpreters are destroyed in Python 3.12, the GIL state can become
-    // corrupted, making it unsafe to acquire the GIL for the main interpreter.
-    // Skip the destructor in this case - the Python object will be cleaned up
-    // when the interpreter is eventually destroyed anyway.
-    if (qpy_get_destroyed_count() > 0) {
-        return;
-    }
-
-    QorePythonHelper qph(pypgm);
-    if (!qph.isValid()) {
-        return;
-    }
-
-    if (pypgm->isValid()) {
+    if (!q_libqore_exiting()) {
+        // The holder releases in the owning interpreter, or has already been
+        // invalidated during interpreter finalization. Always release the C++ data.
         pd->deref(xsink);
     }
 }
@@ -4172,6 +4117,10 @@ PyObject* QorePythonProgram::callQoreFunction(PyObject* self, PyObject* args) {
     func_capsule_t* fc = reinterpret_cast<func_capsule_t*>(PyCapsule_GetPointer(self, nullptr));
     assert(&fc->func);
     assert(fc->py_pgm);
+    if (!fc->py_pgm->isValid() || fc->py_pgm->isDestroyed()) {
+        PyErr_SetString(PyExc_RuntimeError, "the owning Qore program has been deleted");
+        return nullptr;
+    }
 
     // get Qore arguments
     ExceptionSink xsink;

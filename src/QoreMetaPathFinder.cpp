@@ -2,7 +2,7 @@
 /*
     qore Python module
 
-    Copyright (C) 2020 - 2021 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -23,10 +23,6 @@
 #include "QoreLoader.h"
 #include "JavaLoader.h"
 #include "QorePythonProgram.h"
-
-QorePythonManualReferenceHolder QoreMetaPathFinder::qore_package;
-QorePythonManualReferenceHolder QoreMetaPathFinder::java_package;
-QorePythonManualReferenceHolder QoreMetaPathFinder::mod_spec_cls;
 
 PyDoc_STRVAR(QoreMetaPathFinder_doc,
 "QoreMetaPathFinder()\n\
@@ -87,21 +83,6 @@ int QoreMetaPathFinder::init() {
         return -1;
     }
 
-    // get importlib.machinery.ModuleSpec class
-    QorePythonReferenceHolder mod(PyImport_ImportModule("importlib.machinery"));
-    if (!*mod) {
-        printd(5, "QoreMetaPathFinder::init() ERROR: no importlib.machinery module\n");
-        return -1;
-    }
-
-    if (!PyObject_HasAttrString(*mod, "ModuleSpec")) {
-        printd(5, "QoreMetaPathFinder::init() ERROR: no ModuleSpec class in importlib.machinery\n");
-        return -1;
-    }
-
-    mod_spec_cls = PyObject_GetAttrString(*mod, "ModuleSpec");
-    printd(5, "mod_spec_cls: %p %s\n", *mod_spec_cls, Py_TYPE(*mod_spec_cls)->tp_name);
-
     return 0;
 }
 
@@ -135,12 +116,6 @@ int QoreMetaPathFinder::setupModules() {
     }
 
     return 0;
-}
-
-void QoreMetaPathFinder::del() {
-    qore_package.release();
-    java_package.release();
-    mod_spec_cls.purge();
 }
 
 void QoreMetaPathFinder::dealloc(PyObject* self) {
@@ -200,65 +175,59 @@ PyObject* QoreMetaPathFinder::find_spec(PyObject* self, PyObject* args) {
         }
     }
 
+    if (PyErr_Occurred()) {
+        return nullptr;
+    }
     Py_INCREF(Py_None);
     return Py_None;
 }
 
 PyObject* QoreMetaPathFinder::newModuleSpec(bool qore, const QoreString& name, PyObject* loader) {
-    // create args for ModuleSpec constructor
-    QorePythonReferenceHolder args(PyTuple_New(2));
-    PyTuple_SET_ITEM(*args, 0, PyUnicode_FromStringAndSize(name.c_str(), name.size()));
-
-    if (!loader) {
-        Py_INCREF(Py_None);
-        PyTuple_SET_ITEM(*args, 1, Py_None);
-    } else {
-        PyTuple_SET_ITEM(*args, 1, loader);
+    // ModuleSpec is a heap type owned by the active interpreter. Sharing it
+    // across interpreters corrupts free-threaded per-interpreter type-ID pools.
+    QorePythonReferenceHolder loader_ref(loader ? loader :
+        (qore ? QoreLoader::getLoaderRef() : JavaLoader::getLoaderRef()));
+    if (!loader_ref) {
+        return nullptr;
     }
-
+    QorePythonReferenceHolder machinery(PyImport_ImportModule("importlib.machinery"));
+    if (!machinery) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder spec_class(PyObject_GetAttrString(*machinery, "ModuleSpec"));
+    if (!spec_class) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder py_name(PyUnicode_FromStringAndSize(name.c_str(), name.size()));
+    if (!py_name) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder args(PyTuple_Pack(2, *py_name, *loader_ref));
     QorePythonReferenceHolder kwargs(PyDict_New());
-    Py_INCREF(Py_True);
-    PyDict_SetItemString(*kwargs, "is_package", Py_True);
-    QorePythonReferenceHolder mod_spec(PyObject_Call((PyObject*)*mod_spec_cls, *args, *kwargs));
-
-    PyObject_SetAttrString(*mod_spec, "loader", qore ? QoreLoader::getLoader() : JavaLoader::getLoader());
-
-    assert(mod_spec);
-    return mod_spec.release();
+    if (!args || !kwargs || PyDict_SetItemString(*kwargs, "is_package", Py_True)) {
+        return nullptr;
+    }
+    return PyObject_Call(*spec_class, *args, *kwargs);
 }
 
 PyObject* QoreMetaPathFinder::getQorePackageModuleSpec() {
-    if (!qore_package) {
-        // create qore package
-        qore_package = newModuleSpec(true, "qore");
-
-        QorePythonReferenceHolder search_locations(PyList_New(0));
-        PyObject_SetAttrString(*qore_package, "submodule_search_locations", *search_locations);
-    }
-
-    qore_package.py_ref();
-    //printd(5, "QoreMetaPathFinder::getQorePackageModuleSpec() returning qore_package: %p\n", *qore_package);
-    return *qore_package;
+    return newModuleSpec(true, "qore");
 }
 
 PyObject* QoreMetaPathFinder::getJavaPackageModuleSpec() {
-    if (!java_package) {
-        // create java package
-        java_package = newModuleSpec(false, "java");
-
-        QorePythonReferenceHolder search_locations(PyList_New(0));
-        PyObject_SetAttrString(*java_package, "submodule_search_locations", *search_locations);
-    }
-
-    java_package.py_ref();
-    //printd(5, "QoreMetaPathFinder::getJavaPackageModuleSpec() returning java_package: %p\n", *java_package);
-    return *java_package;
+    return newModuleSpec(false, "java");
 }
 
 PyObject* QoreMetaPathFinder::getQoreRootModuleSpec(const QoreString& mname) {
     QorePythonReferenceHolder mod_spec(newModuleSpec(true, mname, QoreLoader::getLoaderRef()));
+    if (!mod_spec) {
+        return nullptr;
+    }
 
     QorePythonReferenceHolder search_locations(PyList_New(0));
+    if (!search_locations) {
+        return nullptr;
+    }
     // add namespaces as submodule search locations (NOTE: not functionally necessary it seems)
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
     const RootQoreNamespace* rns = qore_python_pgm->getQoreProgram()->getRootNS();
@@ -268,9 +237,13 @@ PyObject* QoreMetaPathFinder::getQoreRootModuleSpec(const QoreString& mname) {
         QoreStringMaker mod_name(ns.getName());
         //printd(5, "QoreMetaPathFinder::getQoreRootModuleSpec(): adding '%s'\n", mod_name.c_str());
         QorePythonReferenceHolder name(PyUnicode_FromStringAndSize(mod_name.c_str(), mod_name.size()));
-        PyList_Append(*search_locations, *name);
+        if (!name || PyList_Append(*search_locations, *name)) {
+            return nullptr;
+        }
     }
-    PyObject_SetAttrString(*mod_spec, "submodule_search_locations", *search_locations);
+    if (PyObject_SetAttrString(*mod_spec, "submodule_search_locations", *search_locations)) {
+        return nullptr;
+    }
 
     return mod_spec.release();
 }

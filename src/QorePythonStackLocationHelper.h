@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright (C) 2020 - 2022 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -54,24 +54,16 @@ public:
     //! returns the next location in the stack or nullptr if there is none
     DLLLOCAL virtual const QoreStackLocation* getNext() const;
 
-    // Static initialization
-    DLLLOCAL static int staticInit();
-
     // Normalize path with os.path.normpath(); returns a new reference
     DLLLOCAL static PyObject* normalizePath(const char* path);
 
-    // Normalize path with os.path.normpath(); returns a new reference
+    // Normalize path with os.path.normpath(); steals path_obj and returns a new reference
     DLLLOCAL static PyObject* normalizePath(PyObject* path_obj);
 
 private:
     QorePythonProgram* py_pgm;
     int tid = q_gettid();
     mutable unsigned current = 0;
-
-    //! sys._getframe() method
-    DLLLOCAL static QorePythonReferenceHolder _getframe;
-    //! or.path.normlath() method
-    DLLLOCAL static QorePythonReferenceHolder normpath;
 
     mutable std::vector<std::string> stack_call;
     mutable std::vector<QoreExternalProgramLocationWrapper> stack_loc;

@@ -4,7 +4,7 @@
 
   Qore Programming Language python Module
 
-  Copyright (C) 2020 Qore Technologies, s.r.o.
+  Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
   This library is free software; you can redistribute it and/or
   modify it under the terms of the GNU Lesser General Public
@@ -28,12 +28,15 @@
 #include "python-module.h"
 
 //! Manages a reference to a Python object; will be dereferenced when destroyed
-class QorePythonPrivateData : public AbstractPrivateData, QorePythonReferenceHolder {
+class QorePythonPrivateData : public AbstractPrivateData, QorePythonPersistentReferenceHolder {
 public:
+    using QorePythonPersistentReferenceHolder::getOwner;
+
     //! Manages the reference passed
     /** @param pyobj must be already referenced before passed to this constructor
     */
-    DLLLOCAL QorePythonPrivateData(PyObject* pyobj) : QorePythonReferenceHolder(pyobj) {
+    DLLLOCAL QorePythonPrivateData(QorePythonProgram* owner, PyObject* pyobj)
+            : QorePythonPersistentReferenceHolder(owner, pyobj) {
     }
 
     //! Returns the object being managed

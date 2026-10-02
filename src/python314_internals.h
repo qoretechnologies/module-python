@@ -78,43 +78,22 @@ inline thread_local bool _qore_gil_held = false;
 // The following functions are provided for API compatibility with GIL-enabled code paths
 // but may not be used in all compilation units in free-threading mode
 
-// Get the current thread state - uses public API
-// In free-threading mode, use PyGILState_GetThisThreadState which is safer
+// Read the actual attachment; auto-TSS can still name a detached state.
 [[maybe_unused]]
 DLLLOCAL static PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
-    // PyGILState_GetThisThreadState returns NULL if no thread state is attached
-    // This is safe to call even during shutdown
-    return PyGILState_GetThisThreadState();
+    return PyThreadState_GetUnchecked();
 }
 
-// Safe wrapper for PyThreadState_Swap in free-threading mode
-// In free-threading, we cannot just swap thread states - we need to be careful
-// about attachment state to avoid "_PyThreadState_Attach: non-NULL old thread state"
+// PyThreadState_Swap detaches the previous state before attaching the new one.
 [[maybe_unused]]
 DLLLOCAL static PyThreadState* _qore_PyThreadState_SafeSwap(PyThreadState* new_state) {
-    // In free-threading mode, thread state management is fundamentally different.
-    // Each thread has exactly one attached thread state, and we cannot easily swap.
-    // The safest approach is to do nothing and return the current state.
-    PyThreadState* current = PyGILState_GetThisThreadState();
-
-    if (new_state == nullptr || current == new_state) {
-        // Swapping to nullptr or to same state - just return current
-        return current;
-    }
-
-    // In free-threading mode, if we have a thread state already, we keep it
-    // The thread state will be used for all Python operations on this thread
-    return current;
+    return PyThreadState_Swap(new_state);
 }
 
 // Set this thread's state in thread-local storage
 [[maybe_unused]]
 DLLLOCAL static void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
-    // In free-threading mode, thread state management is different
-    // We use the safe swap function that avoids attachment errors
-    if (state) {
-        _qore_PyThreadState_SafeSwap(state);
-    }
+    _qore_PyThreadState_SafeSwap(state);
 }
 // Free-threading mode - GIL doesn't exist, these are no-ops or simplified
 
@@ -127,12 +106,12 @@ DLLLOCAL static bool _qore_PyCeval_GetGilLockedStatus() {
 [[maybe_unused]]
 DLLLOCAL static PyThreadState* _qore_PyCeval_GetThreadState() {
     // Return current thread state
-    return PyThreadState_Get();
+    return PyThreadState_GetUnchecked();
 }
 
 // Provided for API compatibility but not used in free-threading mode
 [[maybe_unused]]
-DLLLOCAL static PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* new_state) {
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* new_state) {
     return PyThreadState_Swap(new_state);
 }
 
@@ -156,14 +135,10 @@ DLLLOCAL static PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* new_
     PyEval_AcquireThread/PyEval_ReleaseThread still exist but behave differently -
     they primarily manage thread state attachment, not GIL acquisition.
 
-    IMPORTANT: In free-threading mode, PyThreadState_Swap() internally calls
-    _PyThreadState_Attach() which fails with "non-NULL old thread state" error
-    if a thread state is already attached. We must check first and only swap
-    if no thread state is currently attached.
+    PyThreadState_Swap() handles both sides of an attachment transition.
 */
 DLLLOCAL static inline bool _qore_has_thread_state_attached() {
-    // Use PyGILState_GetThisThreadState to check without causing errors
-    return PyGILState_GetThisThreadState() != nullptr;
+    return PyThreadState_GetUnchecked() != nullptr;
 }
 
 // In free-threading mode, thread state management is different:
@@ -173,8 +148,8 @@ DLLLOCAL static inline bool _qore_has_thread_state_attached() {
 DLLLOCAL static inline void _qore_acquire_thread_state(PyThreadState* tstate) {
     // In free-threading mode, we need to ensure a valid thread state is attached
     // before any Python API calls. Use PyThreadState_Swap to properly attach.
-    PyThreadState* current = PyGILState_GetThisThreadState();
-    if (current == nullptr || current != tstate) {
+    PyThreadState* current = PyThreadState_GetUnchecked();
+    if (current != tstate) {
         PyThreadState_Swap(tstate);
     }
 }
@@ -285,7 +260,7 @@ DLLLOCAL static PyThreadState* _qore_PyCeval_GetThreadState() {
     return _qore_tss_tstate;
 }
 
-DLLLOCAL static PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* new_state) {
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* new_state) {
     PyThreadState* old = _qore_tss_tstate;
     _qore_tss_tstate = new_state;
     return old;

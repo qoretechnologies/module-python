@@ -396,7 +396,7 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     //    PyGILState_GetThisThreadState(), (int)gstate);
 #endif
 
-    if (QorePythonProgram::staticInit() || QorePythonStackLocationHelper::staticInit()) {
+    if (QorePythonProgram::staticInit()) {
 #ifdef Py_GIL_DISABLED
         PyGILState_Release(gstate);
 #endif
@@ -408,6 +408,17 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     //printd(5, "python_module_init_intern() after PyGILState_Release: current: %p\n",
     //    PyGILState_GetThisThreadState());
 #endif
+
+    // Initialize the process-wide bridge types in the main interpreter. If the
+    // first import happens in a transient subinterpreter, the static type objects
+    // and cached loader callables outlive the interpreter that created them.
+    {
+        QorePythonReferenceHolder loader_module(PyImport_ImportModule("qoreloader"));
+        if (!loader_module) {
+            PyErr_Clear();
+            throw QoreStandardException("PYTHON-MODULE-ERROR", "cannot initialize qoreloader in the main interpreter");
+        }
+    }
 
 #ifndef Py_GIL_DISABLED
     mainThreadState = PyThreadState_Get();
@@ -434,8 +445,9 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
 #endif
     }
 #else
-    // In free-threading mode, don't release the thread state after initialization
-    // We keep the main thread state attached for Python operations
+    if (python_initialized) {
+        PyThreadState_Swap(nullptr);
+    }
 #endif
 
     if (!repeat) {
@@ -726,6 +738,7 @@ bool _qore_has_gil(PyThreadState* t_state) {
     return _qore_PyCeval_GetThreadState() == t_state;
 }
 
+#ifndef Py_GIL_DISABLED
 static bool _qore_has_gil(PyThreadState* state0, PyThreadState* state1) {
     if (!_qore_PyCeval_GetGilLockedStatus()) {
         return false;
@@ -740,6 +753,25 @@ static bool _qore_has_gil(PyThreadState* state0, PyThreadState* state1) {
     PyThreadState* gs = _qore_PyCeval_GetThreadState();
     return gs == state0 || gs == state1;
 }
+#endif
+
+#ifndef Py_GIL_DISABLED
+void qore_python_release_context() {
+    // Detaching does not clear CPython's auto-TSS binding. A subinterpreter
+    // may subsequently be destroyed by another native thread, which cannot
+    // clear this thread's TLS. Bind the main state while we still hold the GIL
+    // so that no detached thread retains a pointer into a transient interpreter.
+#if PY_VERSION_HEX >= 0x030C0000
+    if (PyGILState_GetThisThreadState() != mainThreadState) {
+        qore_py_set_bound_gilstate(mainThreadState, 0);
+    }
+    PyThreadState_Swap(mainThreadState);
+#endif
+    PyEval_SaveThread();
+    _qore_PyGILState_SetThisThreadState(nullptr);
+    _qore_gil_held = false;
+}
+#endif
 
 QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     : new_thread_state(new_thread_state), state(nullptr), t_state(nullptr), release_gil(true) {
@@ -752,23 +784,18 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     }
     assert(new_thread_state);
 
-    // Now safe to call Python APIs
-    state = _qore_PyRuntimeGILState_GetThreadState();
-    t_state = PyGILState_GetThisThreadState();
-    release_gil = !_qore_has_gil(t_state, new_thread_state);
-
 #ifdef Py_GIL_DISABLED
-    // In free-threading mode, use PyGILState_Ensure to properly
-    // initialize the thread and ensure a valid thread state is attached.
-    gstate = PyGILState_Ensure();
-    // Now we have a thread state attached
-    t_state = PyGILState_GetThisThreadState();
+    // Attach the requested interpreter without consulting the auto-TSS cache,
+    // which can name a detached state from a different interpreter.
+    t_state = PyThreadState_GetUnchecked();
     if (t_state != new_thread_state) {
         PyThreadState_Swap(new_thread_state);
     }
-    _qore_PyGILState_SetThisThreadState(new_thread_state);
-    _QORE_GILSTATE_COUNTER_INC(new_thread_state);
-#elif PY_VERSION_HEX >= 0x030D0000
+#else
+    state = _qore_PyRuntimeGILState_GetThreadState();
+    t_state = PyGILState_GetThisThreadState();
+    release_gil = !_qore_has_gil(t_state, new_thread_state);
+#if PY_VERSION_HEX >= 0x030D0000
     // Python 3.13+ GIL mode - use PyEval_AcquireThread/ReleaseThread which properly
     // handle TSS and fast TLS synchronization
     if (release_gil) {
@@ -842,6 +869,7 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     assert(_qore_PyCeval_GetGilLockedStatus());
 #endif
 #endif
+#endif
     initialized = true;
 }
 
@@ -851,22 +879,7 @@ QorePythonGilHelper::~QorePythonGilHelper() {
         return;
     }
 #ifdef Py_GIL_DISABLED
-    if (gstate_released) {
-        // gstate was released in releaseBeforeSubInterpreter() for sub-interpreter creation.
-        // The sub-interpreter now owns the thread state - we don't restore or release anything.
-        // When the sub-interpreter is destroyed, it will clean up its own thread state.
-        return;
-    }
-    // First swap back to the original thread state if needed
-    PyThreadState* current = PyGILState_GetThisThreadState();
-    if (current && current != t_state && t_state) {
-        PyThreadState_Swap(t_state);
-    }
-    // Decrement counter before release
-    _QORE_GILSTATE_COUNTER_DEC(new_thread_state);
-    // Release the GIL state
-    PyGILState_Release(gstate);
-    _qore_PyGILState_SetThisThreadState(nullptr);
+    PyThreadState_Swap(t_state);
 #elif PY_VERSION_HEX >= 0x030D0000
     // Python 3.13+ GIL mode
     printd(5, "QorePythonGilHelper dtor: release_gil: %d t_state: %p new_thread_state: %p\n",
@@ -876,9 +889,7 @@ QorePythonGilHelper::~QorePythonGilHelper() {
     if (release_gil) {
         // We acquired the GIL, so release it
         // Use PyEval_SaveThread which properly releases the GIL
-        PyEval_SaveThread();
-        _qore_PyGILState_SetThisThreadState(nullptr);
-        _qore_gil_held = false;  // Track that we no longer hold the GIL
+        qore_python_release_context();
     } else {
         // We already had the GIL - restore the original tracking
         // Keep _qore_gil_held = true since we still have the GIL
@@ -900,7 +911,7 @@ QorePythonGilHelper::~QorePythonGilHelper() {
         if (current != new_thread_state) {
             PyThreadState_Swap(new_thread_state);
         }
-        _qore_release_thread_state(new_thread_state);
+        qore_python_release_context();
         // _qore_release_thread_state already cleared _qore_tss_tstate to nullptr.
     } else {
         //printd(5, "QorePythonGilHelper::~QorePythonGilHelper() swapping %llx state: %llx t_state: %llx\n",
@@ -916,18 +927,11 @@ QorePythonGilHelper::~QorePythonGilHelper() {
 
 #ifdef Py_GIL_DISABLED
 void QorePythonGilHelper::releaseBeforeSubInterpreter() {
-    // Prepare for sub-interpreter creation in free-threading mode.
-    // In free-threading mode with mimalloc, each thread state has thread-local heap data.
-    // PyGILState_Ensure() set up heap data for the main interpreter. Before creating a
-    // sub-interpreter, we need to detach so Py_NewInterpreterFromConfig can properly
-    // initialize heap data for the new interpreter.
-
-    // Swap to NULL thread state to detach from main interpreter's thread state.
-    // This allows Py_NewInterpreterFromConfig to properly attach a new thread state
-    // with correctly initialized mimalloc heap for the sub-interpreter.
+    // Creation attaches the new interpreter; the helper restores the original
+    // attachment on exit, after the new program has finished initialization.
     PyThreadState_Swap(nullptr);
-    gstate_released = true;
 }
+
 #endif
 
 void QorePythonGilHelper::set(PyThreadState* other_state) {

@@ -2,7 +2,7 @@
 /*
     qore Python module
 
-    Copyright (C) 2020 - 2021 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -36,7 +36,6 @@ public:
     DLLLOCAL static int setupModules();
 
     //! destructor function
-    DLLLOCAL static void del();
 
     //! type functions
     DLLLOCAL static void dealloc(PyObject* self);
@@ -53,9 +52,6 @@ public:
     DLLLOCAL static PyObject* newModuleSpec(bool qore, const QoreString& name, PyObject* loader = nullptr);
 
 private:
-    DLLLOCAL static QorePythonManualReferenceHolder qore_package;
-    DLLLOCAL static QorePythonManualReferenceHolder java_package;
-    DLLLOCAL static QorePythonManualReferenceHolder mod_spec_cls;
 
     DLLLOCAL static PyObject* getQorePackageModuleSpec();
     DLLLOCAL static PyObject* getJavaPackageModuleSpec();

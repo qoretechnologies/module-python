@@ -4,8 +4,9 @@
 set -eu
 export LC_ALL=C.UTF-8 PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
 unset QORE_MODULE_DIR QORE_MODULE_DIR_ONLY QORE_INCLUDE_DIR LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME
-cp test/python.qtest test/fib.py debian/tests/standalone.py "$AUTOPKGTEST_TMP/"
+cp test/python.qtest test/fib.py test/standalone-lifecycle.py debian/tests/standalone.py "$AUTOPKGTEST_TMP/"
 cd "$AUTOPKGTEST_TMP"
 /usr/bin/qore -l xml -l python -e 'Qore::exit(0);'
 timeout 600 /usr/bin/qore python.qtest -v
 timeout 60 /usr/bin/python3 standalone.py
+timeout 60 /usr/bin/python3 -B -W error standalone-lifecycle.py

@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright (C) 2020 - 2021 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -33,7 +33,7 @@
 #include "QorePythonProgram.h"
 
 PythonCallableCallReferenceNode::PythonCallableCallReferenceNode(QorePythonProgram* pypgm, PyObject* val, PyObject* self)
-        : pypgm(pypgm), val(val), self(self) {
+        : pypgm(pypgm), val(pypgm, val), self(pypgm, self) {
 }
 
 QoreValue PythonCallableCallReferenceNode::execValue(const QoreListNode* args, ExceptionSink* xsink) const {

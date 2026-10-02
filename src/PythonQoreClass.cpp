@@ -2,7 +2,7 @@
 /*
     qore Python module
 
-    Copyright (C) 2020 - 2022 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -33,6 +33,55 @@
 #include <pthread.h>
 
 static constexpr const char* QCLASS_KEY = "__$QCLS__";
+
+// Python callables can survive their Qore program during Python shutdown.
+// Their capsules own the method definition and its strings until the callable dies.
+struct method_capsule_t {
+    const QoreMethod& method;
+    QorePythonProgram* program;
+    const std::string name;
+    const std::string doc;
+    PyMethodDef definition;
+
+    method_capsule_t(const QoreMethod& method, QorePythonProgram* program, const PyMethodDef& original)
+            : method(method), program(program), name(original.ml_name),
+              doc(original.ml_doc ? original.ml_doc : ""),
+              definition{name.c_str(), original.ml_meth, original.ml_flags,
+                  original.ml_doc ? doc.c_str() : nullptr} {
+        program->weakRef();
+    }
+
+    ~method_capsule_t() {
+        program->weakDeref();
+    }
+};
+
+static void method_capsule_destructor(PyObject* capsule) {
+    delete static_cast<method_capsule_t*>(PyCapsule_GetPointer(capsule, nullptr));
+}
+
+static PyObject* new_method_function(const QoreMethod& method, QorePythonProgram* program,
+        const PyMethodDef& definition) {
+    std::unique_ptr<method_capsule_t> data(new method_capsule_t(method, program, definition));
+    QorePythonReferenceHolder capsule(PyCapsule_New(data.get(), nullptr, method_capsule_destructor));
+    if (!capsule) {
+        return nullptr;
+    }
+    method_capsule_t* owned = data.release();
+    return PyCFunction_New(&owned->definition, *capsule);
+}
+
+static const QoreMethod* get_capsule_method(PyObject* capsule) {
+    method_capsule_t* data = static_cast<method_capsule_t*>(PyCapsule_GetPointer(capsule, nullptr));
+    if (!data) {
+        return nullptr;
+    }
+    if (!data->program->isValid() || data->program->isDestroyed()) {
+        PyErr_SetString(PyExc_RuntimeError, "the owning Qore program has been deleted");
+        return nullptr;
+    }
+    return &data->method;
+}
 
 static int qore_exception_init(PyObject* self, PyObject* args, PyObject* kwds) {
     //QorePythonReferenceHolder argstr(PyObject_Repr(args));
@@ -128,7 +177,7 @@ PyTypeObject PythonQoreException_Type = {
 
 void PythonQoreClass::py_free(PyQoreObject* self) {
     //printd(5, "PythonQoreClass::py_free() self: %p '%s'\n", self, Py_TYPE(self)->tp_name);
-    PyObject_Del(self);
+    PyObject_GC_Del(self);
 }
 
 bool PyQoreObject_Check(PyObject* obj) {
@@ -161,6 +210,7 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
     PyType_Slot slots[] = {
         {Py_tp_doc, (void*)docstr},
         {Py_tp_dealloc, (void*)PythonQoreClass::py_dealloc},
+        {Py_tp_traverse, (void*)PythonQoreClass::py_traverse},
         {Py_tp_repr, (void*)PythonQoreClass::py_repr},
         {Py_tp_getattro, (void*)PythonQoreClass::py_getattro},
         {Py_tp_base, (void*)&PythonQoreObjectBase_Type},
@@ -175,7 +225,7 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
         .name = namestr,
         .basicsize = sizeof(PyQoreObject),
         .itemsize = 0,
-        .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+        .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
         .slots = slots,
     };
 
@@ -223,10 +273,11 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
     for (size_t i = 0; i < py_normal_meth_vec.size(); ++i) {
         PyMethodDef& md = py_normal_meth_vec[i];
         QorePythonReferenceHolder method_capsule(py_normal_meth_obj_vec[i].release());
-        QorePythonReferenceHolder func(PyCFunction_New(&md, *method_capsule));
+        const QoreMethod* m = static_cast<const QoreMethod*>(PyCapsule_GetPointer(*method_capsule, nullptr));
+        QorePythonReferenceHolder func(new_method_function(*m, pypgm, md));
+        assert(func);
         QorePythonReferenceHolder meth(PyInstanceMethod_New(*func));
         assert(meth);
-        const QoreMethod* m = reinterpret_cast<const QoreMethod*>(PyCapsule_GetPointer(*method_capsule, nullptr));
         PyDict_SetItemString(py_type->tp_dict, m->getName(), *meth);
     }
     py_normal_meth_obj_vec.clear();
@@ -235,10 +286,11 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
     for (size_t i = 0; i < py_static_meth_vec.size(); ++i) {
         PyMethodDef& md = py_static_meth_vec[i];
         QorePythonReferenceHolder method_capsule(py_static_meth_obj_vec[i].release());
-        QorePythonReferenceHolder func(PyCFunction_New(&md, *method_capsule));
+        const QoreMethod* m = static_cast<const QoreMethod*>(PyCapsule_GetPointer(*method_capsule, nullptr));
+        QorePythonReferenceHolder func(new_method_function(*m, pypgm, md));
+        assert(func);
         QorePythonReferenceHolder meth(PyStaticMethod_New(*func));
         assert(meth);
-        const QoreMethod* m = reinterpret_cast<const QoreMethod*>(PyCapsule_GetPointer(*method_capsule, nullptr));
         PyDict_SetItemString(py_type->tp_dict, m->getName(), *meth);
     }
     py_static_meth_obj_vec.clear();
@@ -267,13 +319,8 @@ void PythonQoreClass::release() {
 }
 
 void PythonQoreClass::clearMethods() {
-    // CRITICAL: Clear method objects from the type dictionary.
-    // Method objects created with PyCFunction_New reference PyMethodDef structures stored
-    // in py_normal_meth_vec and py_static_meth_vec. If the type survives (e.g., due to
-    // references from the main interpreter), these method objects will be traversed during
-    // GC after the PyMethodDef structures are freed, causing use-after-free crashes.
-    // By clearing the dict, we ensure method objects are decreffed while the interpreter
-    // is still valid.
+    // Remove bridge entry points while the type's interpreter is still valid.
+    // Any bound functions that survive retain their own capsule-owned definitions.
     if (py_type && py_type->tp_dict) {
         // Remove all method objects we added
         for (const auto& md : py_normal_meth_vec) {
@@ -429,10 +476,12 @@ PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* 
     // Save the thread state Python had when calling us - must restore before returning
     PyThreadState* entry_tstate = _qore_safe_thread_state_get();
 
-    QoreForeignThreadHelper qfth;
-
     // get method
-    const QoreMethod* m = reinterpret_cast<const QoreMethod*>(PyCapsule_GetPointer(method_capsule, nullptr));
+    const QoreMethod* m = get_capsule_method(method_capsule);
+    if (!m) {
+        return nullptr;
+    }
+    QoreForeignThreadHelper qfth;
     assert(PyTuple_Check(args));
     QoreObject* obj;
     // check if this could be a static method call
@@ -528,10 +577,12 @@ PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* 
 
 PyObject* PythonQoreClass::exec_qore_static_method(PyObject* method_capsule, PyObject* args) {
     printd(5, "exec_qore_static_method() args: %p\n", args);
-    QoreForeignThreadHelper qfth;
-
     // get method
-    const QoreMethod* m = reinterpret_cast<const QoreMethod*>(PyCapsule_GetPointer(method_capsule, nullptr));
+    const QoreMethod* m = get_capsule_method(method_capsule);
+    if (!m) {
+        return nullptr;
+    }
+    QoreForeignThreadHelper qfth;
     assert(PyTuple_Check(args));
 #if 0
     {
@@ -683,13 +734,17 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
 
 int PythonQoreClass::newQoreObject(ExceptionSink& xsink, PyQoreObject* pyself, QoreObject* qobj,
         const QoreClass* qcls, QorePythonProgram* qore_python_pgm) {
+    // execConstructor transfers an owning reference. The saved-object list (or
+    // caller's save callback) takes its own reference; retain the original until
+    // setup succeeds, then release it on both success and failure.
+    ReferenceHolder<QoreObject> holder(qobj, &xsink);
     qobj->tRef();
     pyself->qobj = qobj;
 
     if (qcls) {
         // add private data for python class
         Py_INCREF(pyself);
-        qobj->setPrivate(qcls->getID(), new QorePythonPrivateData((PyObject*)pyself));
+        qobj->setPrivate(qcls->getID(), new QorePythonPrivateData(qore_python_pgm, (PyObject*)pyself));
     }
     // save a strong reference to the Qore object
     qore_python_pgm->saveQoreObjectFromPython(qobj, xsink);
@@ -780,12 +835,25 @@ PyObject* PythonQoreClass::py_new(PyTypeObject* type, PyObject* args, PyObject* 
     return type->tp_alloc(type, 0);
 }
 
+int PythonQoreClass::py_traverse(PyObject* self, visitproc visit, void* arg) {
+#if PY_VERSION_HEX >= 0x03090000
+    // Heap instances own their type, including cycles through class constants.
+    Py_VISIT(Py_TYPE(self));
+#endif
+    return 0;
+}
+
 void PythonQoreClass::py_dealloc(PyQoreObject* self) {
+    PyObject_GC_UnTrack(self);
+    PyTypeObject* type = Py_TYPE(self);
     if (self->qobj) {
         self->qobj->tDeref();
         self->qobj = nullptr;
     }
-    Py_TYPE(self)->tp_free(self);
+    type->tp_free(self);
+    // PyType_GenericAlloc gives every instance a reference to its heap type.
+    // The custom deallocator must release that reference after freeing the instance.
+    Py_DECREF(type);
 }
 
 PyObject* PythonQoreClass::py_repr(PyObject* obj) {

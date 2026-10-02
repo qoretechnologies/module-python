@@ -1,4 +1,5 @@
 #!/bin/bash
+# Copyright (C) 2026 Qore Technologies, s.r.o.
 
 set -e
 set -x
@@ -35,6 +36,7 @@ make install
 ln -s python*.qmod qoreloader.so
 # issue #4398: test the qoreloader.so module
 python3 -c "import qoreloader;from qore.__root__.Qore.Thread import Counter;c = Counter();c.waitForZero()"
+PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-lifecycle.py
 
 # add Qore user and group
 if ! grep -q "^qore:x:${QORE_GID}" /etc/group; then

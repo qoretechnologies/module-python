@@ -109,8 +109,8 @@ void qoreloader_free(void* obj) {
             qore_python_pgm = nullptr;
         }
 
-        QoreMetaPathFinder::del();
         QoreLoader::del();
+        JavaLoader::del();
 
         if (qore_needs_shutdown) {
             qore_cleanup();
@@ -301,7 +301,7 @@ static int slot_qoreloader_exec(PyObject *m) {
             QorePythonReferenceHolder args(PyTuple_New(1));
             QorePythonReferenceHolder func(PyCFunction_New(&atexit_md, nullptr));
             PyTuple_SET_ITEM(*args, 0, func.release());
-            QorePythonReferenceHolder rv_ignored(PyEval_CallObject(*register_func, *args));
+            QorePythonReferenceHolder rv_ignored(PyObject_CallObject(*register_func, *args));
         }
     }
 

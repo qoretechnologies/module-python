@@ -1,5 +1,6 @@
 #!/usr/bin/env qore
 # -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
 
 %modern
 %no-child-restrictions
@@ -49,13 +50,14 @@ class PythonTest inherits Test {
         );
     }
 
-    constructor() : Test("python test", "1.0") {
+    constructor() : Test("python test", "1.0", \ARGV) {
         addTestCase("python thread test", \pythonThreadTest());
         addTestCase("super test", \superTest());
         addTestCase("java test", \javaTest());
         addTestCase("date range test", \dateRangeTest());
         addTestCase("java date constant test", \javaDateConstantTest());
         addTestCase("exception test", \exceptionTest());
+        addTestCase("exception frame ownership", \exceptionFrameOwnershipTest());
         addTestCase("qore test", \qoreTest());
         addTestCase("stack test", \stackTest());
         addTestCase("thread test", \threadTest());
@@ -64,6 +66,15 @@ class PythonTest inherits Test {
         addTestCase("python import", \pythonImportTest());
         addTestCase("object lifecycle", \objectLifecycleTest());
         addTestCase("basic test", \basicTest());
+        addTestCase("Python call protocol", \callProtocolTest());
+        addTestCase("interpreter finalization", \interpreterFinalizationTest());
+        addTestCase("interpreter finalization on another thread", \crossThreadFinalizationTest());
+        addTestCase("wrapper heap type references", \heapTypeReferenceTest());
+        addTestCase("object cleanup after another interpreter", \independentDestructorTest());
+        addTestCase("wrapper interpreter isolation", \wrapperInterpreterIsolationTest());
+        addTestCase("objects crossing interpreter boundaries", \crossInterpreterObjectTest());
+        addTestCase("module spec failure recovery", \moduleSpecFailureTest());
+        addTestCase("references surviving interpreter finalization", \persistentReferenceFinalizationTest());
         addTestCase("named argument calls", \namedArgumentTest());
         addTestCase("import test", \importTest());
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
@@ -72,6 +83,290 @@ class PythonTest inherits Test {
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         # Set return value for compatibility with test harnesses that check the return value
         set_return_value(main());
+    }
+
+    moduleSpecFailureTest() {
+        foreach string name in ("qore", "qore.__root__") {
+            PythonProgram p("
+import importlib
+import importlib.machinery
+
+original = importlib.machinery.ModuleSpec
+def failing(*args, **kwargs):
+    raise MemoryError('injected module spec failure')
+
+def load(name, fail):
+    importlib.machinery.ModuleSpec = failing if fail else original
+    try:
+        importlib.import_module(name)
+        return True
+    finally:
+        importlib.machinery.ModuleSpec = original
+", "module-spec-failure.py");
+            # Load the parent first so the second iteration exercises the root spec.
+            if (name == "qore.__root__") {
+                p.callFunction("load", "qore", False);
+            }
+            assertThrows("builtins.MemoryError", sub() { p.callFunction("load", name, True); });
+            assertTrue(p.callFunction("load", name, False));
+        }
+    }
+
+    crossInterpreterObjectTest() {
+        PythonProgram owner("
+class Tracked:
+    def value(self):
+        return 73
+
+original = Tracked()
+def get():
+    return original
+
+def same(obj):
+    return obj is original
+", "cross-interpreter-owner.py");
+        PythonProgram receiver("
+import gc
+
+saved = None
+def accept(obj):
+    global saved
+    saved = obj
+    gc.collect()
+    return obj.value(), type(obj).__module__, gc.is_tracked(obj)
+
+def value():
+    return saved.value()
+
+def get():
+    return saved
+", "cross-interpreter-receiver.py");
+        auto obj = owner.callFunction("get");
+        assertTrue(owner.callFunction("same", obj));
+        assertEq((73, "qore", True), receiver.callFunction("accept", obj));
+        assertEq(obj.uniqueHash(), receiver.callFunction("get").uniqueHash());
+        assertTrue(owner.callFunction("same", receiver.callFunction("get")));
+        delete owner;
+        assertThrows("PYTHON-INTERPRETER-DELETED", sub() { receiver.callFunction("value"); });
+        delete receiver;
+        delete obj;
+    }
+
+    persistentReferenceFinalizationTest() {
+        TmpFile output("qore-python-references-", ".txt");
+        PythonProgram owner("
+import weakref
+
+class Tracked:
+    def value(self):
+        return 17
+
+def record(path, label):
+    with open(path, 'a', encoding='utf-8') as stream:
+        stream.write(label + '\\n')
+
+def make_object(path):
+    obj = Tracked()
+    weakref.finalize(obj, record, path, 'object').atexit = False
+    return obj
+
+def make_callable(path):
+    obj = Tracked()
+    weakref.finalize(obj, record, path, 'callable').atexit = False
+    return lambda: obj.value()
+", "persistent-references.py");
+        auto obj = owner.callFunction("make_object", output.path);
+        auto callback = owner.callFunction("make_callable", output.path);
+        assertEq(17, obj.value());
+        assertEq(17, callback());
+        delete owner;
+        assertRegex("^((object\ncallable\n)|(callable\nobject\n))$", output.file.read(-1));
+        assertThrows("PYTHON-INTERPRETER-DELETED", sub() { obj.value(); });
+        assertThrows("PYTHON-INTERPRETER-DELETED", sub() { callback(); });
+        delete obj;
+        callback = NOTHING;
+    }
+
+    wrapperInterpreterIsolationTest() {
+        string source = "
+from qore.__root__.Qore.Thread import Counter
+
+def probe():
+    counter = Counter(2)
+    counter.inc()
+    counter.dec()
+    return Counter.__name__, counter.getCount()
+";
+        PythonProgram first(source, "first-wrapper.py");
+        PythonProgram second(source, "second-wrapper.py");
+        assertEq(("Counter", 2), first.callFunction("probe"));
+        assertEq(("Counter", 2), second.callFunction("probe"));
+        delete first;
+        assertEq(("Counter", 2), second.callFunction("probe"));
+    }
+
+    independentDestructorTest() {
+        PythonProgram owner("
+import gc
+import weakref
+
+released = []
+class Tracked:
+    pass
+
+def make():
+    obj = Tracked()
+    weakref.finalize(obj, released.append, 'released')
+    return obj
+
+def count():
+    gc.collect()
+    return len(released)
+", "independent-destructor.py");
+        auto obj = owner.callFunction("make");
+        assertEq(0, owner.callFunction("count"));
+        PythonProgram other("value = 1", "other-interpreter.py");
+        delete other;
+        delete obj;
+        assertEq(1, owner.callFunction("count"));
+    }
+
+    heapTypeReferenceTest() {
+        PythonProgram p("
+import gc
+import sys
+from qore.__root__.Qore.Thread import Counter
+
+class DerivedCounter(Counter):
+    pass
+
+def delta(cls):
+    gc.collect()
+    before = sys.getrefcount(cls)
+    for _ in range(20):
+        # Exercise allocation/deallocation without creating a Qore object whose
+        # explicit cross-language lifetime would retain the Python instance.
+        obj = cls.__new__(cls)
+        assert isinstance(obj, cls)
+        assert gc.is_tracked(obj)
+        del obj
+    gc.collect()
+    return sys.getrefcount(cls) - before
+
+def test():
+    return delta(Counter), delta(DerivedCounter)
+", "heap-type-references.py");
+        assertEq((0, 0), p.callFunction("test"));
+    }
+
+    interpreterFinalizationTest() {
+        TmpFile output("qore-python-finalize-", ".txt");
+        for (int iteration = 0; iteration < 3; ++iteration) {
+            PythonProgram p("
+import atexit
+import gc
+import weakref
+
+class Cycle:
+    pass
+
+def configure(path):
+    def record(value):
+        with open(path, 'a', encoding='utf-8') as stream:
+            stream.write(value + '\\n')
+    # A cyclic object tests weakref finalization as well as explicit atexit hooks.
+    item = Cycle()
+    item.self = item
+    weakref.finalize(item, record, 'weakref')
+    gc.collect()
+    atexit.register(record, 'atexit')
+
+def echo(value):
+    return value
+", "finalization.py");
+            p.callFunction("configure", output.path);
+            if (!Python::FreeThreading) {
+                ThreadPool pool();
+                on_exit pool.stopWait();
+                Queue values();
+                for (int value = 0; value < 4; ++value) {
+                    # Capture a separate value for each submitted task.
+                    int input = value;
+                    pool.submit(sub() {
+                        values.push(p.callFunction("echo", input));
+                    });
+                }
+                pool.stopWait();
+                list<int> received;
+                for (int value = 0; value < 4; ++value) {
+                    received += values.get();
+                }
+                assertEq((0, 1, 2, 3), sort(received));
+            }
+            delete p;
+            assertEq("atexit\nweakref\n", output.file.read(-1));
+        }
+    }
+
+    crossThreadFinalizationTest() {
+        TmpFile output("qore-python-thread-finalize-", ".txt");
+        string source = "
+import atexit
+import threading
+
+def configure(path):
+    def record():
+        with open(path, 'a', encoding='utf-8') as stream:
+            stream.write('finalized\\n')
+    atexit.register(record)
+
+def echo(value):
+    return value
+";
+        Queue values();
+        ThreadPool pool();
+        on_exit pool.stopWait();
+        pool.submit(sub() {
+            PythonProgram created(source, "created-on-worker.py");
+            created.callFunction("configure", output.path);
+            values.push(created);
+        });
+        PythonProgram from_worker = values.get();
+        pool.stopWait();
+        assertEq(23, from_worker.callFunction("echo", 23));
+        delete from_worker;
+        assertEq("finalized\n", output.file.read(-1));
+
+        PythonProgram from_main(source, "destroyed-on-worker.py");
+        from_main.callFunction("configure", output.path);
+        ThreadPool cleanup_pool();
+        on_exit cleanup_pool.stopWait();
+        cleanup_pool.submit(sub() {
+            values.push(from_main.callFunction("echo", 42));
+            delete from_main;
+        });
+        cleanup_pool.stopWait();
+        assertEq(42, values.get());
+        assertEq("finalized\n", output.file.read(-1));
+    }
+
+    callProtocolTest() {
+        PythonProgram p("
+def no_args():
+    return 42
+def require_arg(value):
+    return value
+", "call-protocol.py");
+        # Empty and nonempty argument tuples must preserve return values and
+        # report Python argument errors through the bridge.
+        assertEq(42, p.callFunction("no_args"));
+        assertEq({"value": 9}, p.callFunction("require_arg", {"value": 9}));
+        assertThrows("builtins.TypeError", sub() {
+            p.callFunction("require_arg");
+        });
+        assertThrows("builtins.TypeError", sub() {
+            p.callFunction("no_args", 9);
+        });
     }
 
     pythonThreadTest() {
@@ -247,6 +542,33 @@ def test():
 ", "test.py");
 
             assertEq(0, p.callFunction("test").getCurrent());
+        }
+    }
+
+    exceptionFrameOwnershipTest() {
+        PythonProgram owner("
+import gc
+import weakref
+
+released = []
+class Tracked:
+    pass
+
+def fail():
+    raise ValueError('nested failure')
+
+def nested():
+    obj = Tracked()
+    weakref.finalize(obj, released.append, 'released').atexit = False
+    fail()
+
+def count():
+    gc.collect()
+    return len(released)
+", "exception-frames.py");
+        for (int iteration = 1; iteration <= 3; ++iteration) {
+            assertThrows("builtins.ValueError", sub() { owner.callFunction("nested"); });
+            assertEq(iteration, owner.callFunction("count"));
         }
     }
 

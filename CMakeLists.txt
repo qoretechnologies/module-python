@@ -1,4 +1,6 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.12...3.31)
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+option(QORE_PYTHON_STRICT_DOCS "Fail Python module documentation on warnings" OFF)
 project(qore-python-module)
 
 set (VERSION_MAJOR 1)
@@ -117,7 +119,6 @@ if (DEFINED ENV{DOXYGEN_EXECUTABLE})
     set(DOXYGEN_EXECUTABLE $ENV{DOXYGEN_EXECUTABLE})
 endif()
 
-set(MODULE_DOX_INPUT ${CMAKE_BINARY_DIR})
 qore_external_binary_module(${module_name} ${PROJECT_VERSION})
 
 qore_dist(${PROJECT_VERSION})
@@ -136,4 +137,7 @@ if (DOXYGEN_FOUND)
     qore_wrap_dox(QORE_DOX_SRC ${QORE_DOX_TMPL_SRC})
     add_custom_target(QORE_MOD_DOX_FILES DEPENDS ${QORE_DOX_SRC})
     add_dependencies(docs-module QORE_MOD_DOX_FILES)
+    if (QORE_PYTHON_STRICT_DOCS)
+        file(APPEND "${CMAKE_BINARY_DIR}/Doxyfile" "\nWARN_AS_ERROR = FAIL_ON_WARNINGS\n")
+    endif()
 endif()

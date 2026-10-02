@@ -124,12 +124,13 @@ QoreValue QorePythonClass::memberGate(const QoreMethod& meth, void* m, QoreObjec
 QoreValue QorePythonClass::callPythonMethod(ExceptionSink* xsink, QorePythonProgram* pypgm, const char* mname,
         const QoreListNode* args, QorePythonPrivateData* pd, size_t arg_offset) const {
     //printd(5, "QorePythonClass::callPythonMethod() %s::%s()\n", pname.c_str(), mname);
-    PyObject* pyobj = pd->get();
-    PyTypeObject* mtype = Py_TYPE(pyobj);
     QorePythonHelper qph(pypgm, xsink);
     if (*xsink || pypgm->checkValid(xsink)) {
         return QoreValue();
     }
+    PyObject* pyobj = pd->get();
+    assert(pyobj);
+    PyTypeObject* mtype = Py_TYPE(pyobj);
     // Use PyObject_GetAttrString to properly traverse the MRO for inherited methods
     // (PyDict_GetItemString only looks in the immediate type's dict, missing inherited methods like __sizeof__)
     // Note: PyObject_GetAttrString returns a new reference and may return a bound method
@@ -162,7 +163,11 @@ QoreValue QorePythonClass::getPythonMember(QorePythonProgram* pypgm, const char*
     {
         PyMemberDef* m = getPythonMember(mname);
         if (m) {
-            return pypgm->getQoreValue(xsink, PyMember_GetOne((const char*)pd->get(), m));
+            QorePythonReferenceHolder value(PyMember_GetOne(reinterpret_cast<const char*>(pd->get()), m));
+            if (!value && pypgm->checkPythonException(xsink)) {
+                return QoreValue();
+            }
+            return pypgm->getQoreValue(xsink, value);
         }
     }
 

@@ -231,58 +231,8 @@ DLLLOCAL static inline PyThreadState* _qore_safe_thread_state_get() {
 #endif
 }
 
-/*
-    Python API compatibility layer for Python 3.13+
-
-    These APIs were deprecated in Python 3.9 and removed in Python 3.13:
-    - PyEval_CallObject -> PyObject_Call
-    - PyEval_CallObjectWithKeywords -> PyObject_Call
-    - PyCFunction_Call -> PyObject_Call
-
-    These were removed in Python 3.14:
-    - PyThreadState_GetRecursionLimit removed (use Py_GetRecursionLimit)
-    - _PyGILState_GetInterpreterStateUnsafe removed (use PyInterpreterState_Main)
-*/
+// CPython 3.13+ recursion-limit compatibility for internal-header builds.
 #if PY_VERSION_HEX >= 0x030D0000
-
-// Python 3.13+ compatibility wrappers for removed APIs
-
-// PyEval_CallObject was removed - provide a compatibility wrapper using PyObject_Call
-static inline PyObject* qore_PyEval_CallObject(PyObject* callable, PyObject* args) {
-    PyObject* empty_args = nullptr;
-    if (!args) {
-        empty_args = PyTuple_New(0);
-        if (!empty_args) {
-            return nullptr;
-        }
-        args = empty_args;
-    }
-    PyObject* result = PyObject_Call(callable, args, nullptr);
-    Py_XDECREF(empty_args);
-    return result;
-}
-#define PyEval_CallObject(callable, args) qore_PyEval_CallObject((callable), (args))
-
-// PyEval_CallObjectWithKeywords was removed - provide a compatibility wrapper using PyObject_Call
-static inline PyObject* qore_PyEval_CallObjectWithKeywords(PyObject* callable, PyObject* args, PyObject* kwargs) {
-    PyObject* empty_args = nullptr;
-    if (!args) {
-        empty_args = PyTuple_New(0);
-        if (!empty_args) {
-            return nullptr;
-        }
-        args = empty_args;
-    }
-    PyObject* result = PyObject_Call(callable, args, kwargs);
-    Py_XDECREF(empty_args);
-    return result;
-}
-#define PyEval_CallObjectWithKeywords(callable, args, kwargs) \
-    qore_PyEval_CallObjectWithKeywords((callable), (args), (kwargs))
-
-// PyCFunction_Call was removed - use PyObject_Call instead
-#define PyCFunction_Call(func, args, kwargs) \
-    PyObject_Call((func), (args), (kwargs))
 
 // Recursion limit APIs - removed in Python 3.13+
 // Only define when using Python internal includes (not bundled internals)
@@ -356,6 +306,11 @@ inline PyInterpreterState* _PyGILState_GetInterpreterStateUnsafe() {
 
     This way we don't need to use the deprecated GIL acquire and release APIs
 */
+#ifndef Py_GIL_DISABLED
+//! Detach after restoring the long-lived main-interpreter auto-TSS binding.
+DLLLOCAL void qore_python_release_context();
+#endif
+
 class QorePythonGilHelper {
 public:
     DLLLOCAL QorePythonGilHelper(PyThreadState* new_thread_state = mainThreadState);
@@ -373,16 +328,9 @@ public:
     }
 
 #ifdef Py_GIL_DISABLED
-    //! Releases the GIL state before creating a sub-interpreter
-    /** In free-threading mode, PyGILState_Ensure() initializes thread-local mimalloc heap data
-        for the main interpreter. When creating a sub-interpreter, we need to release this state
-        so that Py_NewInterpreterFromConfig can properly initialize mimalloc for the new interpreter.
-
-        This method:
-        1. Releases the PyGILState to reset thread-local mimalloc state
-        2. Detaches the current thread state so Py_NewInterpreterFromConfig can attach a new one
-
-        After calling this, you MUST call set() with the new interpreter's thread state.
+    //! Detaches before Py_NewInterpreterFromConfig attaches the new interpreter.
+    /** After successful creation, call set() with the new interpreter's thread state.
+        The helper restores the original attachment when it leaves scope.
     */
     DLLLOCAL void releaseBeforeSubInterpreter();
 #endif
@@ -393,10 +341,6 @@ protected:
     PyThreadState* t_state;
     bool release_gil = true;
     bool initialized = false;  // True if successfully initialized (Python is running)
-#ifdef Py_GIL_DISABLED
-    PyGILState_STATE gstate;
-    bool gstate_released = false;  // True if gstate was released for sub-interpreter creation
-#endif
 };
 
 class QorePythonReleaseGilHelper {
@@ -611,6 +555,20 @@ public:
         this->obj = obj;
         return *this;
     }
+};
+
+//! A Python reference owned by a Qore object that may outlive its interpreter.
+class QorePythonPersistentReferenceHolder : public QorePythonManualReferenceHolder {
+public:
+    DLLLOCAL QorePythonPersistentReferenceHolder(QorePythonProgram* owner, PyObject* obj);
+    DLLLOCAL ~QorePythonPersistentReferenceHolder();
+
+    DLLLOCAL QorePythonProgram* getOwner() const {
+        return owner;
+    }
+
+private:
+    QorePythonProgram* owner;
 };
 
 class QorePythonGilStateHelper {

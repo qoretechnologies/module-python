@@ -4,7 +4,7 @@
 
   Qore Programming Language
 
-  Copyright (C) 2020 - 2022 Qore Technologies, s.r.o.
+  Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
   Permission is hereby granted, free of charge, to any person obtaining a
   copy of this software and associated documentation files (the "Software"),
@@ -262,6 +262,11 @@ public:
         return valid;
     }
 
+    //! Returns whether a Python reference can be used directly in this interpreter.
+    DLLLOCAL bool sharesInterpreter(const QorePythonProgram* other) const {
+        return other && interpreter && interpreter == other->interpreter;
+    }
+
     //! Returns true if the program is being or has been destroyed (does not require GIL)
     DLLLOCAL bool isDestroyed() const {
         return destroyed;
@@ -336,6 +341,12 @@ public:
 
     //! Creates ot retrieves a QoreClass for the given Python type
     DLLLOCAL QoreClass* getCreateQorePythonClass(ExceptionSink* xsink, PyTypeObject* type, int flags = 0);
+
+    //! Register a persistent reference while this interpreter's context is held.
+    DLLLOCAL void registerPersistentReference(QorePythonManualReferenceHolder* reference);
+
+    //! Release a persistent reference in its owning interpreter's context.
+    DLLLOCAL void releasePersistentReference(QorePythonManualReferenceHolder* reference);
 
     //! Increment the weak ref count
     DLLLOCAL void weakRef() {
@@ -449,7 +460,7 @@ public:
     }
 
 protected:
-    PyInterpreterState* interpreter;
+    PyInterpreterState* interpreter = nullptr;
     QorePythonReferenceHolder module;
     QorePythonReferenceHolder python_code;
     PyObject* module_dict = nullptr;
@@ -510,6 +521,11 @@ protected:
     typedef std::map<int, py_thr_set_t> py_global_tid_map_t;
     DLLLOCAL static py_global_tid_map_t py_global_tid_map;
 
+    //! Qore-created states, including states from exited threads; protected by py_thr_lck.
+    mutable py_thr_set_t owned_thread_states;
+    //! Initial state owns threading._main_thread's completion sentinel.
+    PyThreadState* initial_thread_state = nullptr;
+
     //! number of program objects; writable only in the py_thr_lck lock
     DLLLOCAL static unsigned pgm_count;
 
@@ -523,9 +539,6 @@ protected:
 
     //! Map of Qore classes to Python classes
     py_cls_map_t py_cls_map;
-
-    typedef std::vector<PyMethodDef*> meth_vec_t;
-    meth_vec_t meth_vec;
 
     //! for weak refs
     QoreReferenceCounter weak_refs;
@@ -633,6 +646,10 @@ protected:
         //printd(5, "QorePythonProgram::~QorePythonProgram() this: %p\n", this);
         assert(!qpgm);
     }
+
+    // Protected by py_thr_lck; Python reference operations also require the owning context.
+    std::set<QorePythonManualReferenceHolder*> persistent_references;
+    DLLLOCAL void clearPersistentReferences();
 
     DLLLOCAL void deleteIntern(ExceptionSink* xsink);
 
