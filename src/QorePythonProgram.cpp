@@ -1599,7 +1599,7 @@ PythonQoreClass* QorePythonProgram::findCreatePythonClass(const QoreClass& cls, 
     }
 
     std::unique_ptr<PythonQoreClass> py_cls(new PythonQoreClass(this, mod_name, cls, i));
-    PyTypeObject* t = py_cls->getPythonType();
+    [[maybe_unused]] PyTypeObject* t = py_cls->getPythonType();
     printd(5, "QorePythonProgram::findCreatePythonClass() returning new %s.%s type: %p (%s)\n", mod_name,
         cls.getName(), t, t->tp_name);
     //py_cls_map.insert(i, py_cls_map_t::value_type(&cls, py_cls.get()));

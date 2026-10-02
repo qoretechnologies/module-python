@@ -2,7 +2,7 @@
 /*
     qore Python module
 
-    Copyright (C) 2020 - 2021 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -171,7 +171,7 @@ PyObject* JavaLoader::create_module(PyObject* self, PyObject* args) {
     QoreString mname(PyUnicode_AsUTF8(*name));
     assert(mname.equalPartial("java"));
     // create new namespace
-    QoreProgram* mod_pgm = qore_python_pgm->getQoreProgram();
+    [[maybe_unused]] QoreProgram* mod_pgm = qore_python_pgm->getQoreProgram();
     if (mname == "java") {
         return qore_python_pgm->newModule("java", mod_pgm->getRootNS()->findLocalNamespace("Jni"));
     }
@@ -210,11 +210,11 @@ PyObject* JavaLoader::exec_module(PyObject* self, PyObject* args) {
     assert(PyObject_HasAttrString(mod, "__name__"));
     QorePythonReferenceHolder name(PyObject_GetAttrString(mod, "__name__"));
     assert(PyUnicode_Check(*name));
-    const char* name_str = PyUnicode_AsUTF8(*name);
+    [[maybe_unused]] const char* name_str = PyUnicode_AsUTF8(*name);
 
     printd(5, "JavaLoader::exec_module() mod: '%s'\n", name_str);
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
-    QoreProgram* mod_pgm = qore_python_pgm->getQoreProgram();
+    [[maybe_unused]] QoreProgram* mod_pgm = qore_python_pgm->getQoreProgram();
     printd(5, "JavaLoader::exec_module() qore_python_pgm: %p mod pgm: %p\n", qore_python_pgm, mod_pgm);
 
     if (load_jni_module(qore_python_pgm)) {

@@ -846,7 +846,7 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
         // after PyEval_ReleaseThread() since Python's TSS isn't cleared.
         // _qore_has_gil() verified we have the GIL with either t_state or new_thread_state,
         // so check against both possibilities.
-        PyThreadState* ceval_ts = _qore_PyCeval_GetThreadState();
+        [[maybe_unused]] PyThreadState* ceval_ts = _qore_PyCeval_GetThreadState();
         assert(ceval_ts == t_state || ceval_ts == new_thread_state);
     }
     // NOTE: even if the current thread state is equal to the new one, we still need to set all thread states in all
