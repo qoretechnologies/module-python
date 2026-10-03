@@ -45,7 +45,7 @@ namespace Python;
 
     @see
     - @ref Python::PythonProgram::setSaveObjectCallback()
-    - @ref python_qore_object_lifecycle_management
+    - @ref python_qore_object_lifecycle_managementguide
 */
 set_save_object_callback(*code save_object_callback) [dom=PROCESS;flags=NAMED_ARGS] {
     QorePythonProgram* pypgm = QorePythonProgram::getContext();

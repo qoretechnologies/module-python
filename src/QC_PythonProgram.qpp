@@ -44,7 +44,7 @@ qclass PythonProgram [arg=QorePythonProgramData* pp; ns=Python; dom=EMBEDDED_LOG
 
     @note
     - The code is executed after parsing and compiling
-    - Exceptions parsing, compiling, or running the Python code are thrown according to @ref python_exceptions
+    - Exceptions parsing, compiling, or running the Python code are thrown according to @ref python_exceptionsguide
 */
 PythonProgram::constructor(string source_code, string source_label) [flags=NAMED_ARGS] {
     ReferenceHolder<QorePythonProgramData> pp(new QorePythonProgramData(*source_code, *source_label, Py_file_input, xsink),
@@ -68,7 +68,7 @@ PythonProgram::destructor() {
 
 //! Runs the program
 /**
-    @note Exceptions parsing or compiling the Python code are thrown according to @ref python_exceptions
+    @note Exceptions parsing or compiling the Python code are thrown according to @ref python_exceptionsguide
 */
 auto PythonProgram::run() {
     return pp->run(xsink);
@@ -82,7 +82,7 @@ auto PythonProgram::run() {
 
     @throw NO-FUNCTION the given function cannot be found in the Python program's module dictionary
 
-    @see @ref python_exceptions
+    @see @ref python_exceptionsguide
 */
 auto PythonProgram::callFunction(string func_name, ...) {
     return pp->callFunction(xsink, func_name, args, 1);
@@ -96,7 +96,7 @@ auto PythonProgram::callFunction(string func_name, ...) {
 
     @throw NO-FUNCTION the given function cannot be found in the Python program's module dictionary
 
-    @see @ref python_exceptions
+    @see @ref python_exceptionsguide
 */
 auto PythonProgram::callFunctionArgs(string function_name, *softlist<auto> arguments) [flags=NAMED_ARGS] {
     return pp->callFunction(xsink, function_name, arguments);
@@ -112,7 +112,7 @@ auto PythonProgram::callFunctionArgs(string function_name, *softlist<auto> argum
     @throw NO-CLASS the given class cannot be found in the Python program's module dictionary
     @throw NO-METHOD the given method cannot be found in the class
 
-    @see @ref python_exceptions
+    @see @ref python_exceptionsguide
 */
 auto PythonProgram::callMethod(string class_name, string method_name, ...) {
     return pp->callMethod(xsink, class_name, method_name, args, 2);
@@ -128,7 +128,7 @@ auto PythonProgram::callMethod(string class_name, string method_name, ...) {
     @throw NO-CLASS the given class cannot be found in the Python program's module dictionary
     @throw NO-METHOD the given method cannot be found in the class
 
-    @see @ref python_exceptions
+    @see @ref python_exceptionsguide
 */
 auto PythonProgram::callMethodArgs(string class_name, string method_name, *softlist<auto> arguments) [flags=NAMED_ARGS] {
     return pp->callMethod(xsink, class_name, method_name, arguments);
@@ -191,7 +191,7 @@ pypgm.setSaveObjectCallback(callback);
     The callback set here will be called any time a %Qore object is created from Python code; if no callback is set,
     then the standard thread-local implementation is used where %Qore objects are saved in a thread-local hash.
 
-    @see @ref python_qore_object_lifecycle_management for more information
+    @see @ref python_qore_object_lifecycle_managementguide for more information
 */
 PythonProgram::setSaveObjectCallback(*code save_object_callback) [dom=PROCESS;flags=NAMED_ARGS] {
     pp->setSaveObjectCallback(save_object_callback);
@@ -338,7 +338,7 @@ PythonProgram::setSaveObjectCallback(callback);
     The callback set here will be called any time a %Qore object is created from Python code; if no callback is set,
     then the standard thread-local implementation is used where %Qore objects are saved in a thread-local hash.
 
-    @see @ref python_qore_object_lifecycle_management for more information
+    @see @ref python_qore_object_lifecycle_managementguide for more information
 */
 static PythonProgram::setSaveObjectCallback(*code save_object_callback) [dom=PROCESS;flags=NAMED_ARGS] {
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
