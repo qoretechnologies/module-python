@@ -1,0 +1,221 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page python_qoreloader_moduleguide qoreloader Module
+
+    @tableofcontents
+
+    The %Qore python module can also be aliased or symlinked to \c "qoreloader.so" (\c "qoreloader.pyd" on Windows)
+    and placed in the %Python module path (\c PYTHONPATH), as the %Qore binary module also implement code for the
+    \c qoreloader %Python module in the same shared object, which allows %Python programs to dynamically initialize the
+    %Qore library from %Python programs and then import %Qore APIs into %Python using an injected \c qore package.
+
+    The \c qoreloader module implements the following functionality:
+    - @ref python_qoreloader_import_qore "qore": a special loader package for dynamically importing %Qore APIs into
+      %Python
+    - @ref python_qoreloader_import_java "java": a special loader package for dynamically import Java APIs into
+      %Python
+    - @ref qoreloader_load_java : a %Python function for loading Java APIs into %Qore so they can be imported then
+      into %Python
+    - @ref qoreloader_issue_module_cmd : a %Python function for issuing %Qore module commands, which can be used
+      (among other things) for setting the Java CLASSPATH, for example
+
+    @section python_qoreloader_import_qore Using the qoreloader Module to Import Qore APIs
+
+    For example, for %Python to import the %Qore \c SqlUtil module, the following code can be used.
+
+    @par Example
+    @code{.py}
+import qoreloader
+from qore.SqlUtil import Table
+
+t = Table("pgsql:user/pass@db", "table_name")
+print(t.getTable().selectRow({"where": {"col1": "value"}}))
+    @endcode
+
+    When %Qore modules are imported, the lowest namespace created by the module is imported as the new %Python module
+    under the %Python \c qore package.
+
+    See the next section about importing the special \c <tt><b>qore.__root__</b></tt> module.
+
+    @note Unlike <tt><b>qore.__root__</b></tt>, using any other submodule name other than <tt><b>__root__</b></tt>
+    after <tt><b>qore</b></tt> will cause a %Qore module to be loaded.  If the %Qore module cannot be found, an
+    appropriate exception is thrown.
+
+    @section python_qore_root_imports qore.__root__ Module
+
+    The special \c qore package has a special module called \c __root__ which represents the root namespace of the
+    %Qore program object.
+
+    Importing <tt><b>qore.__root__</b></tt> module causes all symbols to be imported into the %Python program.
+
+    Because %Qore namespaces are imported as %Python modules, any existing %Qore namespace can be imported into a
+    %Python program using the <tt><b>qore.__root__</b></tt> module as in the following examples:
+
+    @code{.py}
+# import the ::Qore::Thread namespace
+import qore.__root__.Qore.Thread
+
+# import specific classes from the Qore library
+from qore.__root__.Qore.SQL import DatasourcePool, Datasource, SQLStatement
+    @endcode
+
+    @note Importing modules using <tt><b>qore.__root__</b></tt> does not cause any external %Qore modules to be
+    loaded; it just imports existing %Qore namespaces into the %Python program.  To load a %Qore module explicitly,
+    use a %Qore module name after <tt><b>qore</b></tt>.
+
+    @section python_qoreloader_import_java Using the qoreloader Module to Import Java APIs Directly
+
+    The \c python module implements support for using %Qore's \c jni module to import Java code dynamically into %Qore
+    and then into %Python using the \c java package.
+
+    To import Java classes into %Python, import the java class by prefixing \c "java." to the package path name.
+
+    For example, to import the Java \c java.util.HashMap class into %Python, the following code can be used.
+
+    @par Example
+    @code{.py}
+# load the qoreloader API
+import qoreloader
+# import the Java class into Python
+from java.java.util import HashMap
+
+m = new HashMap()
+m.put("a", "value")
+    @endcode
+
+    You can also set the classpath for Java imports as in the following example:
+
+    @par Example
+    @code{.py}
+# load the qoreloader API
+import qoreloader
+
+# set up the classpath so that the jni module can find the JAR file
+qoreloader.issue_module_cmd('jni', 'add-classpath $HOME/jar/qore-jni.jar')
+
+# import the Java class into Python
+from java.org.qore.lang.restclient import RestClient
+
+r = RestClient({"url": "https://localhost:8011"})
+    @endcode
+
+    When Java packages and classes are imported, the lowest package created by the module is imported as the new
+    %Python module under the %Python \c java package.
+
+    The given APIs are first dynamically imported into %Qore, and then the %Qore APIs are imported dynamically into
+    %Python.
+
+    This is the easiest way to import Java APIs into %Python.
+
+    @subsection python_java_wildcard_imports Importing Java Packages into Python Through Qore
+
+    Wildcard imports from Java are not currently directly supported, however you can import the Java package as a
+    %Python module and then the classes in the module will be dynamically created when they are referenced.  See the
+    following example:
+
+    @par Java Package Import Example
+    @code{.py}
+# load the qoreloader API
+import qoreloader
+
+# set up the classpath so that the jni module can find the JAR file
+qoreloader.issue_module_cmd('jni', 'add-classpath $HOME/jar/qore-jni.jar')
+
+# import the Java package into Python
+from java.org.qore.lang import restclient
+
+# the RestClient class is resolved and imported dynamically on reference
+r = restclient.RestClient({"url": "https://localhost:8011"})
+    @endcode
+
+    @note Direct wildcard imports in the format <tt>from java.some.package.path import *</tt> are not yet supported,
+    as once the %Python module is created, the dynamic attribute lookups in the the global dictionary are not executed
+    at runtime using the wildcard import information, therefore all Java classes to be imported should be either
+    explicitly listed in the \c import statement, or the entire package should be imported as above; a \c "*" wildcard
+    import will only work if the required Java classes have already been imported into the %Qore program container in
+    advance otherwise.
+
+    @section python_java_import Importing Java APIs Indirectly into Python Through Qore
+
+    The \c python module implements support for using %Qore's \c jni module to import Java code dynamically into %Qore
+    and then into %Python using a two-step process.
+
+    To import Java code first into %Qore, use @ref qoreloader_load_java with the Java dot path to the class name to
+    load, and then import the %Qore class into %Python using the @ref python_qore_root_imports "qore.__root__" module
+    as in the following example:
+
+    @par Example
+    @code{.py}
+# load the qoreloader API
+import qoreloader
+
+# set up the classpath so that the jni module can find the JAR file
+qoreloader.issue_module_cmd('jni', 'add-classpath $HOME/jar/qore-jni.jar')
+
+# dynamically import the Java code into Qore
+qoreloader.load_java("org.qore.lang.restclient.RestClient")
+
+# import the Qore code into Python where it can be used
+from qore.__root__.Jni.org.qore.lang.restclient import RestClient
+    @endcode
+
+    @section python_java_import_classpath Setting the Java Classpath
+
+    To set the Java classpath, call the @ref qoreloader_issue_module_cmd function with the first argument set to
+    \c "jni" and the second set to \c "add-classpath <classpath>" or \c "add-relative-classpath <classpath>" as
+    needed.
+
+    @par Example
+    @code{.py}
+# load the qoreloader API
+import qoreloader
+
+# set up the classpath so that the jni module can find the JAR file
+qoreloader.issue_module_cmd('jni', 'add-classpath $HOME/jar/qore-jni.jar')
+
+# dynamically import the Java code into Qore
+qoreloader.load_java("org.qore.lang.restclient.RestClient")
+
+# import the Qore code into Python where it can be used
+from qore.__root__.Jni.org.qore.lang.restclient import RestClient
+    @endcode
+
+    @section qoreloader_issue_module_cmd qoreloader.issue_module_cmd()
+
+    @code{.py}
+qoreloader.issue_module_cmd(module, cmd)
+    @endcode
+
+    @par Arguments
+    - \c module: the name of the %Qore module where the command will be issued
+    - \c cmd: the full command to be issued
+
+    @section qoreloader_load_java qoreloader.load_java()
+
+    @code{.py}
+qoreloader.load_java(path)
+    @endcode
+
+    @par Arguments
+    - \c path: the dot path to the Java class to be loaded into %Qore, after which it can be imported into %Python
+      under %Python module \c "qore.__root__.Jni"; for example, <tt>path = 'javax.jms.Message'</tt> would be then
+      imported into %Python with \c "from qore.__root__.Jni.javax.jms import Message".
+
+    @par Example
+    @code{.py}
+# load the qoreloader API
+import qoreloader
+
+# set up the classpath so that the jni module can find the JAR file
+qoreloader.issue_module_cmd('jni', 'add-classpath $HOME/jar/qore-jni.jar')
+
+# dynamically import the Java code into Qore
+qoreloader.load_java("org.qore.lang.restclient.RestClient")
+
+# import the Qore code into Python where it can be used
+from qore.__root__.Jni.org.qore.lang.restclient import RestClient
+    @endcode
+
+    @note Once the Java code has been imported into %Qore, it must then be imported into %Python; the %Python parent
+    module for such Java code is \c "qore.__root__.Jni"
+*/

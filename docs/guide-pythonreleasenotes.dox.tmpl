@@ -1,0 +1,144 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page pythonreleasenotesguide python Module Release Notes
+
+    @tableofcontents
+
+    @section python_1_3 python Module Version 1.3
+    <b>New Features and Enhancements:</b>
+    - Added support for Python 3.12, 3.13, and 3.14
+    - Added support for Python 3.14 free-threading mode (PEP 703)
+    - Added support for interruptible I/O for graceful termination of sandboxed programs; interrupt checks are
+      performed before acquiring the Python GIL when a sandbox manager is active
+      (<a href="https://github.com/qoretechnologies/qore/issues/5116">issue 5116</a>)
+    - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
+
+    <b>Bug Fixes:</b>
+    - fixed incomplete finalization of Python subinterpreters, including atexit hooks, free-threaded builds,
+      and destruction on a different native thread
+    - fixed interpreter ownership of imported Qore wrappers when independent PythonProgram objects share a Qore program
+    - preserve Qore proxies for Python objects passed between interpreters, preventing cross-interpreter garbage
+      collection while preserving object identity
+    - resolve import specifications and stack-inspection callables in their owning interpreter and propagate
+      import-spec allocation failures without corrupting subsequent imports
+    - fixed retained return values, constructed Qore objects, and Python references held by wrappers or callbacks after
+      their interpreter is deleted
+    - fixed heap-type reference counting and garbage collection of Qore wrapper instances
+    - fixed retained traceback frames after converting Python exceptions to Qore exceptions
+    - release generated wrapper metadata when hosted by native Python; retained Python functions and bound methods
+      now own their metadata and report an error if called after Qore shutdown
+    - fixed a crash importing %Qore classes into %Python when a class constant has no %Python representation;
+      such constants (ex: \c java.time.Instant::MIN, whose year lies outside the range supported by
+      \c datetime.datetime) are now skipped instead of terminating the process
+    - fixed %Qore date/time values with a year outside the range of a 16-bit integer being silently converted to
+      an unrelated date/time value; such values are now reported as errors
+    - fixed error reporting when a %Qore value cannot be converted to a %Python value; conversion failures now
+      always raise a %Qore exception
+
+    <b>Build System Changes:</b>
+    - Requires a C++17-compatible compiler
+
+    @section python_1_2_1 python Module Version 1.2.1
+    - fixed a thread-safety race condition in \c qpy_deregister() where the shared program set was accessed without
+      proper locking
+      (<a href="https://github.com/qorelanguage/qore/issues/5048">issue 5048</a>)
+    - fixed an incorrect assertion in \c getQoreDateTimeFromTime() that used \c PyDateTime_Check instead of checking
+      for \c TimeType
+      (<a href="https://github.com/qorelanguage/qore/issues/5049">issue 5049</a>)
+    - removed a debug \c printf() statement that was left in \c callPythonMethod()
+      (<a href="https://github.com/qorelanguage/qore/issues/5050">issue 5050</a>)
+    - fixed a typo in an error message ("dictiomary" -> "dictionary")
+      (<a href="https://github.com/qorelanguage/qore/issues/5051">issue 5051</a>)
+
+    @section python_1_2 python Module Version 1.2
+    - enable proper Python stack trace reporting when exceptions are thrown in %Qore code called from %Python; %Python
+      stack frames are now included in the %Qore stack trace
+      (<a href="https://github.com/qorelanguage/qore/issues/4653">issue 4653</a>)
+
+    @section python_1_1_7 python Module Version 1.1.7
+    - enabled building with standard atomic operations for all platforms
+
+    @section python_1_1_6 python Module Version 1.1.6
+    - fixed a memory leak with subinterpreters when the module is initialized by python through the
+      @ref python_qoreloader_module "qoreloader" module
+      (<a href="https://github.com/qorelanguage/qore/issues/4652">issue 4652</a>)
+    - fixed a crash on exit when %Qore and the python module were initialized from Java
+      (<a href="https://github.com/qorelanguage/qore/issues/4651">issue 4651</a>)
+
+    @section python_1_1_5 python Module Version 1.1.5
+    - updated to support Python 3.11
+      (<a href="https://github.com/qorelanguage/qore/issues/4650">issue 4650</a>)
+    - fixed a crash related to Python subinterpreter cleanup when the module is loaded by native Python
+      (<a href="https://github.com/qorelanguage/qore/issues/4649">issue 4649</a>)
+
+    @section python_1_1_4 python Module Version 1.1.4
+    - another fix handling subinterpreters
+      (<a href="https://github.com/qorelanguage/qore/issues/4405">issue 4405</a>)
+
+    @section python_1_1_3 python Module Version 1.1.3
+    - @ref Python::PythonProgram::evalExpression() "PythonProgram::evalExpression()" not able to reference
+      symbols in the program
+      (<a href="https://github.com/qorelanguage/qore/issues/4406">issue 4406</a>)
+    - subinterpreter errors using the \c python module from %Python
+      (<a href="https://github.com/qorelanguage/qore/issues/4405">issue 4405</a>)
+
+    @section python_1_1_2 python Module Version 1.1.2
+    - not possible to use the \c qoreloader module from native %Python
+      (<a href="https://github.com/qorelanguage/qore/issues/4398">issue 4398</a>)
+    - not possible to call imported Java or %Qore static methods when a normal method exists in the same class with
+      the same name
+      (<a href="https://github.com/qorelanguage/qore/issues/4397">issue 4397</a>)
+
+    @section python_1_1_1 python Module Version 1.1.1
+    - mark %Qore namespaces imported from %Python modules so that other languages like Java can use consistent paths
+      with %Python symbols
+      (<a href="https://github.com/qorelanguage/qore/issues/4373">issue 4373</a>)
+
+    @section python_1_1 python Module Version 1.1
+    - added support for Python 3.10
+      (<a href="https://github.com/qorelanguage/qore/issues/4334">issue 4334</a>)
+
+    @section python_1_0_7 python Module Version 1.0.7
+    - fixed a bug setting the %Qore program context in new %Python threads calling imported %Qore methods or functions
+      (<a href="https://github.com/qorelanguage/qore/issues/4330">issue 4330</a>)
+
+    @section python_1_0_6 python Module Version 1.0.6
+    - fixed a bug handling exception propagation between %Qore and %Python
+      (<a href="https://github.com/qorelanguage/qore/issues/4329">issue 4329</a>)
+
+    @section python_1_0_5 python Module Version 1.0.5
+    - fixed a deadlock in context switching when Python threads switch to %Qore or Java
+      (<a href="https://github.com/qorelanguage/qore/issues/4328">issue 4328</a>)
+    - fixed a crash when Python threads made Qore or Java calls
+      (<a href="https://github.com/qorelanguage/qore/issues/4327">issue 4327</a>)
+    - fixed a regression in recursion depth calculations
+      (<a href="https://github.com/qorelanguage/qore/issues/4323">issue 4323</a>)
+
+    @section python_1_0_4 python Module Version 1.0.4
+    - fixed calculating the recursion depth in the initial thread so that more %Python modules can be loaded in single-
+      threaded programs without changing the stack size
+      (<a href="https://github.com/qorelanguage/qore/issues/4323">issue 4323</a>)
+    - fixed errors import valid Python modules
+      (<a href="https://github.com/qorelanguage/qore/issues/4322">issue 4322</a>)
+
+    @section python_1_0_3 python Module Version 1.0.3
+    - do not shut down the %Python library on exit, as it will cause a crash in exit handlers in %Python modules that
+      require the library to be in place (ex: h5py module v 3.3.0)
+      (<a href="https://github.com/qorelanguage/qore/issues/4290">issue 4290</a>)
+    - fixed additional namespace clashes and namespace allocation issues for imported %Python classes in %Qore
+      (<a href="https://github.com/qorelanguage/qore/issues/4289">issue 4289</a>)
+
+    @section python_1_0_2 python Module Version 1.0.2
+    - fixed issues handling the case when the python module is initialized with no Program context
+      (<a href="https://github.com/qorelanguage/qore/issues/4153">issue 4153</a>)
+    - fixed a bug handling Python constructors in classes derived from Qore or Java classes where the constructor code
+      accesses Qore or Java class members or methods before initializing the class
+      (<a href="https://github.com/qorelanguage/qore/issues/4141">issue 4141</a>)
+
+    @section python_1_0_1 python Module Version 1.0.1
+    - fixed a bug where abstract %Qore classes could be instantiated in %Python
+      (<a href="https://github.com/qorelanguage/qore/issues/4044">issue 4044</a>)
+
+    @section python_1_0 python Module Version 1.0
+    - initial public release
+*/

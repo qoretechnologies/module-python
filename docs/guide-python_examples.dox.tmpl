@@ -1,0 +1,44 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page python_examplesguide Examples
+
+    @tableofcontents
+
+    @par Example:
+    @code{.py}
+#!/usr/bin/env qore
+
+%new-style
+%require-types
+%strict-args
+%enable-all-warnings
+
+%requires python
+
+PythonProgram::evalExpression("print('hello world!')");
+    @endcode
+
+    @par Import Example:
+    @code{.java}
+#!/usr/bin/env qore
+
+%new-style
+%require-types
+%strict-args
+%enable-all-warnings
+
+# import the math module into the Qore "Python::math" namespace
+%module-cmd(python) import math
+# import the JSONEncoder class into the "Python::json" namespace
+%module-cmd(python) import json.JSONEncoder
+
+%exec-class Main
+
+public class Main {
+    constructor() {
+        JSONEncoder enc();
+        printf("%s\n", enc.encode(math::sin(1)));
+    }
+}
+    @endcode
+*/

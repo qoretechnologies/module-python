@@ -1,0 +1,43 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page python_typesguide Type Conversions Between Qore and Python
+
+    @tableofcontents
+
+    @section python_qore_to_python Type Conversions From Qore To Python
+
+    |!Source %Qore Type|!Target Python Type
+    |\c binary|\c bytearray
+    |\c bool|\c bool
+    |\c date|\c datetime.datetime (absolute date/time values) or \c datetime.delta (relative date/time values)
+    |\c float|\c float
+    |\c hash|\c dict
+    |\c int|\c int
+    |\c list|\c list
+    |\c string|\c str
+    |\c code (closure or call reference)|\c callable
+
+    @note \c datetime.datetime supports years 1 - 9999 only; converting an absolute %Qore date/time value with a
+    year outside this range raises an exception, as the value has no %Python representation.  When such a value is
+    a %Qore class constant being imported into %Python, the constant is skipped and the rest of the class is
+    imported normally.
+
+    @section python_python_to_qore Type Conversions From Python to Qore
+
+    |!Source Python Type|!Target %Qore Type
+    |\c bool|\c bool
+    |\c int|\c int or \c number if greater than 64-bits
+    |\c float|\c float
+    |\c bytes|\c binary
+    |\c bytearray|\c binary
+    |\c datetime.datetime|\c date (absolute date/time values)
+    |\c datetime.delta|\c date (relative date/time values)
+    |\c dict|\c hash
+    |\c list|\c list
+    |\c str|\c string
+    |\c tuple|\c list
+    |\c function, \c method|\c code
+
+    All other %Python types are converted to a %Qore object using a dynamically-created class that wraps the %Python
+    type or class.
+*/

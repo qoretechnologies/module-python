@@ -1,0 +1,44 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page python_qore_importguide Importing Qore APIs into Python
+
+    @tableofcontents
+
+    %Qore APIs and definitions can be imported into a %Python program by using the following module command:
+    - @code{.py} %module-cmd(python) import-ns <qore-namespace> <python-module-path>@endcode
+
+    @par Example:
+    @code{.py}
+Program p(PO_NEW_STYLE);
+p.issueModuleCmd("python", "import-ns MyQoreNamespace MyPythonModule");
+    @endcode
+
+    @section python_inheriting_qore_classes Inheriting Qore Classes in Python
+
+    When %Python code inherits %Qore classes, the %Qore constructor must be explicitly called in the %Python
+    \c __init__() method as in the following example.
+
+    @par Example:
+    @code{.py}
+import qore.xml
+
+class PyXmlRpcClient(qore.xml.XmlRpcClient):
+    def __init__(self, opts, do_not_connect):
+        super(PyXmlRpcClient, self).__init__(opts, do_not_connect)
+    @endcode
+
+    @section python_aliases Creating Python Aliases
+
+    The following module command can be used to create an alias in %Python code:
+    - @code{.py} %module-cmd(python) alias <python-source-path> <python-target-path>@endcode
+
+    This is often used when importing %Qore namespaces to %Python to create an alias directly from a child %Qore
+    namespace to a %Python module or package that is more convenient to access in %Python code.
+
+    @par Example:
+    @code{.py}
+Program p(PO_NEW_STYLE);
+p.issueModuleCmd("python", "import-ns MyQoreNamespace MyPythonModule");
+p.issueModuleCmd("python", "alias MyPythonModule.MySubModule1.MySubModule2.MyApi MyApi");
+    @endcode
+*/

@@ -1,0 +1,37 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page python_qore_object_lifecycle_managementguide Managing the Lifecycle of Qore objects from Python
+
+    @tableofcontents
+
+    %Qore's deterministic garbage collection approach and reliance on destructors means that %Qore objects created by
+    %Python must have their lifecycles managed externally.
+
+    %Python objects wrapping %Qore objects hold only weak references to %Qore objects.
+
+    @section python_qore_object_lifecycle_default Default Qore Object Lifecycle Management
+
+    By default, %Qore objects are saved in thread-local data, so the lifecycle of the object is automatically limited
+    to the existence of the thread.
+
+    The thread-local hash key name used to save the list of objects created is determined by the value of the
+    \c "_python_save" thread-local key, if set.  If no such key is set, then \c "_python_save" is used instead as the
+    literal key for saving the list of objects.
+
+    @section python_qore_object_lifecycle_explicit Explicit Qore Object Lifecycle Management
+
+    The lifecycle of %Qore objects can be managed explicitly by using the
+    @ref Python::PythonProgram::setSaveObjectCallback() "PythonProgram::setSaveObjectCallback()" method to set a
+    callback that is called every time a %Qore object is created using the %Python API.
+
+    This callback must take a single object argument as in the following example:
+
+    @code{.py}
+hash<string, object> object_cache;
+code callback = sub (object obj) {
+    # save object in object cache, so it doesn't go out of scope
+    object_cache{obj.uniqueHash()} = obj;
+}
+PythonProgram::setSaveObjectCallback(callback);
+    @endcode
+*/

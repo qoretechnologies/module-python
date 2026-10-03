@@ -1,0 +1,11 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page python_exceptionsguide Python Exception Handling
+
+    @tableofcontents
+
+    %Python exceptions are mapped to Qore exceptions as follows:
+    - \c err: the fully-qualified %Python exception class name (ex: \c "builtins.SyntaxError", \c "socket.timeout")
+    - \c desc: the string description, if none, then the exception arguments converted to a string with \c repr()
+    - \c arg: the %Python exception object itself converted to a Qore value
+*/

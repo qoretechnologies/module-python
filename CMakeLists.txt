@@ -98,6 +98,15 @@ set(module_name "python")
 
 set(QORE_DOX_TMPL_SRC
   docs/mainpage.dox.tmpl
+    docs/guide-python_examples.dox.tmpl
+    docs/guide-python_exceptions.dox.tmpl
+    docs/guide-python_import.dox.tmpl
+    docs/guide-python_qore_import.dox.tmpl
+    docs/guide-python_qore_object_lifecycle_management.dox.tmpl
+    docs/guide-python_qoreloader_module.dox.tmpl
+    docs/guide-python_threads_and_stack.dox.tmpl
+    docs/guide-python_types.dox.tmpl
+    docs/guide-pythonreleasenotes.dox.tmpl
 )
 
 add_library(${module_name} MODULE ${CPP_SRC} ${QPP_SOURCES})
@@ -119,6 +128,17 @@ if (DEFINED ENV{DOXYGEN_EXECUTABLE})
     set(DOXYGEN_EXECUTABLE $ENV{DOXYGEN_EXECUTABLE})
 endif()
 
+list(APPEND MODULE_DOX_INPUT
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-python_examples.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-python_exceptions.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-python_import.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-python_qore_import.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-python_qore_object_lifecycle_management.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-python_qoreloader_module.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-python_threads_and_stack.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-python_types.dox
+    ${CMAKE_CURRENT_BINARY_DIR}/guide-pythonreleasenotes.dox
+)
 qore_external_binary_module(${module_name} ${PROJECT_VERSION})
 
 qore_dist(${PROJECT_VERSION})

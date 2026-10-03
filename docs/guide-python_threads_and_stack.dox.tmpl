@@ -1,0 +1,19 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page python_threads_and_stackguide Python Threading and Stack Management
+
+    @tableofcontents
+
+    This module implements support for multiple %Python interpreters along with multithreading by managing the %Python
+    interpreter thread state manually.
+
+    Additionally, the %Python recursion limit is also set automatically depending on the current thread stack size set
+    in %Qore.
+
+    This is done to avoid crashes due to stack exhaustion in combination %Qore and %Python code.
+
+    To avoid \c RecursionError exceptions when mixing %Qore and %Python in multithreaded code, make sure the thread
+    stack size is set to an appropriate size in %Qore (using \c set_default_thread_stack_size() before the %Python
+    interpreter is created, for example); the %Python recursion limits are then calculated and managed dynamically
+    according to the thread stack size and thread stack usage at the time of context switches to %Python.
+*/

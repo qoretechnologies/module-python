@@ -1,0 +1,93 @@
+/* Copyright (C) 2026 Qore Technologies, s.r.o. */
+
+/** @page python_importguide Importing Python APIs into Qore
+
+    @tableofcontents
+
+    To import %Python APIs and definitions into a %Qore program, the following python-module-specific module
+    command can be used, which also causes the python module to be loaded and initialized if necessary:
+    - @code{.py} %module-cmd(python) import module[.symbol|*] @endcode imports the given %Python module into %Python
+      and then imports the module or optionally only the given symbol into the %Qore program from %Python.
+
+    @par Example:
+    @code{.py}
+%module-cmd(python) import math.sin
+
+auto sub get(auto arg) {
+    return math::sin(arg);
+}
+    @endcode
+
+    @par Example:
+    @code{.py}
+Program p(PO_NEW_STYLE);
+p.loadModule("python");
+p.issueModuleCmd("python", "import math");
+    @endcode
+
+    @section python_module_path Set the Python Module Path
+
+    Elements can be added to the %Python import module path by using the following module command:
+    - @code{.py} %module-cmd(python) add-module-path <path>@endcode
+
+    The path given is also subjected to environment variable substitutions; the environment variable name must be
+    prefixed with a \c "$" char and then can be given either surrounded by \c "()" or \c "{}" brackets, of if no
+    brackets are used, the environment variable must fit the following pattern: [a-zA-Z0-9_] (alphanumeric + \c "_").
+
+    @par Example:
+    @code{.py}
+%module-cmd(python) add-module-path ${MY_PYTHON_MODS}
+%module-cmd(python) import my-python-mod
+    @endcode
+
+    @par Example:
+    @code{.py}
+Program p(PO_NEW_STYLE);
+p.loadModule("python");
+p.issueModuleCmd("python", "add-module-path " + get_script_dir());
+p.issueModuleCmd("python", "import my-python-module");
+    @endcode
+
+    @section python_immediate_parsing Parsing Python Code Immediately
+
+    %Python code can be parsed immediately using the following module command:
+    - @code{.py} %module-cmd(python) parse <filename> <Python source>@endcode
+
+    @par Example:
+    @code{.py}
+Program p(PO_NEW_STYLE);
+string src = "
+class PyTest:
+    def get(self):
+        return 3
+";
+p.issueModuleCmd("python", "parse pytest.py " + src);
+    @endcode
+
+    @section python_class_export Exporting Python Classes to Qore
+
+    %Python classes can be explicitly exported to %Qore with the following module command:
+    - @code{.py} %module-cmd(python) export-class <class-name>@endcode
+
+    @par Example:
+    @code{.py}
+Program p(PO_NEW_STYLE);
+p.issueModuleCmd("python", "export-class PyTest");
+Class cls = Class::forName(p, "PyTest");
+object obj = cls.newObject();
+printf("get(): %y\n", obj.get());
+    @endcode
+
+    @section python_func_export Exporting Python Functions to Qore
+
+    %Python functions can be explicitly exported to %Qore with the following module command:
+    - @code{.py} %module-cmd(python) export-func <func-name>@endcode
+
+    @par Example:
+    @code{.py}
+Program p(PO_NEW_STYLE);
+p.issueModuleCmd("python", "export-func PyTest");
+Function f = Function::forName(p, "py_test");
+printf("py_test(): %y\n", obj.call());
+    @endcode
+*/
