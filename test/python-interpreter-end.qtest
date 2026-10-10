@@ -1,0 +1,97 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# An interpreter is finalized in a thread other than the thread that created it or that imported threading: the
+# finalization must not wait for a thread that has ended (Python < 3.13 waited forever for the sentinel lock of the
+# thread that imported threading)
+
+%modern
+
+%requires python
+%requires QUnit
+
+%exec-class PythonInterpreterEndTest
+
+class PythonInterpreterEndTest inherits QUnit::Test {
+    private {
+        #! the longest time to finalize an interpreter
+        const MaxEnd = 30s;
+    }
+
+    constructor() : Test("PythonInterpreterEndTest", "1.0", \ARGV) {
+        addTestCase("created and used in a thread that ended", \createdInEndedThread());
+        addTestCase("used and destroyed in another thread", \usedInOtherThread());
+        addTestCase("Program destroyed in another thread", \programDestroyedInOtherThread());
+        set_return_value(main());
+    }
+
+    #! the interpreter is created and imports threading in a thread that ends; it is destroyed in this thread
+    createdInEndedThread() {
+        Queue q();
+        background sub () {
+            PythonProgram p("import threading\nt = threading.Thread(target=lambda: None)\nt.start()\nt.join()\n",
+                "created-in-ended-thread");
+            p.run();
+            q.push(p);
+        }();
+        endInThread(q.get());
+    }
+
+    #! the interpreter is created in a thread that ends; threading is imported and the interpreter destroyed here
+    usedInOtherThread() {
+        Queue q();
+        background sub () {
+            q.push(new PythonProgram("x = 1\n", "used-in-other-thread"));
+        }();
+        PythonProgram p = q.get();
+        p.evalStatement("import threading\nt = threading.Thread(target=lambda: None)\nt.start()\nt.join()\n");
+        endHere(p);
+    }
+
+    #! a Qore Program that uses Python is created here and destroyed in another thread
+    programDestroyedInOtherThread() {
+        Program pgm(PO_NEW_STYLE);
+        pgm.loadModule("python");
+        pgm.parse("%module-cmd(python) import threading\nsub f() {}\n", "program-destroyed-in-other-thread");
+        endInThread(pgm);
+    }
+
+    #! destroys the object in another thread
+    private endInThread(object obj) {
+        Counter done(1);
+        background sub () {
+            delete obj;
+            done.dec();
+        }();
+        checkEnd(done);
+    }
+
+    #! destroys the object in this thread, bounded by a watchdog thread
+    private endHere(object obj) {
+        Counter done(1);
+        Counter watchdog(1);
+        background sub () {
+            if (done.waitForZero(MaxEnd)) {
+                stderr.printf("the Python interpreter was not finalized within %y\n", MaxEnd);
+                # the stuck thread would also keep the process from exiting
+                Qore::exit(1);
+            }
+            watchdog.dec();
+        }();
+        delete obj;
+        done.dec();
+        watchdog.waitForZero();
+        assertTrue(True, "the interpreter is finalized");
+    }
+
+    private checkEnd(Counter done) {
+        if (done.waitForZero(MaxEnd)) {
+            stderr.printf("the Python interpreter was not finalized within %y\n", MaxEnd);
+            # the stuck thread would keep the process from exiting
+            Qore::exit(1);
+        }
+        assertEq(0, done.getCount(), "the interpreter is finalized");
+    }
+}

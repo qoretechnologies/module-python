@@ -499,16 +499,32 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                     interpreter = nullptr;
                     return;
                 }
-                // Python 3.12 keeps threading._shutdown's completion sentinel in the
-                // initial state, so it must survive until Py_EndInterpreter. Newer
-                // runtimes require a state belonging to the finalizing native thread;
-                // reusing another thread's state leaves interpreter objects uncollected.
-                PyThreadState* sub_tstate = initial_thread_state;
-#if PY_VERSION_HEX >= 0x030D0000
-                if (sub_tstate->thread_id != PyThread_get_thread_ident()) {
+                // The interpreter is finalized with a state of the finalizing native thread,
+                // and the states of all other Qore threads are deleted first:
+                // - threading._shutdown() (Python < 3.13) waits for the sentinel lock of the
+                //   thread that imported threading (its "main thread") unless it runs on that
+                //   thread; the sentinel is released only when that thread's state is
+                //   deleted, so finalizing with the state of another thread (ex: the initial
+                //   state of a thread that has ended) waited forever
+                // - when it runs on that thread, the sentinel must still be held, so the own
+                //   state of the finalizing thread is used rather than a new one
+                // - newer runtimes require a state belonging to the finalizing native
+                //   thread; reusing another thread's state leaves interpreter objects
+                //   uncollected
+                PyThreadState* sub_tstate = nullptr;
+                {
+                    unsigned long ident = PyThread_get_thread_ident();
+                    AutoLocker al(py_thr_lck);
+                    for (PyThreadState* state : owned_thread_states) {
+                        if (state->thread_id == ident) {
+                            sub_tstate = state;
+                            break;
+                        }
+                    }
+                }
+                if (!sub_tstate) {
                     sub_tstate = PyThreadState_New(interpreter);
                 }
-#endif
                 if (!sub_tstate) {
                     PyErr_Clear();
                     xsink->raiseException("PYTHON-MEMORY-ERROR", "cannot allocate interpreter cleanup state");

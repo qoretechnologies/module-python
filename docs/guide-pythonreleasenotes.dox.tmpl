@@ -16,6 +16,9 @@
     <b>Bug Fixes:</b>
     - fixed incomplete finalization of Python subinterpreters, including atexit hooks, free-threaded builds,
       and destruction on a different native thread
+    - fixed a hang finalizing a Python subinterpreter with Python 3.12 and earlier on a native thread other than the
+      thread that imported \c threading in it (ex: a @ref Qore::Program "Program" using %Python destroyed in another
+      thread than the one that created it): the finalization waited for that thread's state, which was never deleted
     - fixed interpreter ownership of imported Qore wrappers when independent PythonProgram objects share a Qore program
     - preserve Qore proxies for Python objects passed between interpreters, preventing cross-interpreter garbage
       collection while preserving object identity
