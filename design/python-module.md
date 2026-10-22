@@ -191,6 +191,33 @@ call raises `RuntimeError` before accessing the deleted Qore program. Capsule
 references keep the C++ program record alive without keeping its interpreter or
 Qore program alive.
 
+## Threads Created by Python
+
+Python can call into Qore on a thread that Python created (`threading.Thread`, an executor pool, or a native
+thread using `PyGILState_Ensure()`); such a thread has no Qore thread data, which every Qore API needs, starting with
+`QorePythonProgram::getContext()`.  Every function and slot through which Python calls into Qore therefore creates
+a `QorePythonQoreEntryHelper` before it uses the Qore API (`python-module.h`): method calls, static method calls,
+constructors (`py_init`), member reads (`py_getattro`), Qore callables and their release, Qore functions, namespace
+attribute and class imports, the import loaders, and the `qoreloader` functions.
+
+The helper calls `qore_python_register_thread()`, which registers a thread that is not yet known to Qore as a foreign
+thread and keeps it registered while its Python thread state exists, as a Qore thread is registered while it runs:
+
+- the Qore objects that Python code creates on the thread are kept in the thread's Program data
+  (`saveQoreObjectFromPythonDefault()`) until the thread ends, so they survive the call that created them;
+- Qore resources that the thread acquires (a `Mutex`, thread-local data) stay its own between calls.
+
+Registering only for the duration of a call, as the method calls did before, deleted an object created by a
+constructor call when the call returned, and released a lock acquired in one call before the next.
+
+A `QorePythonThreadSentinel` object is stored in the thread state's dictionary (`PyThreadState_GetDict()`); its
+`tp_dealloc` deregisters the thread when the state is cleared, which happens on the thread itself when it ends (and
+for a `PyGILState_Ensure()` thread when its last `PyGILState_Release()` deletes the state), while the thread's Qore
+data is still usable.  A state cleared on another thread (ex: by `Py_EndInterpreter()`) does not deregister the thread
+it belongs to; a C++ `thread_local` object deregisters such a thread when the native thread exits.  On musl, a
+`thread_local` destructor can run after the library's own thread-local storage has been released, in which case the
+thread cannot be deregistered and its Qore thread entry is not reused.
+
 ## Python Shutdown Handling
 
 ### The Problem

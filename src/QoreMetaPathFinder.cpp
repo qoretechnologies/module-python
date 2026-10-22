@@ -139,6 +139,11 @@ PyObject* QoreMetaPathFinder::find_spec(PyObject* self, PyObject* args) {
     }
 #endif
 
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
+
     // returns a borrowed reference
     PyObject* fullname = PyTuple_GetItem(args, 0);
     assert(PyUnicode_Check(fullname));

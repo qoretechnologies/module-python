@@ -138,6 +138,10 @@ PyObject* JavaLoader::create_module(PyObject* self, PyObject* args) {
     typedef QoreNamespace* (*jni_module_find_create_java_namespace_t)(QoreString& arg, QoreProgram* pgm);
     static jni_module_find_create_java_namespace_t jni_module_find_create_java_namespace = nullptr;
 
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
     if (!jni_module_find_create_java_namespace) {
         if (load_jni_module(qore_python_pgm)) {
@@ -195,6 +199,10 @@ PyObject* JavaLoader::create_module(PyObject* self, PyObject* args) {
 
 PyObject* JavaLoader::exec_module(PyObject* self, PyObject* args) {
     assert(PyTuple_Check(args));
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
 #ifdef _QORE_PYTHON_DEBUG_EXEC_MODULE_ARGS
     QorePythonReferenceHolder argstr(PyObject_Repr(args));
     assert(PyUnicode_Check(*argstr));

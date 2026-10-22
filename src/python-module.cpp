@@ -20,6 +20,8 @@
 */
 
 #include "python-module.h"
+
+#include <pthread.h>
 #include "QC_PythonProgram.h"
 #include "QorePythonProgram.h"
 #include "QorePythonStackLocationHelper.h"
@@ -228,6 +230,97 @@ int q_reset_python(ExceptionSink* xsink) {
     return 0;
 }
 #endif
+
+//! True if this module registered the current thread with Qore; the thread was created by Python
+static thread_local bool python_thread_registered = false;
+
+//! Deregisters a thread that Python created when its Python thread state is cleared
+/** An object of this type is stored in the thread state's dictionary when the thread is registered; the state is
+    cleared on the thread itself when the thread ends (or, for a native thread using PyGILState_Ensure(), when its
+    last PyGILState_Release() deletes the state), with the thread's Qore data still usable.  A state cleared on another
+    thread (ex: when an interpreter ends) cannot deregister the thread it belongs to; that thread is then deregistered
+    when it exits (see QorePythonThreadExit).
+*/
+struct QorePythonThreadSentinel {
+    PyObject_HEAD
+    //! the native thread that was registered
+    pthread_t thread;
+};
+
+static void qore_python_thread_sentinel_dealloc(PyObject* self) {
+    QorePythonThreadSentinel* sentinel = reinterpret_cast<QorePythonThreadSentinel*>(self);
+    if (python_thread_registered && pthread_equal(sentinel->thread, pthread_self())) {
+        python_thread_registered = false;
+        q_deregister_foreign_thread();
+    }
+    Py_TYPE(self)->tp_free(self);
+}
+
+static PyTypeObject QorePythonThreadSentinel_Type = {
+    PyVarObject_HEAD_INIT(nullptr, 0)
+};
+
+//! Deregisters a thread that Python created when the native thread exits, if it is still registered
+/** Normally the thread is deregistered when its Python thread state is cleared; this covers a thread whose state
+    was cleared on another thread
+*/
+struct QorePythonThreadExit {
+    //! set when the thread is registered, so that the object is constructed and its destructor runs at the exit
+    bool armed = false;
+
+    DLLLOCAL ~QorePythonThreadExit() {
+        if (python_thread_registered) {
+            python_thread_registered = false;
+            q_deregister_foreign_thread();
+        }
+    }
+};
+
+static thread_local QorePythonThreadExit python_thread_exit;
+
+//! The key of the sentinel in the dictionary of a Python thread state
+static constexpr const char* QORE_PYTHON_THREAD_SENTINEL_KEY = "__qore_thread_registration__";
+
+int qore_python_thread_registration_init() {
+    QorePythonThreadSentinel_Type.tp_name = "qoreloader.QoreThreadRegistration";
+    QorePythonThreadSentinel_Type.tp_basicsize = sizeof(QorePythonThreadSentinel);
+    QorePythonThreadSentinel_Type.tp_dealloc = qore_python_thread_sentinel_dealloc;
+    QorePythonThreadSentinel_Type.tp_flags = Py_TPFLAGS_DEFAULT;
+    QorePythonThreadSentinel_Type.tp_doc = "registration of a Python thread with Qore";
+    return PyType_Ready(&QorePythonThreadSentinel_Type);
+}
+
+int qore_python_register_thread() {
+    int rc = q_register_foreign_thread();
+    if (rc == QFT_REGISTERED) {
+        // a Qore thread, or a thread registered before
+        return 0;
+    }
+    if (rc != QFT_OK) {
+        return -1;
+    }
+    // the destructor of the thread-local object runs when the native thread exits
+    python_thread_exit.armed = true;
+    python_thread_registered = true;
+
+    // the thread is deregistered when its Python thread state is cleared
+    PyObject* dict = (QorePythonThreadSentinel_Type.tp_flags & Py_TPFLAGS_READY) ? PyThreadState_GetDict() : nullptr;
+    if (dict) {
+        QorePythonThreadSentinel* sentinel = PyObject_New(QorePythonThreadSentinel, &QorePythonThreadSentinel_Type);
+        if (sentinel) {
+            sentinel->thread = pthread_self();
+            int set_rc = PyDict_SetItemString(dict, QORE_PYTHON_THREAD_SENTINEL_KEY,
+                reinterpret_cast<PyObject*>(sentinel));
+            Py_DECREF(sentinel);
+            if (set_rc < 0) {
+                PyErr_Clear();
+            }
+        } else {
+            PyErr_Clear();
+        }
+    }
+    return 0;
+}
 
 static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) {
     QoreStringNode* err = python_module_init_intern(false);

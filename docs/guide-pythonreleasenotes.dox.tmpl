@@ -14,6 +14,11 @@
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
 
     <b>Bug Fixes:</b>
+    - fixed crashes when a thread created by %Python (ex: \c threading.Thread) called a %Qore function or callable,
+      constructed a %Qore object, read a member of a %Qore object, imported a %Qore class or released the last
+      reference to a %Qore callable; such a thread is now registered with %Qore while it runs, so the %Qore objects
+      it creates are kept and the %Qore resources it acquires (ex: a lock) stay its own from one call to the next, as
+      in a %Qore thread, and it is deregistered when it ends
     - fixed incomplete finalization of Python subinterpreters, including atexit hooks, free-threaded builds,
       and destruction on a different native thread
     - fixed a hang finalizing a Python subinterpreter with Python 3.12 and earlier on a native thread other than the

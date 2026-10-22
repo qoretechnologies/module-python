@@ -4138,6 +4138,11 @@ PyObject* QorePythonProgram::callQoreFunction(PyObject* self, PyObject* args) {
         return nullptr;
     }
 
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
+
     // get Qore arguments
     ExceptionSink xsink;
     assert(PyTuple_Check(args));

@@ -129,6 +129,10 @@ static PyObject* ModuleNamespace_getattro(PyObject* self, PyObject* key) {
     if (key_str[0] == '_' && key_str[1] == '_') {
         return nullptr;
     }
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
     ModuleNamespace* mns = get_namespace(self);
     printd(5, "ModuleNamespace_getattro() obj: %p ns: %p (%s) attr: %s: %p\n", self, mns->ns, mns->ns->getName(), key_str, attr);
 

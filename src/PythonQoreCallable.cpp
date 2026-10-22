@@ -123,8 +123,13 @@ PyObject* qore_callable_new(PyTypeObject* type, PyObject* args, PyObject* kw) {
 
 void qore_callable_dealloc(PyQoreCallable* self) {
     if (self->callable) {
-        ExceptionSink xsink;
-        self->callable->deref(&xsink);
+        // releasing the callable can run Qore code (destructors), which needs a thread registered with Qore; if the
+        // thread cannot be registered, the callable is not released
+        QorePythonQoreEntryHelper qeh;
+        if (qeh.ok()) {
+            ExceptionSink xsink;
+            self->callable->deref(&xsink);
+        }
         self->callable = nullptr;
     }
     Py_TYPE(self)->tp_free(self);
@@ -142,6 +147,10 @@ PyObject* qore_callable_call(PyQoreCallable* self, PyObject* args, PyObject* kwa
         return nullptr;
     }
 
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
 
     ExceptionSink xsink;

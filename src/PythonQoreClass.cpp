@@ -481,7 +481,10 @@ PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* 
     if (!m) {
         return nullptr;
     }
-    QoreForeignThreadHelper qfth;
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
     assert(PyTuple_Check(args));
     QoreObject* obj;
     // check if this could be a static method call
@@ -582,7 +585,10 @@ PyObject* PythonQoreClass::exec_qore_static_method(PyObject* method_capsule, PyO
     if (!m) {
         return nullptr;
     }
-    QoreForeignThreadHelper qfth;
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
     assert(PyTuple_Check(args));
 #if 0
     {
@@ -659,6 +665,10 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
     //printd(5, "PythonQoreClass::py_init() self: %p '%s' args: %p (%d: %s) kwds: %p\n", self, Py_TYPE(self)->tp_name,
     //  args, (int)PyTuple_Size(args), PyUnicode_AsUTF8(*argstr), kwds);
 
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return -1;
+    }
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
 
     ExceptionSink xsink;
@@ -768,6 +778,10 @@ PyObject* PythonQoreClass::py_getattro(PyObject* self, PyObject* attr) {
 
     assert(PyQoreObject_Check(self));
     assert(PyUnicode_Check(attr));
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
     const QoreClass* qcls = findQoreClass(self);
     if (!qcls) {
         return nullptr;

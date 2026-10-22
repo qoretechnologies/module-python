@@ -416,6 +416,54 @@ protected:
     const QorePythonProgram* new_pypgm;
 };
 
+//! Registers a thread that Python created with Qore, for the life of its Python thread state
+/** Python can call into Qore on any thread, including a thread that Python created (\c threading.Thread, an
+    executor pool, a native thread using \c PyGILState_Ensure()), which has no Qore thread data; the Qore API, starting
+    with the lookup of the Python program context in QorePythonProgram::getContext(), requires it.  Such a thread is
+    registered with Qore as a foreign thread the first time it calls Qore, and stays registered while its Python thread
+    state exists, as a Qore thread does while it runs: the Qore objects that Python code creates on it are kept in its
+    thread data until it ends, and Qore resources that it acquires (ex: a lock) stay its own between calls.  It is
+    deregistered when its Python thread state is cleared (normally when the thread ends), or when the native thread
+    exits.
+
+    Must be called with the GIL held and a current Python thread state.
+
+    @return 0 if Qore code can run on the current thread, -1 if the thread could not be registered
+*/
+DLLLOCAL int qore_python_register_thread();
+
+//! Initializes the type used to deregister threads that Python created; called once in the main interpreter
+DLLLOCAL int qore_python_thread_registration_init();
+
+//! Enters Qore from a function or slot that Python calls; see qore_python_register_thread()
+/** Create it before any other Qore API is used in the call, with the GIL held.
+*/
+class QorePythonQoreEntryHelper {
+public:
+    DLLLOCAL QorePythonQoreEntryHelper() : valid(!qore_python_register_thread()) {
+    }
+
+    //! Returns true if Qore code can run on the current thread
+    DLLLOCAL bool ok() const {
+        return valid;
+    }
+
+    //! Returns true if Qore code can run on the current thread; otherwise raises a Python exception
+    DLLLOCAL bool check() const {
+        if (!valid) {
+            PyErr_SetString(PyExc_RuntimeError, "the current thread cannot be registered with Qore");
+            return false;
+        }
+        return true;
+    }
+
+private:
+    bool valid;
+
+    QorePythonQoreEntryHelper(const QorePythonQoreEntryHelper&) = delete;
+    QorePythonQoreEntryHelper& operator=(const QorePythonQoreEntryHelper&) = delete;
+};
+
 class QorePythonManualReferenceHolder {
 public:
     DLLLOCAL QorePythonManualReferenceHolder() : obj(nullptr) {

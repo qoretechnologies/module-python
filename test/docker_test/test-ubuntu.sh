@@ -37,6 +37,7 @@ ln -s python*.qmod qoreloader.so
 # issue #4398: test the qoreloader.so module
 python3 -c "import qoreloader;from qore.__root__.Qore.Thread import Counter;c = Counter();c.waitForZero()"
 PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-lifecycle.py
+PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-threads.py
 
 # add Qore user and group
 groupadd -o -g ${QORE_GID} qore

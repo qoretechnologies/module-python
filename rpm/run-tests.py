@@ -34,7 +34,8 @@ def run(build=None, compiler=False):
         root = Path(directory)
         suite = (source / 'test/python.qtest').read_text()
         (root / 'python.qtest').write_text(re.sub(r'^%prepend-module-path .*\n', '', suite, flags=re.M))
-        for relative in ('test/fib.py', 'test/standalone-lifecycle.py', 'debian/tests/standalone.py'):
+        for relative in ('test/fib.py', 'test/standalone-lifecycle.py', 'test/standalone-threads.py',
+                         'debian/tests/standalone.py'):
             shutil.copyfile(source / relative, root / Path(relative).name)
         completed = subprocess.run([*qore, str(root / 'python.qtest'), '-v'], env=env, cwd=root,
                                    check=True, timeout=600, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -50,7 +51,7 @@ def run(build=None, compiler=False):
             'import qoreloader,sys; from pathlib import Path; '
             'assert Path(qoreloader.__file__).resolve() == Path(sys.argv[1]).resolve()', str(module)],
             env=env, cwd=root, check=True, timeout=60)
-        for script in ('standalone.py', 'standalone-lifecycle.py'):
+        for script in ('standalone.py', 'standalone-lifecycle.py', 'standalone-threads.py'):
             subprocess.run(['/usr/bin/python3', '-B', '-W', 'error', str(root / script)],
                            env=env, cwd=root, check=True, timeout=90)
         if compiler:

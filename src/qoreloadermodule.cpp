@@ -266,6 +266,10 @@ static int slot_qoreloader_exec(PyObject *m) {
             return -1;
         }
 
+        if (qore_python_thread_registration_init() < 0) {
+            return -1;
+        }
+
         if (QoreLoader::init()) {
             return -1;
         }
@@ -430,6 +434,10 @@ PyObject* qoreloader_load_java(PyObject* self, PyObject* args) {
     }
     const char* name_str = PyUnicode_AsUTF8(name);
 
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
     if (do_jni_module_import(qore_python_pgm, name_str)) {
         return nullptr;
@@ -463,6 +471,10 @@ PyObject* qoreloader_issue_module_cmd(PyObject* self, PyObject* args) {
     const char* module_str = PyUnicode_AsUTF8(module);
     const char* cmd_str = PyUnicode_AsUTF8(cmd);
 
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
     ExceptionSink xsink;
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
     QoreProgram* qpgm = qore_python_pgm->getQoreProgram();

@@ -179,6 +179,10 @@ PyObject* QoreLoader::create_module(PyObject* self, PyObject* args) {
 
 PyObject* QoreLoader::exec_module(PyObject* self, PyObject* args) {
     assert(PyTuple_Check(args));
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
 #ifdef _QORE_PYTHON_DEBUG_EXEC_MODULE_ARGS
     QorePythonReferenceHolder argstr(PyObject_Repr(args));
     assert(PyUnicode_Check(*argstr));

@@ -81,8 +81,142 @@ class PythonTest inherits Test {
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
         addTestCase("type conversion test", \typeConversionTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
+        addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         # Set return value for compatibility with test harnesses that check the return value
         set_return_value(main());
+    }
+
+    # Qore code called from a thread that Python created: such a thread has no Qore thread data until it is
+    # registered with Qore.  Previously only Qore method calls registered it; a call of a Qore callable or function, a
+    # constructor, a member read, a class import and the release of a Qore callable on such a thread used the Qore API
+    # without thread data and crashed the process.
+    pythonThreadEntryTest() {
+        if (Python::FreeThreading) {
+            testSkip("Python threads in sub-interpreters not supported with free-threading (PEP 703)");
+        }
+        Program pgm(PO_NO_CHILD_PO_RESTRICTIONS);
+        pgm.parse("%modern
+%requires python
+namespace EntryTest {
+    string sub qore_func(string s) {
+        return \"function \" + s;
+    }
+
+    class Holder {
+        public {
+            string value = \"member\";
+        }
+    }
+
+    class Tracker {
+        public {
+            Queue queue;
+        }
+
+        constructor(Queue queue) {
+            self.queue = queue;
+        }
+
+        destructor() {
+            queue.push(\"destroyed\");
+        }
+    }
+}
+
+EntryTest::Holder sub make_holder() {
+    return new EntryTest::Holder();
+}
+
+# returns a closure that is the only owner of an object whose destructor reports to the queue
+code sub make_tracked_callable(Queue queue) {
+    EntryTest::Tracker tracker(queue);
+    return auto sub () { return tracker; };
+}
+", "entry-test");
+        pgm.issueModuleCmd("python", "import-ns EntryTest et");
+        pgm.issueModuleCmd("python", "parse entry_test.py from threading import Thread
+
+def in_thread(fn):
+    out = []
+    def target():
+        try:
+            out.append(fn())
+        except Exception as e:
+            out.append('error: ' + repr(e))
+    th = Thread(target = target)
+    th.start()
+    th.join()
+    return out[0]
+
+def py_call_callable(c, arg):
+    return in_thread(lambda: c(arg))
+
+def py_call_function(arg):
+    return in_thread(lambda: et.qore_func(arg))
+
+def py_construct():
+    return in_thread(lambda: et.Holder().value)
+
+def py_read_member(h):
+    return in_thread(lambda: h.value)
+
+def py_import_class():
+    def imp():
+        import qoreloader
+        from qore.__root__.Qore.Thread import Sequence
+        return Sequence(5).next()
+    return in_thread(imp)
+
+kept = []
+
+def py_keep(c):
+    kept.append(c)
+
+def py_drop():
+    return in_thread(lambda: kept.clear())
+
+def py_construct_and_use():
+    def f():
+        h = et.Holder()
+        return h.value
+    return in_thread(f)
+
+def py_lock_across_calls(m):
+    def f():
+        m.lock()
+        m.unlock()
+        return 'unlocked'
+    return in_thread(f)
+");
+        map pgm.issueModuleCmd("python", "export-func " + $1), ("py_call_callable", "py_call_function", "py_construct",
+            "py_read_member", "py_import_class", "py_keep", "py_drop", "py_construct_and_use",
+            "py_lock_across_calls");
+        int threads = num_threads();
+
+        assertEq("callable x", pgm.callFunction("py_call_callable", string sub (string s) { return "callable " + s; },
+            "x"), "a Qore callable called in a Python thread");
+        assertEq("function y", pgm.callFunction("py_call_function", "y"), "a Qore function called in a Python thread");
+        assertEq("member", pgm.callFunction("py_construct"), "a Qore object constructed in a Python thread");
+        assertEq("member", pgm.callFunction("py_read_member", pgm.callFunction("make_holder")),
+            "a member read in a Python thread");
+        assertEq(5, pgm.callFunction("py_import_class"), "a Qore class imported in a Python thread");
+
+        # the last reference to a Qore callable is released in a Python thread, which runs the destructor of the
+        # object it owns there
+        Queue destroyed();
+        pgm.callFunction("py_keep", pgm.callFunction("make_tracked_callable", destroyed));
+        assertEq(0, destroyed.size(), "the callable is kept by Python");
+        pgm.callFunction("py_drop");
+        assertEq("destroyed", destroyed.get(), "the callable was released in a Python thread");
+
+        # a Python thread is a Qore thread while it runs: a Qore object that it creates is kept, and a lock that it
+        # acquires stays its own, from one call to the next
+        assertEq("member", pgm.callFunction("py_construct_and_use"), "an object created in a Python thread is kept");
+        assertEq("unlocked", pgm.callFunction("py_lock_across_calls", new Mutex()),
+            "a lock acquired in a Python thread stays its own");
+
+        # the Python threads are no longer registered with Qore once they have ended
+        assertEq(threads, num_threads(), "the ended Python threads are deregistered");
     }
 
     moduleSpecFailureTest() {
