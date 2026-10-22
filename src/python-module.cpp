@@ -327,8 +327,8 @@ int qore_python_register_thread() {
 //! Replaces os.putenv(): changes the environment under the lock that serializes the environment with Qore
 /** Python changes the C environment with setenv() when a variable of os.environ is set; without the lock, a Qore
     thread reading the environment at the same time could read freed memory.  The arguments are converted, checked
-    and audited as Python's own os.putenv() does (Python 3.9 and later).  The GIL is released while the lock is waited for, so that no thread
-    holds the environment lock while it waits for the GIL.
+    and audited as Python's own os.putenv() does (Python 3.9 and later).  The GIL is released while the lock is
+    waited for, so that no thread holds the environment lock while it waits for the GIL.
 */
 static PyObject* qore_python_putenv(PyObject* self, PyObject* args) {
     PyObject* name = nullptr;
