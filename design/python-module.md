@@ -144,6 +144,16 @@ and newer use a state belonging to the finalizing native thread when destruction
 runs on a different thread. Reusing the original state on another thread prevents
 Python 3.14 from collecting the interpreter's object graph.
 
+`threading._shutdown()` of Python 3.12 and earlier, called by `Py_EndInterpreter`, treats the finalizing thread as
+the thread that imported `threading` in the interpreter (its "main thread") if their identifiers are equal, and then
+asserts that the main thread's sentinel lock is still held.  Qore threads end while the interpreter lives on, and
+their states are deleted when they end, which releases the sentinel; a new thread can then get the identifier of the
+thread that ended (musl and glibc reuse them), and `_shutdown()` failed the assertion ("Exception ignored in
+threading._shutdown") and did not wait for the non-daemon threads.  Before ending the interpreter, `deleteIntern()`
+calls `forgetEndedThreadingMainThread()`: if the main thread's sentinel is released and its identifier is the one of
+the current thread, the main thread is marked as stopped (`_stop()`) and given no identifier, so that `_shutdown()`
+treats the current thread as another thread, as it is.  Python 3.13 does not compare the identifiers.
+
 Python 3.13 and earlier abort the process in `Py_EndInterpreter` ("not the last thread") if another thread still
 has a state in the interpreter once the threads it waits for (the threads of the threading module that are not
 daemon threads, joined by `threading._shutdown()`) have ended; Python 3.14 instead makes such threads exit when they

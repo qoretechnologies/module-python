@@ -472,6 +472,30 @@ bool QorePythonProgram::hasThreadsNotJoinedAtEnd(PyThreadState* finalizing) {
 }
 #endif
 
+#if PY_VERSION_HEX < 0x030D0000
+void QorePythonProgram::forgetEndedThreadingMainThread() {
+    QorePythonReferenceHolder threading_name(PyUnicode_FromString("threading"));
+    QorePythonReferenceHolder threading(threading_name ? PyImport_GetModule(*threading_name) : nullptr);
+    QorePythonReferenceHolder main_thread(threading ? PyObject_GetAttrString(*threading, "_main_thread") : nullptr);
+    QorePythonReferenceHolder lock(main_thread ? PyObject_GetAttrString(*main_thread, "_tstate_lock") : nullptr);
+    QorePythonReferenceHolder ident(lock && *lock != Py_None ? PyObject_GetAttrString(*main_thread, "ident")
+        : nullptr);
+    if (ident && PyLong_Check(*ident) && PyLong_AsUnsignedLong(*ident) == PyThread_get_thread_ident()) {
+        // the lock is released when the state of the thread is deleted
+        QorePythonReferenceHolder locked(PyObject_CallMethod(*lock, "locked", nullptr));
+        if (locked && *locked == Py_False) {
+            QorePythonReferenceHolder rv(PyObject_CallMethod(*main_thread, "_stop", nullptr));
+            if (rv) {
+                PyObject_SetAttrString(*main_thread, "_ident", Py_None);
+            }
+        }
+    }
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+    }
+}
+#endif
+
 void QorePythonProgram::waitForThreadsIntern() {
     while (pgm_thr_cnt) {
         ++pgm_thr_waiting;
@@ -700,6 +724,9 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                     PyThreadState_Clear(state);
                     PyThreadState_Delete(state);
                 }
+#if PY_VERSION_HEX < 0x030D0000
+                forgetEndedThreadingMainThread();
+#endif
 #if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030E0000
                 // Python 3.13 and earlier abort the process ("Py_EndInterpreter: not the last thread") if another
                 // thread still has a state in the interpreter after the threads that Py_EndInterpreter() waits for

@@ -25,6 +25,7 @@ class PythonInterpreterEndTest inherits QUnit::Test {
         addTestCase("created and used in a thread that ended", \createdInEndedThread());
         addTestCase("used and destroyed in another thread", \usedInOtherThread());
         addTestCase("Program destroyed in another thread", \programDestroyedInOtherThread());
+        addTestCase("the finalizing thread has the identifier of the ended threading main thread", \threadingMainThreadEnded());
         addTestCase("a daemon thread still runs when the interpreter is destroyed", \daemonThreadAtEnd());
         addTestCase("a non-daemon thread still runs when the interpreter is destroyed", \nonDaemonThreadAtEnd());
         set_return_value(main());
@@ -59,6 +60,49 @@ class PythonInterpreterEndTest inherits QUnit::Test {
         pgm.loadModule("python");
         pgm.parse("%module-cmd(python) import threading\nsub f() {}\n", "program-destroyed-in-other-thread");
         endInThread(pgm);
+    }
+
+    #! the thread that finalizes the interpreter has the identifier of the thread that imported threading, which ended
+    /** threading._shutdown() of Python 3.12 and earlier treats the finalizing thread as the thread that imported
+        threading in the interpreter (its "main thread") if their identifiers are equal, and then expects the main
+        thread's state to still exist; when the main thread has ended (its state deleted, which releases its sentinel
+        lock) and a new thread gets its identifier (musl and glibc reuse them; ex: "created and used in a thread that
+        ended"), _shutdown() failed "assert tlock.locked()", reported as an exception ignored in threading._shutdown,
+        and did not wait for the non-daemon threads.  The reuse of an identifier cannot be arranged, so the state it
+        leaves is made directly: the main thread's sentinel is a released lock (no longer waited for by _shutdown()),
+        and its identifier is the one of the finalizing thread.  The exceptions that Python cannot raise (the "unraisable" ones) are written to a file.
+    */
+    threadingMainThreadEnded() {
+        list<softint> version = (Python::PythonVersion =~ x/^([0-9]+)\.([0-9]+)/);
+        if (version[0] > 3 || (version[0] == 3 && version[1] >= 13)) {
+            testSkip("threading._shutdown() of Python 3.13 and later does not compare thread identifiers");
+        }
+        TmpDir tmp("python-threading-main-ended-");
+        string unraisable = tmp.path + DirSep + "unraisable";
+        PythonProgram p(sprintf("
+import _thread
+import sys
+import threading
+
+def record(info, path = %y):
+    with open(path, 'a') as f:
+        f.write('%%s: %%s\\n' %% (type(info.exc_value).__name__, info.exc_value))
+
+sys.unraisablehook = record
+
+# the state that the end of the main thread leaves, with the identifier of this thread: its sentinel lock, which
+# threading._shutdown() also waits for, is released
+def main_thread_ended():
+    main = threading._main_thread
+    with threading._shutdown_locks_lock:
+        threading._shutdown_locks.discard(main._tstate_lock)
+    main._tstate_lock = _thread.allocate_lock()
+    main._ident = threading.get_ident()
+", unraisable), "threading-main-ended");
+        p.callFunction("main_thread_ended");
+        delete p;
+        string errors = is_file(unraisable) ? ReadOnlyFile::readTextFile(unraisable) : "";
+        assertEq("", errors, "no exception is ignored while the interpreter is finalized");
     }
 
     #! a daemon thread still runs when the interpreter is destroyed: it cannot be waited for, and the process continues

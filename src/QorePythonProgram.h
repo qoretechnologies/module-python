@@ -671,6 +671,20 @@ protected:
 
     DLLLOCAL void deleteIntern(ExceptionSink* xsink);
 
+#if PY_VERSION_HEX < 0x030D0000
+    //! makes threading._shutdown() treat the current thread as another thread than the one that imported threading
+    /** threading._shutdown() (Python 3.12 and earlier) treats the thread that finalizes the interpreter as the thread
+        that imported threading in it (its "main thread") if their identifiers are equal, and then expects that
+        thread's state to still exist; when that thread has ended and its state was deleted, a new thread can have its
+        identifier, and _shutdown() failed an assertion and did not wait for the other threads.  If the state of the
+        main thread was deleted (its sentinel lock is released) and the current thread has its identifier, the main
+        thread is marked as stopped and given no identifier.
+
+        Must be called with the GIL held, in the interpreter, before it is finalized.
+    */
+    DLLLOCAL static void forgetEndedThreadingMainThread();
+#endif
+
 #if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030E0000
     //! returns true if another thread would still have a state in the interpreter after Py_EndInterpreter() has
     //! waited for the threads it waits for, so that it would abort the process

@@ -41,6 +41,10 @@
       waited forever
     - fixed incomplete finalization of Python subinterpreters, including atexit hooks, free-threaded builds,
       and destruction on a different native thread
+    - with %Python 3.12 and earlier, destroying a %Python interpreter in a thread that has the identifier of the
+      thread that imported \c threading in it and has ended (thread identifiers are reused) no longer reports
+      "Exception ignored in threading._shutdown" with an \c AssertionError, and now waits for the threads of the
+      interpreter that are not daemon threads, which it did not do in this case
     - with %Python 3.13 and earlier, destroying a %Python interpreter (ex: a @ref Python::PythonProgram "PythonProgram"
       object, or a @ref Qore::Program "Program" using %Python) while a %Python daemon thread still runs in it no longer
       aborts the process with "Fatal Python error: Py_EndInterpreter: not the last thread": such a thread cannot be
