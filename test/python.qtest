@@ -96,6 +96,7 @@ class PythonTest inherits Test {
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
         addTestCase("Python threads run under the sandbox of the interpreter's Program", \sandboxPythonThreadTest());
         addTestCase("os.environ changes are serialized with Qore", \environmentTest());
+        addTestCase("an interpreter copies the environment under Qore's lock", \interpreterEnvironmentCopyTest());
         addTestCase("fork() while another thread holds a lock of the module", \forkHandlersTest());
         # Set return value for compatibility with test harnesses that check the return value
         set_return_value(main());
@@ -448,6 +449,73 @@ def join(thread):
         }
         p.callFunction("join", thread);
         assertEq(0, found, "a variable that was never set was not found");
+    }
+
+    # each interpreter copies the environment when its posix module is created (into posix.environ, which becomes
+    # os.environ) and its time module reads TZ; both are done under Qore's environment lock, by the module's exec
+    # functions of these modules, which hold the lock while they call Python's.  Previously the copy made while a
+    # subinterpreter was created could read the environment while a Qore thread changed it.  A race cannot be
+    # reproduced reliably, so the test checks that the exec functions are the module's (in its shared object, not in
+    # the Python library), and that they still make the copies.
+    interpreterEnvironmentCopyTest() {
+        string name = sprintf("QORE_PYTHON_ENV_COPY_%d", getpid());
+        on_exit unsetenv(name);
+        setenv(name, "set before the interpreter");
+        PythonProgram p("
+import ctypes
+import os
+import posix
+import time
+
+class DlInfo(ctypes.Structure):
+    _fields_ = [('dli_fname', ctypes.c_char_p), ('dli_fbase', ctypes.c_void_p), ('dli_sname', ctypes.c_char_p),
+        ('dli_saddr', ctypes.c_void_p)]
+
+class ModuleDefSlot(ctypes.Structure):
+    _fields_ = [('slot', ctypes.c_int), ('value', ctypes.c_void_p)]
+
+# the file that contains the code at the given address
+def code_file(address):
+    dl = ctypes.CDLL(None)
+    dl.dladdr.argtypes = [ctypes.c_void_p, ctypes.POINTER(DlInfo)]
+    info = DlInfo()
+    if not dl.dladdr(address, ctypes.byref(info)):
+        return None
+    return os.path.realpath(info.dli_fname.decode())
+
+# the exec function of a module with multi-phase initialization
+def exec_function(module):
+    api = ctypes.pythonapi
+    api.PyModule_GetDef.restype = ctypes.c_void_p
+    api.PyModule_GetDef.argtypes = [ctypes.py_object]
+    module_def = api.PyModule_GetDef(module)
+    # PyModuleDef: PyModuleDef_Base (PyObject, m_init, m_index, m_copy), m_name, m_doc, m_size, m_methods, m_slots
+    offset = object.__basicsize__ + ctypes.sizeof(ctypes.c_void_p) * 7
+    slots = ctypes.c_void_p.from_address(module_def + offset).value
+    i = 0
+    while True:
+        slot = ModuleDefSlot.from_address(slots + i * ctypes.sizeof(ModuleDefSlot))
+        if not slot.slot:
+            return None
+        if slot.slot == 2:
+            return slot.value
+        i += 1
+
+def files():
+    return {
+        'python': code_file(ctypes.cast(ctypes.pythonapi.Py_IsInitialized, ctypes.c_void_p).value),
+        'posix': code_file(exec_function(posix)),
+        'time': code_file(exec_function(time)),
+    }
+
+def copied(name):
+    return os.environ.get(name)
+", "environment-copy.py");
+        assertEq("set before the interpreter", p.callFunction("copied", name));
+        hash<auto> files = p.callFunction("files");
+        assertNeq(files.python, files.posix, "the exec function of posix is not Python's");
+        assertNeq(files.python, files.time, "the exec function of time is not Python's");
+        assertEq(files.posix, files.time, "both exec functions are the module's");
     }
 
     # a child process created with fork() while another thread holds a process-wide lock of the module can use Python:

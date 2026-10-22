@@ -27,6 +27,10 @@
       the environment while %Qore threads could read it, which could crash the process.  The environment variables that
       the module reads (\c PYTHONHOME, \c PYTHONPATH) and the environment that %Python copies into \c os.environ when
       it starts are read under the lock as well.
+    - the copy of the environment that each %Python interpreter makes into \c os.environ when it is created, and the
+      \c TZ variable that its \c time module reads when it is imported, are read under the environment lock of
+      %Qore (with %Python 3.10 and later); previously a %Python interpreter created while a %Qore thread changed the
+      environment could read it while it changed
     - a child process created with @ref Qore::fork() "fork()" while another thread holds a lock of the module can
       use %Python, as long as no other thread held the %Python GIL; previously the child could wait forever for a lock
       held by a thread that did not exist in it

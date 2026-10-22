@@ -32,6 +32,7 @@
 #include <qore/QoreForkHandler.h>
 
 #include <string>
+#include <vector>
 
 static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink);
 static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, ExceptionSink& xsink);
@@ -483,6 +484,117 @@ void QorePythonQoreEntryHelper::applySandbox() {
     }
 }
 
+#if PY_VERSION_HEX >= 0x030A0000
+/* The environment copies that Python makes when an interpreter is created or imports a module are made under Qore's
+   environment lock: the exec function of the posix module copies the C environment into posix.environ (which becomes
+   os.environ) in every interpreter, including each subinterpreter while Py_NewInterpreter() runs, and the exec
+   function of the time module calls tzset(), which reads TZ.  Both modules use multi-phase initialization: their exec
+   functions are slots of their module definitions, which every interpreter uses, and are replaced with functions that
+   hold the lock while they call the original ones.
+
+   The lock is held only while those functions run: they run C code only, and garbage collection, which could run
+   Python code and release the GIL, is disabled meanwhile, so the lock is never held while a thread waits for the GIL
+   (see design/python-module.md, "The Process Environment").  Holding it for all of Py_NewInterpreter() instead would
+   hold it while the new interpreter runs Python code (importlib, site), which releases the GIL; a thread that holds
+   the GIL while it forks (os.fork(), or _posixsubprocess on platforms without vfork()) waits for the lock in Qore's
+   fork handlers, and the creating thread would wait for the GIL while holding the lock.
+*/
+struct QorePythonEnvironmentExecSlot {
+    const char* module_name;
+    PyModuleDef* def;
+    PyModuleDef_Slot* orig_slots;
+    int (*orig_exec)(PyObject*);
+    std::vector<PyModuleDef_Slot> slots;
+};
+
+static QorePythonEnvironmentExecSlot python_env_exec_slots[] = {
+    {"posix", nullptr, nullptr, nullptr, {}},
+    {"time", nullptr, nullptr, nullptr, {}},
+};
+
+template <size_t N>
+static int python_exec_under_environment_lock(PyObject* module) {
+    int (*orig_exec)(PyObject*) = python_env_exec_slots[N].orig_exec;
+    assert(orig_exec);
+    // no Python code runs while the lock is held
+    int gc_enabled = PyGC_Disable();
+    int rc;
+    {
+        QoreEnvironmentReadLock env_lock;
+        rc = orig_exec(module);
+    }
+    if (gc_enabled) {
+        PyGC_Enable();
+    }
+    return rc;
+}
+
+static int (*const python_env_exec_wrappers[])(PyObject*) = {
+    python_exec_under_environment_lock<0>,
+    python_exec_under_environment_lock<1>,
+};
+
+//! replaces the exec slots of the modules that read the environment; must be called with the GIL held
+static int python_wrap_environment_exec_slots() {
+    static_assert(sizeof(python_env_exec_slots) / sizeof(python_env_exec_slots[0])
+        == sizeof(python_env_exec_wrappers) / sizeof(python_env_exec_wrappers[0]), "one wrapper for each module");
+    for (size_t i = 0; i < sizeof(python_env_exec_slots) / sizeof(python_env_exec_slots[0]); ++i) {
+        QorePythonEnvironmentExecSlot& info = python_env_exec_slots[i];
+        if (info.def) {
+            continue;
+        }
+        QorePythonReferenceHolder mod(PyImport_ImportModule(info.module_name));
+        if (!mod) {
+            return -1;
+        }
+        PyModuleDef* def = PyModule_GetDef(*mod);
+        // a module with single-phase initialization has no exec slot
+        if (!def || !def->m_slots) {
+            continue;
+        }
+        size_t count = 0;
+        size_t exec_index = SIZE_MAX;
+        for (PyModuleDef_Slot* slot = def->m_slots; slot->slot; ++slot, ++count) {
+            if (slot->slot == Py_mod_exec) {
+                if (exec_index != SIZE_MAX) {
+                    // more than one exec function: not known
+                    exec_index = SIZE_MAX;
+                    break;
+                }
+                exec_index = count;
+            }
+        }
+        if (exec_index == SIZE_MAX) {
+            continue;
+        }
+        try {
+            info.slots.assign(def->m_slots, def->m_slots + count + 1);
+        } catch (const std::bad_alloc&) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        info.orig_exec = reinterpret_cast<int (*)(PyObject*)>(info.slots[exec_index].value);
+        info.slots[exec_index].value = reinterpret_cast<void*>(python_env_exec_wrappers[i]);
+        info.orig_slots = def->m_slots;
+        info.def = def;
+        def->m_slots = info.slots.data();
+    }
+    return 0;
+}
+
+//! restores the exec slots replaced by python_wrap_environment_exec_slots()
+static void python_unwrap_environment_exec_slots() {
+    for (QorePythonEnvironmentExecSlot& info : python_env_exec_slots) {
+        if (info.def) {
+            info.def->m_slots = info.orig_slots;
+            info.def = nullptr;
+            info.orig_slots = nullptr;
+            info.orig_exec = nullptr;
+        }
+    }
+}
+#endif
+
 static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) {
     // registered in the initialization function and not while static objects are constructed (see QoreForkHandler.h)
     if (QorePythonProgram::registerForkHandlers()) {
@@ -550,6 +662,15 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
             // for the GIL, which a thread forking with os.fork() could hold while it waits for the lock
             QoreEnvironmentReadLock env_lock;
             Py_InitializeEx(0);
+#if PY_VERSION_HEX >= 0x030A0000
+            // the time module reads the environment (TZ) when it is created; it is created here, while the lock is
+            // held and no other thread can run Python code, so that its definition can be found and its exec
+            // function replaced (see python_wrap_environment_exec_slots())
+            QorePythonReferenceHolder time_module(PyImport_ImportModule("time"));
+            if (!time_module) {
+                PyErr_Clear();
+            }
+#endif
         }
 #ifdef QORE_ALLOW_PYTHON_SHUTDOWN
         // issue# 4290: if we actively shut down Python on exit, then exit handlers in modules
@@ -693,6 +814,14 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     //    PyGILState_GetThisThreadState());
 #endif
 
+#if PY_VERSION_HEX >= 0x030A0000
+    if (python_wrap_environment_exec_slots()) {
+        PyErr_Clear();
+        throw QoreStandardException("PYTHON-MODULE-ERROR", "cannot initialize the environment functions of the "
+            "posix and time modules");
+    }
+#endif
+
     // Initialize the process-wide bridge types in the main interpreter. If the
     // first import happens in a transient subinterpreter, the static type objects
     // and cached loader callables outlive the interpreter that created them.
@@ -790,6 +919,9 @@ static void python_module_delete() {
         PNS = nullptr;
     }
     python_module_shutdown();
+#if PY_VERSION_HEX >= 0x030A0000
+    python_unwrap_environment_exec_slots();
+#endif
 #ifdef QORE_PYTHON_HAVE_FORK_GIL_CHECK
     qore_unregister_fork_handler(python_gil_fork_reg);
     python_gil_fork_reg = nullptr;

@@ -267,12 +267,25 @@ Qore serializes every access to the C environment with one process-wide read-wri
   Python it does not see changes made by C code.
 - `PYTHONHOME` and `PYTHONPATH` are read with `QoreEnvironmentValue`.
 - `Py_InitializeEx()` runs under a `QoreEnvironmentReadLock`: Python reads its configuration variables and copies the
-  environment into `os.environ` while it initializes, and no other Python thread exists yet.
-- Subinterpreter creation (`Py_NewInterpreter()`) also copies the environment, but it runs Python code (`site`) that
-  can release the GIL to another Python thread; holding the environment lock there would deadlock with a Python
-  thread that calls `os.fork()` (it holds the GIL while Qore's fork handlers wait for the environment lock), so the
-  lock is not held, and the copy can race with a concurrent `setenv()` in another thread.
-- Python C code that calls `getenv()` or `setenv()` directly (ex: `time.tzset()`) is not serialized with Qore.
+  environment into `os.environ` while it initializes, and no other Python thread exists yet.  The `time` module,
+  which reads `TZ` when it is created, is imported there as well.  Code that Python runs while it initializes
+  (`sitecustomize`, `.pth` files) therefore runs with the lock held: forking from it is not supported (an assertion
+  in debug builds, under the fork contract of the environment lock: no `fork()` while holding it), and a change it
+  makes to the environment is not serialized with Qore (the module's environment functions are installed only when
+  `qoreloader` is initialized; through them, a change would fail with `EDEADLK` while the lock is held).
+- Every interpreter copies the environment when its `posix` module is created, including each subinterpreter while
+  `Py_NewInterpreter()` runs, and the `time` module of every interpreter reads `TZ` (`tzset()`) when it is created.
+  Both modules use multi-phase initialization (Python 3.10 and later are handled): their exec functions are slots of
+  module definitions shared by all interpreters, and `python_wrap_environment_exec_slots()` (module initialization,
+  in the main interpreter) replaces them with functions that hold a `QoreEnvironmentReadLock` while they call the
+  original ones, with garbage collection disabled meanwhile; the originals are restored when the module is deleted.
+  These exec functions run C code only, so the lock is never held while a thread waits for the GIL.  The lock is not
+  held for all of `Py_NewInterpreter()`: the new interpreter runs Python code (importlib, `site`), which can release
+  the GIL to another thread, and a thread that holds the GIL while it forks (`os.fork()` in the main interpreter of
+  a Python process hosting Qore, or `_posixsubprocess` on platforms without `vfork()`, such as macOS) waits for the
+  lock in Qore's fork handlers, so the creating thread would wait for the GIL while holding the lock, a deadlock.
+- Python C code that calls `getenv()` or `setenv()` directly at other times (ex: `time.tzset()`,
+  `time.localtime()`) is not serialized with Qore.
 
 **Invariant:** no thread holds the environment lock while it waits for a GIL or for a Python thread state.
 
