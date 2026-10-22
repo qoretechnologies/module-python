@@ -275,9 +275,24 @@ The GIL interplay, measured on Linux with Python 3.14 (GIL build):
   "Fatal Python error: _PyInterpreterState_DeleteExceptMain: not main interpreter" (CPython's after-fork handling
   only supports the main interpreter); it does not deadlock.
 - A child created with a `fork()` that Python does not make (Qore's `fork()`, or any native fork) gets the GIL in the
-  state the parent had: if another thread held it, the child's first Python call waits forever.  If no thread held it,
+  state the parent had: if another thread held it, it can never be acquired in the child.  If no thread held it,
   Python works in the child.  The module does not acquire the GIL before `fork()`: every `fork()` in the process,
   including each process start by the process module, would then wait for Python.
+- The child handler `python_gil` (`QFR_MODULE_RESET`, child only, python-module.cpp) finds which case applies with
+  `qore_python_fork_child_gil_lost()` (src/python_fork_gil.c): the GIL is lost if one of its mutexes is held (a thread
+  was taking or dropping it), or if it is locked and its last holder is not a thread state of the forking thread.
+  That file is C, compiled with CPython's internal headers (C headers, installed with the Python headers), which
+  give the layout of the GIL of every version (the main interpreter's `ceval.gil` in 3.12+, `_PyRuntime.ceval.gil`
+  before); CMake compiles it only if the headers are found (`QORE_PYTHON_HAVE_FORK_GIL_CHECK`).  If the GIL is lost,
+  the handler sets `python_fork_lost` and `python_shutdown`: the module then uses Python in no way, as after Python
+  has been shut down, so nothing waits for the GIL:
+  - `QorePythonHelper` (every call into Python with an `ExceptionSink`) and `createInterpreter()` raise
+    `PYTHON-FORK-ERROR`
+  - `deleteIntern()` leaves the interpreter, `releasePersistentReference()` leaves the reference, and the module's
+    shutdown does not finalize Python (memory is not released, which a child that cannot use Python can afford)
+  - a thread returning to Python code (`~QorePythonReleaseGilHelper()`, after a Qore call made from Python, such as
+    Python calling Qore's `fork()`) cannot continue: `qore_python_fork_lost_exit()` writes a message to stderr and
+    calls `_exit(1)`
 - No thread holds Qore's environment lock while it waits for the GIL (see "The Process Environment"), since
   `os.fork()` holds the GIL while the environment lock is acquired.
 

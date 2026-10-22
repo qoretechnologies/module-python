@@ -58,6 +58,34 @@ set(CMAKE_REQUIRED_INCLUDES ${Python3_INCLUDE_DIRS})
 # Our src/python*_internals.h files provide the necessary thread state management
 message(STATUS "Python ${Python3_VERSION} - using bundled internals")
 
+# The state of the GIL in the child of fork() is read by a C file compiled with CPython's internal headers (C headers,
+# installed with the Python headers); without them, a child created while another thread held the GIL waits forever
+# on its first use of Python instead of raising PYTHON-FORK-ERROR
+include(CheckCSourceCompiles)
+check_c_source_compiles("
+#define Py_BUILD_CORE 1
+#include <Python.h>
+#if PY_VERSION_HEX >= 0x030C0000
+#include \"internal/pycore_interp.h\"
+#else
+#include \"internal/pycore_runtime.h\"
+#endif
+int main(void) {
+#if defined(Py_GIL_DISABLED)
+    return 0;
+#elif PY_VERSION_HEX >= 0x030C0000
+    return sizeof(((PyInterpreterState*)0)->ceval.gil->switch_mutex) ? 0 : 1;
+#else
+    return sizeof(((struct _ceval_runtime_state*)0)->gil.switch_mutex) ? 0 : 1;
+#endif
+}" QORE_PYTHON_HAVE_INTERNAL_C_HEADERS)
+if (QORE_PYTHON_HAVE_INTERNAL_C_HEADERS)
+    message(STATUS "Python internal headers found: a fork() child that cannot use Python raises PYTHON-FORK-ERROR")
+else()
+    message(WARNING "Python internal headers (internal/pycore_*.h) not found: a child process created with fork() "
+        "while another thread held the GIL waits forever on its first use of Python")
+endif()
+
 # Check for C++17 (required for Python 3.13+ and inline thread_local).
 include(CheckCXXCompilerFlag)
 CHECK_CXX_COMPILER_FLAG("-std=c++17" COMPILER_SUPPORTS_CXX17)
@@ -86,6 +114,11 @@ set(CPP_SRC
     src/ModuleNamespace.cpp
     src/QorePythonStackLocationHelper.cpp
 )
+
+if (QORE_PYTHON_HAVE_INTERNAL_C_HEADERS)
+    set(CPP_SRC ${CPP_SRC} src/python_fork_gil.c)
+    add_definitions(-DQORE_PYTHON_HAVE_FORK_GIL_CHECK=1)
+endif()
 
 qore_wrap_qpp_value(QPP_SOURCES METALIST QPP_META_SRC ${QPP_SRC})
 

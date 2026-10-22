@@ -87,6 +87,11 @@ void QorePythonStackLocationHelper::checkInit() const {
     }
     init = true;
 
+    // no Python stack can be read if Python cannot be used
+    if (python_shutdown) {
+        return;
+    }
+
     QorePythonHelper qph(py_pgm);
 
     // Resolve callables in the current interpreter. A cached main-interpreter

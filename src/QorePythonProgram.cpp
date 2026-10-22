@@ -466,6 +466,10 @@ void QorePythonProgram::releasePersistentReference(QorePythonManualReferenceHold
         persistent_references.erase(reference);
         object = reference->release();
     }
+    // in a child of fork() that cannot use Python, the reference is left: the GIL cannot be acquired
+    if (python_fork_lost) {
+        return;
+    }
     // Finalization clears every registered reference before invalidating this context.
     assert(!object || (valid && qph.isValid()));
     Py_XDECREF(object);
@@ -514,6 +518,13 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
         qpgm->waitForTerminationAndDeref(xsink);
     }
     qpgm = nullptr;
+
+    // in a child of fork() that cannot use Python, the interpreter is left as it is: the GIL cannot be acquired,
+    // and the threads counted as using it do not exist in the child
+    if (python_fork_lost) {
+        valid = false;
+        return;
+    }
 
     if (interpreter) {
         {
@@ -782,6 +793,18 @@ bool QorePythonProgram::haveGilUnlocked(PyThreadState* check_tstate) {
 }
 
 int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSink* xsink) {
+    // the GIL is not held if Python cannot be used (see QorePythonGilHelper::isInitialized())
+    if (!qpgh.isInitialized()) {
+        if (xsink) {
+            if (python_fork_lost) {
+                qore_python_raise_fork_error(xsink);
+            } else {
+                xsink->raiseException("PYTHON-COMPILE-ERROR", "cannot create a Python interpreter: the Python "
+                    "library has been shut down");
+            }
+        }
+        return -1;
+    }
 #ifndef Py_GIL_DISABLED
 #if PY_VERSION_HEX >= 0x030D0000
     // Python 3.13+: Use our own tracking since Python's TSS can be cleared by external modules

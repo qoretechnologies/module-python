@@ -30,6 +30,12 @@
     - a child process created with @ref Qore::fork() "fork()" while another thread holds a lock of the module can
       use %Python, as long as no other thread held the %Python GIL; previously the child could wait forever for a lock
       held by a thread that did not exist in it
+    - a child process created with @ref Qore::fork() "fork()" while another thread held the %Python GIL, which can
+      never be released in the child, raises a \c PYTHON-FORK-ERROR exception when it calls %Python or creates a
+      %Python interpreter, and exits normally; previously it waited forever for the GIL.  If the thread that called
+      @ref Qore::fork() "fork()" was called from %Python, the child cannot return to %Python code: it writes an error
+      message to \c stderr and exits with status 1.  This requires the internal C headers of %Python
+      (\c internal/pycore_*.h, installed with the %Python headers) when the module is built.
     - a %Qore callable (closure or call reference) called from %Python runs without the %Python GIL, as %Qore
       functions and methods called from %Python do; previously a callable that waited for another %Python thread
       waited forever

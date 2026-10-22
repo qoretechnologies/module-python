@@ -69,6 +69,21 @@ DLLLOCAL extern QorePythonClass* QC_PYTHONBASEOBJECT;
 DLLLOCAL extern qore_classid_t CID_PYTHONBASEOBJECT;
 
 DLLLOCAL extern bool python_shutdown;
+
+//! set in a child process created with fork() while a thread that does not exist in the child held the GIL
+/** The GIL can never be acquired in such a process, so Python is not used in it at all, as after it has been shut
+    down (python_shutdown is also set): a call to Python raises PYTHON-FORK-ERROR, and the process exits if its thread
+    returns to Python code (see qore_python_fork_lost_exit()).
+*/
+DLLLOCAL extern bool python_fork_lost;
+
+//! raises PYTHON-FORK-ERROR for a call to Python in a process in which python_fork_lost is set
+DLLLOCAL void qore_python_raise_fork_error(ExceptionSink* xsink);
+
+//! ends a process in which python_fork_lost is set when its thread returns to Python code
+/** The thread cannot continue: Python code needs the GIL.  Writes a message to stderr and calls _exit(1).
+*/
+[[noreturn]] DLLLOCAL void qore_python_fork_lost_exit();
 DLLLOCAL bool _qore_has_gil(PyThreadState* t_state);
 
 /** NOTE: depends on Python internals to work around limitations with the GIL and multiple thread states with multiple
@@ -359,6 +374,10 @@ public:
     }
 
     DLLLOCAL ~QorePythonReleaseGilHelper() {
+        // the thread returns to Python code, which cannot run in a child of fork() whose GIL is lost
+        if (python_fork_lost) {
+            qore_python_fork_lost_exit();
+        }
         printd(5, "~QorePythonReleaseGilHelper: acquiring GIL with saved tstate: %p\n", _save);
         // CRITICAL: Check if the GIL was already reacquired (with a different thread state)
         // by nested code during the Qore method execution. If so, we just need to swap to

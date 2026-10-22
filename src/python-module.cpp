@@ -22,10 +22,14 @@
 #include "python-module.h"
 
 #include <pthread.h>
+#include <unistd.h>
 #include <cstring>
 #include "QC_PythonProgram.h"
 #include "QorePythonProgram.h"
 #include "QorePythonStackLocationHelper.h"
+#include "python_fork_gil.h"
+
+#include <qore/QoreForkHandler.h>
 
 #include <string>
 
@@ -103,6 +107,37 @@ static mcmap_t mcmap = {
 static bool python_needs_shutdown = false;
 static bool python_initialized = false;
 bool python_shutdown = false;
+bool python_fork_lost = false;
+
+#ifdef QORE_PYTHON_HAVE_FORK_GIL_CHECK
+// the fork handler that finds whether Python can be used in the child (see QoreForkHandler.h)
+static QoreForkHandlerRegistration* python_gil_fork_reg = nullptr;
+
+// runs in the child of fork() before anything else runs in it: if a thread that does not exist in the child held the
+// GIL, it can never be acquired, and the first use of Python would wait for it forever; Python is then not used in
+// the child at all, as after it has been shut down, and a call raises PYTHON-FORK-ERROR
+static void python_gil_fork_child(void*) {
+    if (!python_shutdown && Py_IsInitialized() && qore_python_fork_child_gil_lost()) {
+        python_fork_lost = true;
+        python_shutdown = true;
+    }
+}
+#endif
+
+void qore_python_raise_fork_error(ExceptionSink* xsink) {
+    xsink->raiseException("PYTHON-FORK-ERROR", "Python cannot be used in this process: it was created with fork() "
+        "while another thread held the Python GIL, which no thread can release in this process");
+}
+
+void qore_python_fork_lost_exit() {
+    static const char msg[] = "python module: a child process created with fork() cannot return to Python code: "
+        "another thread held the Python GIL when the process was created, and no thread can release it in this "
+        "process\n";
+    // only async-signal-safe calls: the process can hold any lock
+    ssize_t rc = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void)rc;
+    _exit(1);
+}
 
 int python_u_tld_key = -1;
 int python_qobj_key = -1;
@@ -165,6 +200,12 @@ static void check_python_version() {
 }
 
 static void python_module_shutdown() {
+    // in a child process that cannot use Python (see python_gil_fork_child()), it is not finalized: acquiring the
+    // GIL would wait forever
+    if (python_fork_lost) {
+        python_needs_shutdown = false;
+        return;
+    }
     if (python_initialized) {
         _QORE_PYTHREAD_STATE_SWAP(nullptr);
         _qore_acquire_thread_state(mainThreadState);
@@ -444,10 +485,26 @@ void QorePythonQoreEntryHelper::applySandbox() {
 
 static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) {
     // registered in the initialization function and not while static objects are constructed (see QoreForkHandler.h)
-    if (QorePythonProgram::registerForkHandlers() || qpy_register_fork_handlers()) {
+    if (QorePythonProgram::registerForkHandlers()) {
         xsink.outOfMemory();
         return;
     }
+    if (qpy_register_fork_handlers()) {
+        QorePythonProgram::unregisterForkHandlers();
+        xsink.outOfMemory();
+        return;
+    }
+#ifdef QORE_PYTHON_HAVE_FORK_GIL_CHECK
+    // only reads the state of the GIL in the child
+    python_gil_fork_reg = qore_register_fork_handler(QFR_MODULE_RESET, "python_gil", nullptr, nullptr,
+        python_gil_fork_child, nullptr);
+    if (!python_gil_fork_reg) {
+        qpy_unregister_fork_handlers();
+        QorePythonProgram::unregisterForkHandlers();
+        xsink.outOfMemory();
+        return;
+    }
+#endif
     QoreStringNode* err = python_module_init_intern(false);
     if (err) {
         xsink.raiseException("MODULE-INIT-ERROR", err);
@@ -733,6 +790,10 @@ static void python_module_delete() {
         PNS = nullptr;
     }
     python_module_shutdown();
+#ifdef QORE_PYTHON_HAVE_FORK_GIL_CHECK
+    qore_unregister_fork_handler(python_gil_fork_reg);
+    python_gil_fork_reg = nullptr;
+#endif
     qpy_unregister_fork_handlers();
     QorePythonProgram::unregisterForkHandlers();
 }
@@ -929,7 +990,9 @@ QorePythonHelper::QorePythonHelper(const QorePythonProgram* pypgm, ExceptionSink
             old_state(pypgm->setContext(xsink != nullptr)), new_pypgm(pypgm) {
     //printd(5, "QorePythonHelper::QorePythonHelper() new: %p old: %p\n", pypgm, old_pgm);
     if (xsink) {
-        if (wasInterrupted()) {
+        if (python_fork_lost) {
+            qore_python_raise_fork_error(xsink);
+        } else if (wasInterrupted()) {
             xsink->raiseException("PROGRAM-INTERRUPTED",
                 "program execution was interrupted while acquiring the Python GIL");
         } else if (!old_state.valid && !new_pypgm->isValid()) {

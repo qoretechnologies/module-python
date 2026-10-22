@@ -1,0 +1,145 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# Child processes created with fork() while other threads use Python.  The child of each test exits with exit(), so
+# that the module's cleanup runs in it, and with it the exit-time code of every module loaded in the process: a fork
+# test runs in its own process, whose loaded modules it controls.
+
+%modern
+%no-child-restrictions
+
+%requires python
+%requires QUnit
+%requires FsUtil
+
+%exec-class PythonForkTest
+
+class PythonForkTest inherits QUnit::Test {
+    constructor() : Test("python fork test", "1.0", \ARGV) {
+        addTestCase("fork() while another thread holds the GIL", \forkGilHeldTest());
+        addTestCase("fork() called from Python while another thread holds the GIL", \forkReturnToPythonTest());
+        set_return_value(main());
+    }
+
+    # a child process created with fork() while another thread holds the GIL cannot use Python: the GIL can never be
+    # released in the child.  The first use of Python raises PYTHON-FORK-ERROR, and the child exits normally.
+    # Previously the child waited forever for the GIL on its first use of Python (the test runner's time limit is only
+    # a guard).
+    forkGilHeldTest() {
+        if (!Option::HAVE_FORK) {
+            testSkip("fork() is not available");
+        }
+        if (Python::FreeThreading) {
+            testSkip("there is no GIL with free-threading (PEP 703)");
+        }
+        TmpDir tmp("python-fork-gil-");
+        string go = tmp.path + DirSep + "go";
+        string ready = tmp.path + DirSep + "ready";
+        string block = tmp.path + DirSep + "block";
+        string result = tmp.path + DirSep + "result";
+        # the thread holds the GIL in C calls (ctypes.PyDLL does not release it): once the parent has returned to Qore,
+        # it signals that it holds the GIL with a write and then blocks in a read until the parent writes; the FIFOs
+        # are opened for reading and writing, so that opening them never blocks and a read waits for data
+        PythonProgram p("
+import ctypes
+import os
+from threading import Thread
+
+def make_fifos(*paths):
+    for path in paths:
+        os.mkfifo(path)
+
+def hold_gil(go, ready, block):
+    libc = ctypes.PyDLL(None)
+    go_fd = os.open(go, os.O_RDWR)
+    ready_fd = os.open(ready, os.O_RDWR)
+    block_fd = os.open(block, os.O_RDWR)
+    buf = ctypes.create_string_buffer(1)
+    def target():
+        # os.read() releases the GIL: Thread.start() returns, and the parent returns to Qore
+        os.read(go_fd, 1)
+        libc.write(ready_fd, b'x', 1)
+        libc.read(block_fd, buf, 1)
+        for fd in (go_fd, ready_fd, block_fd):
+            os.close(fd)
+    thread = Thread(target = target)
+    thread.start()
+    return thread
+
+def join(thread):
+    thread.join()
+
+def add(x, y):
+    return x + y
+", "fork-gil.py");
+        p.callFunction("make_fifos", go, ready, block, result);
+        auto thread = p.callFunction("hold_gil", go, ready, block);
+        {
+            File go_file();
+            go_file.open2(go, O_WRONLY);
+            go_file.write(<78>);
+        }
+        # the thread holds the GIL when the byte can be read
+        {
+            ReadOnlyFile ready_file(ready);
+            assertEq(<78>, ready_file.readBinary(1));
+        }
+        int pid = fork();
+        if (!pid) {
+            # the child reports the errors of a call in an existing interpreter and of the creation of a new one
+            list<string> errors;
+            try {
+                p.callFunction("add", 1, 2);
+                errors += "no error";
+            } catch (hash<ExceptionInfo> ex) {
+                errors += ex.err;
+            }
+            try {
+                PythonProgram child("x = 1", "fork-gil-child.py");
+                errors += "no error";
+            } catch (hash<ExceptionInfo> ex) {
+                errors += ex.err;
+            }
+            File result_file();
+            result_file.open2(result, O_WRONLY);
+            result_file.write(errors.join(","));
+            # the result is complete when the child has exited, which closes the FIFO: the module must not wait for
+            # the GIL when it is deleted
+            Qore::exit(0);
+        }
+        assertGt(0, pid);
+        # the parent continues: the thread is released, and Python is used again
+        {
+            File block_file();
+            block_file.open2(block, O_WRONLY);
+            block_file.write(<78>);
+        }
+        p.callFunction("join", thread);
+        assertEq(3, p.callFunction("add", 1, 2));
+        # the parent reads until the child has exited
+        ReadOnlyFile result_file(result);
+        string child_result;
+        while (*binary data = result_file.readBinary(4096)) {
+            child_result += data.toString();
+        }
+        assertEq("PYTHON-FORK-ERROR,PYTHON-FORK-ERROR", child_result);
+    }
+
+    # Python calls a Qore closure that calls fork() while another Python thread holds the GIL: in the child, the
+    # closure cannot return to Python code; the child writes a message to stderr and exits instead of waiting forever
+    # for the GIL.  The scenario runs in another process, whose stderr (with the child's) is read until both have
+    # ended.
+    forkReturnToPythonTest() {
+        if (!Option::HAVE_FORK) {
+            testSkip("fork() is not available");
+        }
+        if (Python::FreeThreading) {
+            testSkip("there is no GIL with free-threading (PEP 703)");
+        }
+        string script = get_script_dir() + "python-fork-return.q";
+        string output = backquote(sprintf("qore %s 2>&1", script));
+        assertRegex("parent: child started", output);
+        assertRegex("a child process created with fork\\(\\) cannot return to Python code", output);
+    }
+}
