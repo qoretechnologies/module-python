@@ -84,6 +84,38 @@ DLLLOCAL void qore_python_raise_fork_error(ExceptionSink* xsink);
 /** The thread cannot continue: Python code needs the GIL.  Writes a message to stderr and calls _exit(1).
 */
 [[noreturn]] DLLLOCAL void qore_python_fork_lost_exit();
+
+//! the thread state of the thread that calls Qore's fork() from Python code of the main interpreter
+/** Set by QorePythonProgram::callQoreFunction() while the thread calls Qore's fork() with the GIL released; the fork
+    handlers of the module then run Python's fork protocol for that fork(), as os.fork() does (see
+    qore_python_register_fork_protocol())
+*/
+DLLLOCAL extern thread_local PyThreadState* python_fork_protocol_tstate;
+
+//! registers the fork handlers that run Python's fork protocol for Qore's fork() called from Python code
+/** Called once in the module's initialization function; the handlers cannot be removed, so the module's code is
+    kept loaded until the process ends.
+
+    @return 0 for OK, -1 for an error; the error is described in @p err
+*/
+DLLLOCAL int qore_python_register_fork_protocol(QoreString& err);
+
+//! registers the functions that Python calls when it makes a fork() with its fork protocol (os.register_at_fork())
+/** Called with the GIL held when the qoreloader module is initialized in the main interpreter: they tell the fork
+    handlers of the module that Python recreates the GIL in the child.
+
+    @return 0 for OK, -1 if a Python exception was raised
+*/
+DLLLOCAL int qore_python_register_at_fork_functions();
+
+//! returns the interpreter of the given thread state
+DLLLOCAL static inline PyInterpreterState* qore_python_get_interpreter(PyThreadState* tstate) {
+#if PY_VERSION_HEX >= 0x03090000
+    return PyThreadState_GetInterpreter(tstate);
+#else
+    return tstate->interp;
+#endif
+}
 DLLLOCAL bool _qore_has_gil(PyThreadState* t_state);
 
 /** NOTE: depends on Python internals to work around limitations with the GIL and multiple thread states with multiple

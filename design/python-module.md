@@ -322,6 +322,12 @@ The GIL interplay, measured on Linux with Python 3.14 (GIL build):
 - The child handler `python_gil` (`QFR_MODULE_RESET`, child only, python-module.cpp) finds which case applies with
   `qore_python_fork_child_gil_lost()` (src/python_fork_gil.c): the GIL is lost if one of its mutexes is held (a thread
   was taking or dropping it), or if it is locked and its last holder is not a thread state of the forking thread.
+  The check is skipped in a fork that Python makes with its fork protocol (`python_fork_protocol_running`, a
+  thread-local flag set from the at-fork "before" function that `qore_python_register_at_fork_functions()` registers
+  in the main interpreter, and by the protocol handlers below): the forking thread holds the GIL, and
+  `PyOS_AfterFork_Child()` recreates it, so a mutex held by a thread waiting for the GIL (which takes it from time to
+  time) does not make it lost.  The debug-build test hooks `qoreloader._test_hold_gil_mutex()` /
+  `_test_release_gil_mutex()` hold the mutex in a thread for the test of this case.
   That file is C, compiled with CPython's internal headers (C headers, installed with the Python headers), which
   give the layout of the GIL of every version (the main interpreter's `ceval.gil` in 3.12+, `_PyRuntime.ceval.gil`
   before); CMake compiles it only if the headers are found (`QORE_PYTHON_HAVE_FORK_GIL_CHECK`).  If the GIL is lost,
@@ -347,10 +353,29 @@ The GIL interplay, measured on Linux with Python 3.14 (GIL build):
   thread states other than the finalizing one when it is deleted in the child (states of the parent's Python
   threads) is left in memory instead of being ended: the threading module, which is not told of a fork() that Python
   does not make, would wait for those threads forever in `Py_EndInterpreter()`.
-- In a Python process hosting Qore, a child created with Qore's `fork()` from Python code keeps the Python state of
-  the parent's threads, as with any `fork()` that Python does not make (ex: through ctypes): Python's own exit
-  (`Py_FinalizeEx()`, `threading._shutdown()`) waits for the parent's non-daemon threads forever.  Python code should
-  use `os.fork()`, which runs Python's fork protocol (`PyOS_BeforeFork()` / `PyOS_AfterFork_Child()`).
+- Qore's `fork()` called from Python code of the main interpreter (a Python process hosting Qore) runs Python's fork
+  protocol, as `os.fork()` does: `callQoreFunction()` recognizes Qore's `fork()` and sets the thread-local
+  `python_fork_protocol_tstate` to the thread state it releases for the call (`QorePythonForkProtocolHelper`), and
+  handlers registered with `pthread_atfork()` (`qore_python_register_fork_protocol()`) run the protocol.
+  `pthread_atfork()` runs prepare handlers in the reverse order of their registration and parent/child handlers in
+  the order of their registration, and the module registers them after the Qore library's: the prepare handler takes
+  the GIL again (with the saved thread state, as `~QorePythonReleaseGilHelper()` does) and calls `PyOS_BeforeFork()`
+  before Qore's handlers take their locks (the order of `os.fork()`); the parent and child handlers call
+  `PyOS_AfterFork_Parent()` / `PyOS_AfterFork_Child()` after Qore's handlers and release the GIL again.  Qore's
+  `fork()` stops its signal thread before `fork()`, so the GIL is not held while it waits for that thread.  The handlers
+  cannot be removed, so the module marks itself `RTLD_NODELETE`.  In the child, Python runs its at-fork functions,
+  and the threading module forgets the threads of the parent, so the child's exit does not wait for them.
+- The protocol is run only when the main interpreter is the only interpreter (checked with the GIL held, just
+  before `PyOS_BeforeFork()`; the module's interpreters share the main GIL, so none is created meanwhile):
+  `PyOS_AfterFork_Child()` deletes every other interpreter, which crashes the child in CPython 3.12 to 3.14 and hangs
+  it in 3.10 and 3.11 with `os.fork()` as well, also with no Qore code involved (CPython issue gh-139759).  With
+  interpreters of Qore present, Qore's `fork()` is made without the protocol: they can be used in the child, but
+  Python's own exit (`Py_FinalizeEx()`, `threading._shutdown()`) waits forever for the parent's non-daemon threads,
+  as with any `fork()` that Python does not make (ex: through ctypes, or Qore's `fork()` called from Qore code).
+  Follow-up once gh-139759 is fixed upstream: run the protocol with interpreters of Qore present, and make the module
+  forget, in the child, the interpreters that `PyOS_AfterFork_Child()` deleted (their programs invalid, their thread
+  states and object references dropped without being released); this cannot be reached or tested while CPython
+  crashes first.
 
 ## Python Shutdown Handling
 

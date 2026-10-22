@@ -21,6 +21,11 @@ class PythonForkTest inherits QUnit::Test {
         addTestCase("fork() called from Python while another thread holds the GIL", \forkReturnToPythonTest());
         addTestCase("os.fork() in an interpreter of Qore", \osForkTest());
         addTestCase("the child deletes an interpreter that another thread used", \forkInterpreterInUseTest());
+        addTestCase("Qore's fork() called from Python in a Python process", \hostedForkProtocolTest());
+        addTestCase("Qore's fork() called from Python in a Python process with an interpreter of Qore",
+            \hostedForkInterpreterTest());
+        addTestCase("os.fork() in a Python process while a thread holds the mutex of the GIL",
+            \hostedOsForkGilMutexTest());
         set_return_value(main());
     }
 
@@ -260,5 +265,167 @@ def add(x, y):
             child_result += data.toString();
         }
         assertEq("call: 3,thread: 5,deleted", child_result);
+    }
+
+    # Qore's fork() called from Python code in a Python process hosting Qore (the main interpreter) while a
+    # non-daemon thread runs: Python's fork protocol runs, as with os.fork(), so the at-fork functions of Python run in
+    # the parent and in the child, and the threading module of the child knows that only the thread calling fork()
+    # exists in it: the child can use Python and Qore and exit normally.  Previously Python was not told of the
+    # fork(): its at-fork functions did not run, the child still listed the thread of the parent, and its exit waited
+    # for it forever (the script kills such a child).
+    hostedForkProtocolTest() {
+        if (!Option::HAVE_FORK) {
+            testSkip("fork() is not available");
+        }
+        string output = runHosted("fork-protocol.py", "
+import os, sys, threading
+import qoreloader
+from qore.__root__.Qore import fork, sprintf
+
+events = []
+os.register_at_fork(before=lambda: events.append('before'), after_in_parent=lambda: events.append('parent'),
+    after_in_child=lambda: events.append('child'))
+release_r, release_w = os.pipe()
+result_r, result_w = os.pipe()
+thread = threading.Thread(target=lambda: os.read(release_r, 1))
+thread.start()
+pid = fork()
+if pid == 0:
+    os.close(result_r)
+    line = '%d %s %s\\n' % (len(threading.enumerate()), ','.join(events), sprintf('%d', 3))
+    os.write(result_w, line.encode())
+    os.close(result_w)
+    # waits for the non-daemon threads of this process
+    sys.exit(0)
+os.close(result_w)
+data = b''
+while not data.endswith(b'\\n'):
+    chunk = os.read(result_r, 256)
+    if not chunk:
+        break
+    data += chunk
+if not data.startswith(b'1 '):
+    # its exit would wait for the thread of the parent forever
+    os.kill(pid, 9)
+_, status = os.waitpid(pid, 0)
+os.write(release_w, b'x')
+thread.join()
+print('child: %s parent: %s status: %d' % (data.decode().strip(), ','.join(events), status))
+");
+        assertRegex("child: 1 before,child 3 parent: before,parent status: 0", output);
+    }
+
+    # Qore's fork() called from Python code in a Python process hosting Qore that has an interpreter of Qore (a
+    # PythonProgram): Python's fork protocol is not run, since Python crashes the child when it deletes the other
+    # interpreters in it (CPython issue gh-139759, also with os.fork()); the child can use the interpreter
+    hostedForkInterpreterTest() {
+        if (!Option::HAVE_FORK) {
+            testSkip("fork() is not available");
+        }
+        string output = runHosted("fork-interpreter.py", "
+import os, sys
+import qoreloader
+from qore.__root__.Qore import fork
+from qore.__root__.Python import PythonProgram
+
+p = PythonProgram('def f():\\n    return 42\\n', 'sub.py')
+result_r, result_w = os.pipe()
+pid = fork()
+if pid == 0:
+    os.close(result_r)
+    try:
+        msg = 'call: %r' % (p.callFunction('f'),)
+    except BaseException as e:
+        msg = 'call error: %s' % (type(e).__name__,)
+    del p
+    os.write(result_w, (msg + '\\n').encode())
+    os.close(result_w)
+    sys.exit(0)
+os.close(result_w)
+data = b''
+while True:
+    chunk = os.read(result_r, 256)
+    if not chunk:
+        break
+    data += chunk
+_, status = os.waitpid(pid, 0)
+print('child: %s status: %d' % (data.decode().strip(), status))
+");
+        assertRegex("child: call: 42 status: 0", output);
+    }
+
+    # os.fork() in a Python process hosting Qore while another thread holds the mutex of the GIL, as a thread waiting
+    # for the GIL does from time to time: Python recreates the GIL in the child of its fork protocol, so the child
+    # can use Python and Qore.  Previously the module found the GIL lost in the child: the call to Qore returned
+    # into Python code, so the child wrote a message and exited with status 1.  The mutex is held with a test hook of
+    # debug builds of the module.
+    hostedOsForkGilMutexTest() {
+        if (!Option::HAVE_FORK) {
+            testSkip("fork() is not available");
+        }
+        if (Python::FreeThreading) {
+            testSkip("there is no GIL with free-threading (PEP 703)");
+        }
+        string output = runHosted("os-fork-gil-mutex.py", "
+import os, sys
+import qoreloader
+from qore.__root__.Qore import sprintf
+
+if not hasattr(qoreloader, '_test_hold_gil_mutex'):
+    print('skip: the module has no test hooks (not a debug build)')
+    sys.exit(0)
+result_r, result_w = os.pipe()
+# this thread keeps the GIL while the hook's thread holds its mutex
+qoreloader._test_hold_gil_mutex()
+pid = os.fork()
+if pid == 0:
+    try:
+        msg = 'call: ' + sprintf('%d', 3)
+    except BaseException as e:
+        msg = 'call error: %s: %s' % (type(e).__name__, e)
+    os.write(result_w, (msg + '\\n').encode())
+    os._exit(0)
+qoreloader._test_release_gil_mutex()
+os.close(result_w)
+data = b''
+while True:
+    chunk = os.read(result_r, 1024)
+    if not chunk:
+        break
+    data += chunk
+_, status = os.waitpid(pid, 0)
+print('child: %s status: %d' % (data.decode().strip(), status))
+");
+        if (output =~ /^skip: /m) {
+            testSkip((output =~ x/^skip: (.*)$/m)[0]);
+        }
+        assertRegex("child: call: 3 status: 0", output);
+    }
+
+    #! runs Python code in a Python process hosting Qore with the module, and returns its output (stdout and stderr)
+    /** The Python executable is the one of the Python library of the module; the test is skipped if it is not found.
+    */
+    private string runHosted(string name, string code) {
+        PythonProgram p("
+import sys
+
+def python():
+    return '%s/bin/python%d.%d' % (sys.base_prefix, sys.version_info[0], sys.version_info[1])
+", "python-executable.py");
+        string python = p.callFunction("python");
+        if (!is_executable(python)) {
+            testSkip(sprintf("the Python executable %y was not found", python));
+        }
+        TmpDir tmp("python-hosted-");
+        # Python imports the module as the qoreloader extension module
+        symlink(get_module_hash().python.filename, tmp.path + DirSep + "qoreloader.so");
+        string script = tmp.path + DirSep + name;
+        {
+            File f();
+            f.open2(script, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+            f.write(code);
+        }
+        return backquote(sprintf("PYTHONPATH=%s %s -B -W ignore::DeprecationWarning %s 2>&1", tmp.path, python,
+            script));
     }
 }

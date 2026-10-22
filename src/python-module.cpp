@@ -23,6 +23,9 @@
 
 #include <pthread.h>
 #include <unistd.h>
+#ifndef _Q_WINDOWS
+#include <dlfcn.h>
+#endif
 #include <cstring>
 #include "QC_PythonProgram.h"
 #include "QorePythonProgram.h"
@@ -110,6 +113,15 @@ static bool python_initialized = false;
 bool python_shutdown = false;
 bool python_fork_lost = false;
 
+thread_local PyThreadState* python_fork_protocol_tstate = nullptr;
+
+namespace {
+// set on the thread calling fork() while Python's fork protocol runs for it: from PyOS_BeforeFork(), called by
+// os.fork() or by the prepare handler of the module for Qore's fork() called from Python code, until the end of
+// PyOS_AfterFork_Parent() or PyOS_AfterFork_Child(), which recreates the GIL in the child
+thread_local bool python_fork_protocol_running = false;
+}
+
 #ifdef QORE_PYTHON_HAVE_FORK_GIL_CHECK
 // the fork handler that finds whether Python can be used in the child (see QoreForkHandler.h)
 static QoreForkHandlerRegistration* python_gil_fork_reg = nullptr;
@@ -118,6 +130,12 @@ static QoreForkHandlerRegistration* python_gil_fork_reg = nullptr;
 // GIL, it can never be acquired, and the first use of Python would wait for it forever; Python is then not used in
 // the child at all, as after it has been shut down, and a call raises PYTHON-FORK-ERROR
 static void python_gil_fork_child(void*) {
+    // the thread calling fork() holds the GIL in Python's fork protocol, and Python recreates the GIL in the child:
+    // another thread holding one of its mutexes, as a thread waiting for the GIL does from time to time, does not
+    // stop the child from using Python
+    if (python_fork_protocol_running) {
+        return;
+    }
     if (!python_shutdown && Py_IsInitialized() && qore_python_fork_child_gil_lost()) {
         python_fork_lost = true;
         python_shutdown = true;
@@ -138,6 +156,161 @@ void qore_python_fork_lost_exit() {
     ssize_t rc = write(STDERR_FILENO, msg, sizeof(msg) - 1);
     (void)rc;
     _exit(1);
+}
+
+#ifndef _Q_WINDOWS
+namespace {
+// takes the GIL again with the thread state that the thread released to call Qore's fork() (see
+// QorePythonReleaseGilHelper), as the helper does when the call returns
+void python_fork_protocol_acquire(PyThreadState* tstate) {
+    PyEval_RestoreThread(tstate);
+    _qore_gil_held = true;
+    _qore_PyGILState_SetThisThreadState(tstate);
+}
+
+// releases the GIL again, as it was released for the call to Qore's fork()
+void python_fork_protocol_release() {
+    PyEval_SaveThread();
+    _qore_PyGILState_SetThisThreadState(nullptr);
+    _qore_gil_held = false;
+}
+
+// returns true if the main interpreter is the only interpreter; the GIL must be held
+bool python_only_main_interpreter() {
+    PyInterpreterState* interp = PyInterpreterState_Head();
+    return interp && interp == PyInterpreterState_Main() && !PyInterpreterState_Next(interp);
+}
+
+// Python's fork protocol for Qore's fork() called from Python code of the main interpreter, as os.fork() runs it:
+// Python runs its at-fork functions (os.register_at_fork()), and makes its state consistent in the child, where only
+// the thread calling fork() exists (the threading module forgets the other threads)
+//
+// It is only run when the main interpreter is the only interpreter: in the child, Python deletes the other
+// interpreters, which crashes the child (CPython issue gh-139759, also with os.fork()); with other interpreters,
+// Qore's fork() is made without the protocol, and they can be used in the child.  The interpreters of the module
+// share the GIL of the main interpreter, so no interpreter is created while it is held here (without a GIL, in a
+// free-threading build, an interpreter created by another thread at the same moment is not seen, as by os.fork()).
+//
+// pthread_atfork() runs the prepare handlers in the reverse order of their registration, and the parent and child
+// handlers in the order of their registration: these handlers, registered after those of the Qore library, take the
+// GIL before the library's handlers take its process-wide locks, as os.fork() does, and Python runs its code in the
+// parent and in the child after the library's locks have been released or initialized again
+void python_fork_protocol_prepare() {
+    PyThreadState* tstate = python_fork_protocol_tstate;
+    if (!tstate || python_fork_protocol_running || python_shutdown || !Py_IsInitialized()) {
+        return;
+    }
+    python_fork_protocol_acquire(tstate);
+    if (!python_only_main_interpreter()) {
+        python_fork_protocol_release();
+        return;
+    }
+    python_fork_protocol_running = true;
+    PyOS_BeforeFork();
+}
+
+void python_fork_protocol_parent() {
+    if (!python_fork_protocol_tstate || !python_fork_protocol_running) {
+        return;
+    }
+    PyOS_AfterFork_Parent();
+    python_fork_protocol_running = false;
+    python_fork_protocol_release();
+}
+
+void python_fork_protocol_child() {
+    if (!python_fork_protocol_tstate || !python_fork_protocol_running) {
+        return;
+    }
+    PyOS_AfterFork_Child();
+    python_fork_protocol_running = false;
+    python_fork_protocol_release();
+}
+}
+#endif
+
+int qore_python_register_fork_protocol(QoreString& err) {
+#ifndef _Q_WINDOWS
+    // the handlers cannot be removed, so the module must not be unloaded while the process runs: it is marked so that
+    // the dynamic loader keeps it
+    Dl_info info;
+    if (!dladdr(reinterpret_cast<void*>(&python_fork_protocol_prepare), &info) || !info.dli_fname) {
+        err.sprintf("cannot find the file of the module: %s", dlerror());
+        return -1;
+    }
+    void* handle = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD | RTLD_NODELETE);
+    if (!handle) {
+        err.sprintf("cannot keep the module '%s' loaded: %s", info.dli_fname, dlerror());
+        return -1;
+    }
+    int rc = pthread_atfork(python_fork_protocol_prepare, python_fork_protocol_parent, python_fork_protocol_child);
+    if (rc) {
+        err.sprintf("cannot register the fork handlers of the module: %s", strerror(rc));
+        return -1;
+    }
+#endif
+    return 0;
+}
+
+// the at-fork functions of the main interpreter (os.register_at_fork()): Python calls them when it makes a fork()
+// with its fork protocol, in os.fork() and for Qore's fork() called from Python code; they mark the fork for the
+// child handler of the GIL (python_gil_fork_child()), since Python recreates the GIL in the child
+static PyObject* qore_python_at_fork_before(PyObject*, PyObject*) {
+    python_fork_protocol_running = true;
+    Py_RETURN_NONE;
+}
+
+static PyObject* qore_python_at_fork_after_in_parent(PyObject*, PyObject*) {
+    python_fork_protocol_running = false;
+    Py_RETURN_NONE;
+}
+
+static PyObject* qore_python_at_fork_after_in_child(PyObject*, PyObject*) {
+    python_fork_protocol_running = false;
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef qore_python_at_fork_md[] = {
+    {"_qore_at_fork_before", qore_python_at_fork_before, METH_NOARGS, nullptr},
+    {"_qore_at_fork_after_in_parent", qore_python_at_fork_after_in_parent, METH_NOARGS, nullptr},
+    {"_qore_at_fork_after_in_child", qore_python_at_fork_after_in_child, METH_NOARGS, nullptr},
+};
+
+int qore_python_register_at_fork_functions() {
+    // registered once in the main interpreter, where os.fork() is allowed
+    static bool registered = false;
+    if (registered) {
+        return 0;
+    }
+    QorePythonReferenceHolder os(PyImport_ImportModule("os"));
+    if (!os) {
+        return -1;
+    }
+    QorePythonReferenceHolder register_at_fork(PyObject_GetAttrString(*os, "register_at_fork"));
+    if (!register_at_fork) {
+        return -1;
+    }
+    QorePythonReferenceHolder kwargs(PyDict_New());
+    if (!kwargs) {
+        return -1;
+    }
+    static const char* keys[] = {"before", "after_in_parent", "after_in_child"};
+    for (unsigned i = 0; i < 3; ++i) {
+        QorePythonReferenceHolder func(PyCFunction_New(&qore_python_at_fork_md[i], nullptr));
+        if (!func || PyDict_SetItemString(*kwargs, keys[i], *func)) {
+            return -1;
+        }
+    }
+    QorePythonReferenceHolder args(PyTuple_New(0));
+    if (!args) {
+        return -1;
+    }
+    QorePythonReferenceHolder rv(PyObject_Call(*register_at_fork, *args, *kwargs));
+    if (!rv) {
+        return -1;
+    }
+    registered = true;
+    return 0;
 }
 
 int python_u_tld_key = -1;
@@ -617,6 +790,24 @@ static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink)
         return;
     }
 #endif
+    {
+        // Python's fork protocol for Qore's fork() called from Python code; registered once per process
+        static bool fork_protocol_registered = false;
+        if (!fork_protocol_registered) {
+            QoreString err;
+            if (qore_python_register_fork_protocol(err)) {
+#ifdef QORE_PYTHON_HAVE_FORK_GIL_CHECK
+                qore_unregister_fork_handler(python_gil_fork_reg);
+                python_gil_fork_reg = nullptr;
+#endif
+                qpy_unregister_fork_handlers();
+                QorePythonProgram::unregisterForkHandlers();
+                xsink.raiseException("MODULE-INIT-ERROR", "%s", err.c_str());
+                return;
+            }
+            fork_protocol_registered = true;
+        }
+    }
     QoreStringNode* err = python_module_init_intern(false);
     if (err) {
         xsink.raiseException("MODULE-INIT-ERROR", err);

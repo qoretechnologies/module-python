@@ -28,6 +28,9 @@
 #include "QoreMetaPathFinder.h"
 #include "QorePythonProgram.h"
 #include "PythonQoreCallable.h"
+#ifdef QORE_PYTHON_HAVE_FORK_GIL_CHECK
+#include "python_fork_gil.h"
+#endif
 
 #include <dlfcn.h>
 
@@ -40,11 +43,44 @@ static int slot_qoreloader_exec(PyObject* m);
 static PyObject* qoreloader_load_java(PyObject* self, PyObject* args);
 static PyObject* qoreloader_issue_module_cmd(PyObject* self, PyObject* args);
 
+#if defined(DEBUG) && defined(QORE_PYTHON_HAVE_FORK_GIL_CHECK)
+// test hooks of debug builds (see python_fork_gil.h); only for the main interpreter, where the code of a Python process
+// hosting Qore runs: the code of Qore Programs, which can be sandboxed, runs in other interpreters
+static PyObject* qoreloader_test_hold_gil_mutex(PyObject* self, PyObject* args) {
+    if (qore_python_get_interpreter(PyThreadState_Get()) != PyInterpreterState_Main()) {
+        PyErr_SetString(PyExc_RuntimeError, "the test hook can only be called in the main interpreter");
+        return nullptr;
+    }
+    if (qore_python_test_hold_gil_mutex()) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject* qoreloader_test_release_gil_mutex(PyObject* self, PyObject* args) {
+    if (qore_python_get_interpreter(PyThreadState_Get()) != PyInterpreterState_Main()) {
+        PyErr_SetString(PyExc_RuntimeError, "the test hook can only be called in the main interpreter");
+        return nullptr;
+    }
+    if (qore_python_test_release_gil_mutex()) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    Py_RETURN_NONE;
+}
+#endif
+
 static PyMethodDef qoreloader_methods[] = {
     {"load_java", qoreloader_load_java, METH_VARARGS, "Import the given Java path to the parent Qore program if " \
         "possible; args: import_str (ex: 'org.qore.lang.restclient.*')"},
     {"issue_module_cmd", qoreloader_issue_module_cmd, METH_VARARGS, "Issue the given module command on the given " \
         "module; args: module_name, cmd"},
+#if defined(DEBUG) && defined(QORE_PYTHON_HAVE_FORK_GIL_CHECK)
+    {"_test_hold_gil_mutex", qoreloader_test_hold_gil_mutex, METH_NOARGS, "Test hook of debug builds: a thread "
+        "holds the mutex of the GIL until _test_release_gil_mutex() is called; the calling thread must not release "
+        "the GIL meanwhile"},
+    {"_test_release_gil_mutex", qoreloader_test_release_gil_mutex, METH_NOARGS, "Test hook of debug builds: "
+        "releases the mutex held since _test_hold_gil_mutex()"},
+#endif
     {nullptr, nullptr, 0, nullptr},
 };
 
@@ -340,6 +376,12 @@ static int slot_qoreloader_exec(PyObject *m) {
 
     // changes to os.environ in this interpreter are serialized with the environment changes of Qore
     if (qore_python_install_environment_functions()) {
+        return -1;
+    }
+
+    // the main interpreter is the only one that can fork() (os.fork(), and Qore's fork() called from Python code)
+    if (qore_python_get_interpreter(PyThreadState_Get()) == PyInterpreterState_Main()
+        && qore_python_register_at_fork_functions()) {
         return -1;
     }
 

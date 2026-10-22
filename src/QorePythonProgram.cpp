@@ -1959,6 +1959,32 @@ PythonQoreClass* QorePythonProgram::findCreatePythonClass(const QoreClass& cls, 
     return py_cls.release();
 }
 
+//! makes Qore's fork() called on this thread run Python's fork protocol (see python_fork_protocol_tstate)
+class QorePythonForkProtocolHelper {
+public:
+    //! @param tstate the thread state that the thread released to call Qore's fork(), or nullptr if the protocol is
+    //! not run (the function called is not fork(), or the code calling it does not run in the main interpreter)
+    DLLLOCAL QorePythonForkProtocolHelper(PyThreadState* tstate) : old_tstate(python_fork_protocol_tstate) {
+        python_fork_protocol_tstate = tstate;
+    }
+
+    DLLLOCAL ~QorePythonForkProtocolHelper() {
+        python_fork_protocol_tstate = old_tstate;
+    }
+
+    QorePythonForkProtocolHelper(const QorePythonForkProtocolHelper&) = delete;
+    QorePythonForkProtocolHelper& operator=(const QorePythonForkProtocolHelper&) = delete;
+
+private:
+    PyThreadState* old_tstate;
+};
+
+//! returns true if the function is Qore's fork() (see qore_python_register_fork_protocol())
+static bool is_qore_fork_function(const QoreExternalFunction& func) {
+    // the only builtin function of the Qore library with this name is Qore::fork()
+    return func.isBuiltin() && !func.getModuleName() && !strcmp(func.getName(), "fork");
+}
+
 struct func_capsule_t {
     const QoreExternalFunction& func;
     QorePythonProgram* py_pgm;
@@ -4480,6 +4506,16 @@ PyObject* QorePythonProgram::callQoreFunction(PyObject* self, PyObject* args) {
         return nullptr;
     }
 
+    // Qore's fork() called from Python code of the main interpreter runs Python's fork protocol, as os.fork() does
+    // (see qore_python_register_fork_protocol())
+    PyThreadState* fork_tstate = nullptr;
+    if (is_qore_fork_function(fc->func)) {
+        PyThreadState* tstate = PyThreadState_Get();
+        if (qore_python_get_interpreter(tstate) == PyInterpreterState_Main()) {
+            fork_tstate = tstate;
+        }
+    }
+
     // get Qore arguments
     ExceptionSink xsink;
     assert(PyTuple_Check(args));
@@ -4488,6 +4524,7 @@ PyObject* QorePythonProgram::callQoreFunction(PyObject* self, PyObject* args) {
         ValueHolder rv(&xsink);
         {
             QorePythonReleaseGilHelper prgh;
+            QorePythonForkProtocolHelper fph(fork_tstate);
             rv = fc->func.evalFunction(nullptr, *qargs, fc->py_pgm->getQoreProgram(), &xsink);
         }
         if (!xsink) {

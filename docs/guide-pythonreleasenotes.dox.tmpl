@@ -44,6 +44,14 @@
       previously the deletion waited forever for those threads, which do not exist in the child.  Such an interpreter
       is not finalized in the child if threads created by %Python in the parent had a state in it; it is left in
       memory.  New threads of the child that use an interpreter get their own %Python thread states.
+    - @ref Qore::fork() "fork()" called from %Python code in a %Python process using %Qore through the \c qoreloader
+      module runs %Python's fork protocol, as \c os.fork() does: the functions registered with
+      \c os.register_at_fork() run, and the child no longer keeps the %Python state of the threads of the parent;
+      previously the child's exit waited forever for the threads of the parent that are not daemon threads.  While
+      %Python interpreters of %Qore exist in the process (@ref Python::PythonProgram "PythonProgram" objects, or
+      @ref Qore::Program "Program" objects using %Python), the fork is made as before, since %Python's fork protocol
+      crashes the child then (<a href="https://github.com/python/cpython/issues/139759">CPython issue 139759</a>,
+      which \c os.fork() also has); see @ref python_fork
     - a child process created with @ref Qore::fork() "fork()" while another thread held the %Python GIL, which can
       never be released in the child, raises a \c PYTHON-FORK-ERROR exception when it calls %Python or creates a
       %Python interpreter, and exits normally; previously it waited forever for the GIL.  If the thread that called

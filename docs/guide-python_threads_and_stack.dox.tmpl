@@ -71,10 +71,20 @@ p.callFunction("join", t);
       GIL when the process was created: the GIL can never be released in the child, so a call to %Python there raises a
       \c PYTHON-FORK-ERROR exception, and if the thread that called @ref Qore::fork() "fork()" was called from %Python,
       the child cannot return to %Python code: it writes an error message to \c stderr and exits with status 1
-    - in a %Python process that uses %Qore through the \c qoreloader module, %Python code should create child processes
-      with \c os.fork(), which %Python supports in its main interpreter: a child created with
-      @ref Qore::fork() "fork()" keeps the %Python state of the threads of the parent, and %Python's own exit then waits
-      for them forever
+    - in a %Python process that uses %Qore through the \c qoreloader module, @ref Qore::fork() "fork()" called from
+      %Python code runs %Python's fork protocol, as \c os.fork() does: the functions registered with
+      \c os.register_at_fork() run, and in the child, %Python knows that only the calling thread exists in it, so its
+      exit does not wait for the threads of the parent
+    - this is not done while %Python interpreters of %Qore exist in such a process
+      (@ref Python::PythonProgram "PythonProgram" objects, or @ref Qore::Program "Program" objects using %Python): in
+      the child of its fork protocol, %Python deletes all interpreters but its main one, which crashes the child
+      (<a href="https://github.com/python/cpython/issues/139759">CPython issue 139759</a>).  The child of
+      @ref Qore::fork() "fork()" can then use the interpreters, but it keeps the %Python state of the threads of the
+      parent: %Python's own exit in the child waits forever for the threads of the parent that are not daemon threads.
+      For the same reason, \c os.fork() in such a process crashes the child while interpreters of %Qore exist.
+    - in a %Qore process, the module initializes %Python while it holds the lock of the process environment (see
+      @ref python_environment), so code that %Python runs while it initializes (\c sitecustomize, \c .pth files) must
+      not create a process with \c fork()
 
     @section python_environment The Process Environment
 

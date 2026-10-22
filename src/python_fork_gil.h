@@ -36,6 +36,20 @@ extern "C" {
 */
 int qore_python_fork_child_gil_lost(void);
 
+#ifdef DEBUG
+/* Test hooks (debug builds only): a thread of the module holds the mutex of the GIL, as a thread waiting for the GIL
+   does from time to time, until qore_python_test_release_gil_mutex() is called.  Returns 0 once the mutex is held,
+   or -1 for an error, with errno set.  Called with the GIL held; the thread holding the GIL must neither release it
+   nor take it again while the mutex is held, since both need the mutex.
+*/
+int qore_python_test_hold_gil_mutex(void);
+
+/* Releases the mutex held since qore_python_test_hold_gil_mutex(), and waits for the thread to end; returns 0, or
+   -1 for an error, with errno set.
+*/
+int qore_python_test_release_gil_mutex(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
