@@ -21,6 +21,7 @@
 
 #include "PythonQoreCallable.h"
 #include "QorePythonProgram.h"
+#include "QorePythonStackLocationHelper.h"
 
 static int qore_callable_init(PyObject* self, PyObject* args, PyObject* kwds);
 static PyObject* qore_callable_new(PyTypeObject* type, PyObject* args, PyObject* kw);
@@ -151,19 +152,44 @@ PyObject* qore_callable_call(PyQoreCallable* self, PyObject* args, PyObject* kwa
     if (!qeh.check()) {
         return nullptr;
     }
+    // the thread state that Python called us with; it must be current again before returning
+    PyThreadState* entry_tstate = _qore_safe_thread_state_get();
+
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
 
     ExceptionSink xsink;
-    ReferenceHolder<QoreListNode> qargs(qore_python_pgm->getQoreListFromTuple(&xsink, args), &xsink);
-    if (!xsink) {
-        ValueHolder rv(self->callable->execValue(*qargs, &xsink), &xsink);
+    {
+        QorePythonHelper qph(qore_python_pgm, &xsink);
         if (!xsink) {
-            QorePythonReferenceHolder py_rv(qore_python_pgm->getPythonValue(*rv, &xsink));
+            ReferenceHolder<QoreListNode> qargs(qore_python_pgm->getQoreListFromTuple(&xsink, args), &xsink);
             if (!xsink) {
-                return py_rv.release();
+                ValueHolder rv(&xsink);
+                {
+                    // the callable runs Qore code, which can wait for other Python threads, so it runs without the
+                    // GIL, as Qore methods and functions called from Python do
+                    QorePythonReleaseGilHelper prgh;
+
+                    QorePythonStackLocationHelper slh(qph.getOldProgram());
+
+                    rv = self->callable->execValue(*qargs, &xsink);
+                }
+                if (!xsink) {
+                    QorePythonReferenceHolder py_rv(qore_python_pgm->getPythonValue(*rv, &xsink));
+                    if (!xsink) {
+                        assert(py_rv);
+                        return py_rv.release();
+                    }
+                }
             }
         }
     }
+
+    // the exception must be raised in the thread state that Python called us with
+    PyThreadState* exit_tstate = _qore_safe_thread_state_get();
+    if (exit_tstate != entry_tstate) {
+        PyThreadState_Swap(entry_tstate);
+    }
+
     assert(xsink);
     qore_python_pgm->raisePythonException(xsink);
     return nullptr;

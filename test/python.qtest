@@ -82,6 +82,7 @@ class PythonTest inherits Test {
         addTestCase("type conversion test", \typeConversionTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
+        addTestCase("a Qore callable runs without the GIL", \callableGilTest());
         # Set return value for compatibility with test harnesses that check the return value
         set_return_value(main());
     }
@@ -217,6 +218,36 @@ def py_lock_across_calls(m):
 
         # the Python threads are no longer registered with Qore once they have ended
         assertEq(threads, num_threads(), "the ended Python threads are deregistered");
+    }
+
+    # a Qore callable called from Python runs without the GIL, as Qore methods and functions do, so that it can wait
+    # for another Python thread.  Previously it ran with the GIL held, and a callable waiting for a Python thread
+    # waited forever (the test runner's time limit is only a guard).
+    callableGilTest() {
+        if (Python::FreeThreading) {
+            testSkip("Python threads in sub-interpreters not supported with free-threading (PEP 703)");
+        }
+        PythonProgram p("
+from threading import Thread
+
+def call_waiting(c, running, done):
+    # the thread waits until the callable runs, then returns to Python code, which needs the GIL
+    def target():
+        running.get()
+        done.push('pushed by a Python thread')
+    thread = Thread(target = target)
+    thread.start()
+    rv = c()
+    thread.join()
+    return rv
+", "callable-gil.py");
+        Queue running();
+        Queue done();
+        code c = auto sub () {
+            running.push(True);
+            return done.get();
+        };
+        assertEq("pushed by a Python thread", p.callFunction("call_waiting", c, running, done));
     }
 
     moduleSpecFailureTest() {

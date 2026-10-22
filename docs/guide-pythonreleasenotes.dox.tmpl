@@ -19,6 +19,9 @@
       reference to a %Qore callable; such a thread is now registered with %Qore while it runs, so the %Qore objects
       it creates are kept and the %Qore resources it acquires (ex: a lock) stay its own from one call to the next, as
       in a %Qore thread, and it is deregistered when it ends
+    - a %Qore callable (closure or call reference) called from %Python runs without the %Python GIL, as %Qore
+      functions and methods called from %Python do; previously a callable that waited for another %Python thread
+      waited forever
     - fixed incomplete finalization of Python subinterpreters, including atexit hooks, free-threaded builds,
       and destruction on a different native thread
     - fixed a hang finalizing a Python subinterpreter with Python 3.12 and earlier on a native thread other than the
