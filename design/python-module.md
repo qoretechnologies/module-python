@@ -218,6 +218,18 @@ it belongs to; a C++ `thread_local` object deregisters such a thread when the na
 `thread_local` destructor can run after the library's own thread-local storage has been released, in which case the
 thread cannot be deregistered and its Qore thread entry is not reused.
 
+### Sandbox of threads created by Python
+
+A thread that Python creates has no Qore caller, so no sandbox would govern the Qore code that it calls; a thread
+that Python starts from Qore code does not inherit the starting code's sandbox the way `q_start_thread()` threads do.
+On such a thread, `QorePythonQoreEntryHelper` captures, for each call, the sandbox of the Qore Program that owns the
+interpreter running on the thread (`QorePythonProgram::getContext()`), as it is when the call is made, and applies it
+with `QoreSandboxCaptureHelper` as the outermost caller.  The sandbox is resolved per call because it is often
+attached after the interpreter exists: a child Program inherits the python module of its parent, and so gets its
+interpreter, when it is constructed, before the creator calls `Program::setSandboxManager()`.  If the Program has no
+sandbox, the sandbox captured when the interpreter was created (the creating code's, `QorePythonProgram::sandbox`)
+applies.  On a Qore thread, the sandbox of the thread's own callers governs the call, as for any synchronous call.
+
 ## Python Shutdown Handling
 
 ### The Problem

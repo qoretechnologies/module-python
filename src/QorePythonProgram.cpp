@@ -123,6 +123,9 @@ QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
 
 QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
         : qpgm(qpgm), pyns(pyns), save_object_callback(nullptr) {
+    // the code of the interpreter on threads that Python creates is governed by the sandbox of the code that creates
+    // the interpreter, which runs in the given Program
+    sandbox = std::make_shared<QoreSandboxCapture>();
     qpy_global_register(this);
 
     // Two-phase locking to avoid deadlocks:
@@ -172,6 +175,9 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
 
 QorePythonProgram::QorePythonProgram(const QoreString& source_code, const QoreString& source_label, int start,
         ExceptionSink* xsink) : save_object_callback(nullptr) {
+    // the code of the interpreter on threads that Python creates is governed by the sandbox of the code that creates
+    // the PythonProgram object
+    sandbox = std::make_shared<QoreSandboxCapture>();
     printd(5, "QorePythonProgram::QorePythonProgram() this: %p\n", this);
     qpy_global_register(this);
     TempEncodingHelper src_code(source_code, QCS_UTF8, xsink);

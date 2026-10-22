@@ -322,6 +322,30 @@ int qore_python_register_thread() {
     return 0;
 }
 
+void QorePythonQoreEntryHelper::applySandbox() {
+    if (!python_thread_registered) {
+        return;
+    }
+    QorePythonProgram* pypgm = QorePythonProgram::getContext();
+    if (!pypgm) {
+        return;
+    }
+    // the sandbox of the Program that owns the interpreter, as it is when the call is made (it can be attached after
+    // the interpreter was created), or else the sandbox of the code that created the interpreter
+    {
+        std::shared_ptr<QoreSandboxCapture> creation = pypgm->getSandboxCapture();
+        std::optional<QoreSandboxCaptureHelper> creation_helper;
+        if (creation) {
+            creation_helper.emplace(*creation);
+        }
+        QoreProgramContextHelper pch(pypgm->getQoreProgram());
+        sandbox = std::make_shared<QoreSandboxCapture>();
+    }
+    if (sandbox->isSandboxed()) {
+        sandbox_helper.emplace(*sandbox);
+    }
+}
+
 static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) {
     QoreStringNode* err = python_module_init_intern(false);
     if (err) {

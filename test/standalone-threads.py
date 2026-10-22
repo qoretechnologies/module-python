@@ -10,7 +10,7 @@ process.
 import threading
 
 import qoreloader  # noqa: F401
-from qore import num_threads, sprintf
+from qore import gettid, sprintf, thread_list
 from qore.__root__.Qore.Thread import Counter, Mutex
 
 
@@ -43,11 +43,12 @@ def lock_across_calls():
 
 
 def main():
-    threads = num_threads()
     assert in_thread(lambda: sprintf("%d", 73)) == "73", "a Qore function called in a thread"
     assert in_thread(construct_and_use) == 1, "a Qore object created and used in a thread"
     assert in_thread(lock_across_calls) == "unlocked", "a Qore lock held across calls in a thread"
-    assert num_threads() == threads, "the ended threads are deregistered from Qore"
+    tid = in_thread(gettid)
+    assert tid > 0, "the thread had a Qore thread ID"
+    assert tid not in thread_list(), "the ended thread is deregistered from Qore"
     print("Standalone Python threads PASS")
 
 

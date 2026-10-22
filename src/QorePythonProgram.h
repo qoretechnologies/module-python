@@ -258,6 +258,11 @@ public:
     }
 
     //! Returns true if the program is valid (does not require GIL)
+    //! Returns the sandbox of the code that created the interpreter, or nullptr if there is none
+    DLLLOCAL std::shared_ptr<QoreSandboxCapture> getSandboxCapture() const {
+        return sandbox;
+    }
+
     DLLLOCAL bool isValid() const {
         return valid;
     }
@@ -475,6 +480,13 @@ protected:
     // list of objects to dereference when classes are deleted
     typedef std::vector<PyObject*> obj_sink_t;
     obj_sink_t obj_sink;
+
+    //! the sandbox of the code that created the interpreter
+    /** Captured when the interpreter is created for a Qore Program or a PythonProgram object; it governs the threads
+        that Python creates in the interpreter when the Program that owns the interpreter has no sandbox of its own
+        (see QorePythonQoreEntryHelper).  nullptr for the global interpreter, which serves all Programs
+    */
+    std::shared_ptr<QoreSandboxCapture> sandbox;
 
     //! set to true if this object owns the Qore program reference
     bool owns_qore_program_ref = false;

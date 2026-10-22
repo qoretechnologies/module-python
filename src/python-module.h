@@ -42,6 +42,9 @@
 #include <qore/Qore.h>
 #include <qore/QoreSandboxManager.h>
 
+#include <memory>
+#include <optional>
+
 //! the name of the module
 #define QORE_PYTHON_MODULE_NAME "python"
 //! the name of the main Python namespace in Qore
@@ -441,6 +444,9 @@ DLLLOCAL int qore_python_thread_registration_init();
 class QorePythonQoreEntryHelper {
 public:
     DLLLOCAL QorePythonQoreEntryHelper() : valid(!qore_python_register_thread()) {
+        if (valid) {
+            applySandbox();
+        }
     }
 
     //! Returns true if Qore code can run on the current thread
@@ -459,6 +465,19 @@ public:
 
 private:
     bool valid;
+    //! the sandbox applied, kept while it is applied
+    std::shared_ptr<QoreSandboxCapture> sandbox;
+    //! applies @ref sandbox; destroyed before it
+    std::optional<QoreSandboxCaptureHelper> sandbox_helper;
+
+    //! On a thread that Python created, applies the sandbox of the interpreter running on it
+    /** Such a thread has no Qore caller whose sandbox could govern the Qore code that it calls: a thread that Python
+        starts from Qore code does not inherit a sandbox.  The sandbox of the Program that owns the interpreter, as it
+        is when the call is made, or else the sandbox of the code that created the interpreter, is captured for the
+        call and applies as its outermost caller, as the sandbox of the starting code does on a thread that Qore code
+        starts.  On a Qore thread, the sandbox of its own callers governs the call.
+    */
+    DLLLOCAL void applySandbox();
 
     QorePythonQoreEntryHelper(const QorePythonQoreEntryHelper&) = delete;
     QorePythonQoreEntryHelper& operator=(const QorePythonQoreEntryHelper&) = delete;

@@ -24,6 +24,13 @@
 
 %exec-class PythonTest
 
+#! reads a file; used to check the sandbox that governs Python threads
+class PythonSandboxTestReader {
+    static string readFile(string path) {
+        return ReadOnlyFile::readTextFile(path);
+    }
+}
+
 class PythonTest inherits Test {
     public {
         const ExprTests = (
@@ -83,6 +90,7 @@ class PythonTest inherits Test {
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
+        addTestCase("Python threads run under the sandbox of the interpreter's Program", \sandboxPythonThreadTest());
         # Set return value for compatibility with test harnesses that check the return value
         set_return_value(main());
     }
@@ -188,11 +196,15 @@ def py_lock_across_calls(m):
         m.unlock()
         return 'unlocked'
     return in_thread(f)
+
+def py_thread_tid():
+    import qoreloader
+    from qore import gettid
+    return in_thread(lambda: gettid())
 ");
         map pgm.issueModuleCmd("python", "export-func " + $1), ("py_call_callable", "py_call_function", "py_construct",
             "py_read_member", "py_import_class", "py_keep", "py_drop", "py_construct_and_use",
-            "py_lock_across_calls");
-        int threads = num_threads();
+            "py_lock_across_calls", "py_thread_tid");
 
         assertEq("callable x", pgm.callFunction("py_call_callable", string sub (string s) { return "callable " + s; },
             "x"), "a Qore callable called in a Python thread");
@@ -216,8 +228,10 @@ def py_lock_across_calls(m):
         assertEq("unlocked", pgm.callFunction("py_lock_across_calls", new Mutex()),
             "a lock acquired in a Python thread stays its own");
 
-        # the Python threads are no longer registered with Qore once they have ended
-        assertEq(threads, num_threads(), "the ended Python threads are deregistered");
+        # a Python thread is no longer registered with Qore once it has ended
+        int tid = pgm.callFunction("py_thread_tid");
+        assertTrue(tid > 0, "the Python thread had a Qore thread ID");
+        assertFalse(inlist(tid, thread_list()), "the ended Python thread is deregistered");
     }
 
     # a Qore callable called from Python runs without the GIL, as Qore methods and functions do, so that it can wait
@@ -248,6 +262,89 @@ def call_waiting(c, running, done):
             return done.get();
         };
         assertEq("pushed by a Python thread", p.callFunction("call_waiting", c, running, done));
+    }
+
+    # the code of the interpreter of a sandboxed Program is governed by its sandbox also on the threads that Python
+    # creates, where no Qore code calls it: a closure of an unrestricted Program called there is governed by it as when
+    # it is called on a Qore thread.  Previously such a thread ran with no sandbox, and the closure read a file that the
+    # sandbox forbade.  The sandbox is attached after the interpreter of the Program was created (the Program inherits
+    # the python module of this Program when it is constructed), so it is resolved when the call is made.
+    sandboxPythonThreadTest() {
+        if (Python::FreeThreading) {
+            testSkip("Python threads in sub-interpreters not supported with free-threading (PEP 703)");
+        }
+        TmpDir tmp("python-sandbox-thread-");
+        string dir = tmp.path;
+        string secret = dir + DirSep + "secret.txt";
+        {
+            File f();
+            f.open2(secret, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+            f.write("secret");
+        }
+
+        SandboxManager sm();
+        sm.setFilesystemDefaultPolicy(True);
+        sm.addFilesystemDeniedPath(dir);
+        Program pgm(PO_NO_CHILD_PO_RESTRICTIONS);
+        pgm.setSandboxManager(sm);
+        # a class of this unrestricted Program, which is governed by the sandbox of the code that calls it
+        pgm.importClass("PythonSandboxTestReader", "SandboxTest::Reader");
+        pgm.parse("%modern
+%requires python
+", "python-sandbox-thread");
+        pgm.issueModuleCmd("python", "import-ns SandboxTest st");
+        pgm.issueModuleCmd("python", "parse sandbox_thread.py from threading import Thread
+
+def read(path):
+    try:
+        return st.Reader.readFile(path)
+    except Exception as e:
+        return 'error: ' + repr(e)
+
+def py_read_here(path):
+    return read(path)
+
+def py_read_in_thread(path):
+    out = []
+    thread = Thread(target = lambda: out.append(read(path)))
+    thread.start()
+    thread.join()
+    return out[0]
+
+def call(reader, path):
+    try:
+        return reader(path)
+    except Exception as e:
+        return 'error: ' + repr(e)
+
+def py_call_here(reader, path):
+    return call(reader, path)
+
+def py_call_in_thread(reader, path):
+    out = []
+    thread = Thread(target = lambda: out.append(call(reader, path)))
+    thread.start()
+    thread.join()
+    return out[0]
+");
+        map pgm.issueModuleCmd("python", "export-func " + $1), ("py_read_here", "py_read_in_thread", "py_call_here",
+            "py_call_in_thread");
+
+        # the file can be read outside the sandbox
+        assertEq("secret", PythonSandboxTestReader::readFile(secret));
+        # on the calling Qore thread, the sandboxed code that calls the function governs it
+        *string here = pgm.callFunction("py_read_here", secret);
+        assertRegex("FILESYSTEM-ACCESS-DENIED", here, "the read on the Qore thread is denied");
+        # on a thread that Python created in the sandboxed program's interpreter
+        *string in_thread = pgm.callFunction("py_read_in_thread", secret);
+        assertRegex("FILESYSTEM-ACCESS-DENIED", in_thread, "the read on the Python thread is denied");
+
+        # a closure of this unrestricted Program given to the sandboxed code, which runs in this Program
+        code reader = string sub (string path) { return ReadOnlyFile::readTextFile(path); };
+        assertRegex("FILESYSTEM-ACCESS-DENIED", pgm.callFunction("py_call_here", reader, secret),
+            "the closure called on the Qore thread is denied");
+        assertRegex("FILESYSTEM-ACCESS-DENIED", pgm.callFunction("py_call_in_thread", reader, secret),
+            "the closure called on the Python thread is denied");
     }
 
     moduleSpecFailureTest() {
