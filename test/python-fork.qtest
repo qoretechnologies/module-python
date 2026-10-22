@@ -39,7 +39,8 @@ class PythonForkTest inherits QUnit::Test {
         string go = tmp.path + DirSep + "go";
         string ready = tmp.path + DirSep + "ready";
         string block = tmp.path + DirSep + "block";
-        string result = tmp.path + DirSep + "result";
+        # the child writes its result to a pipe, which the parent reads until the child has exited
+        hash<PipeInfo> result = File::getPipe();
         # the thread holds the GIL in C calls (ctypes.PyDLL does not release it): once the parent has returned to Qore,
         # it signals that it holds the GIL with a write and then blocks in a read until the parent writes; the FIFOs
         # are opened for reading and writing, so that opening them never blocks and a read waits for data
@@ -75,7 +76,7 @@ def join(thread):
 def add(x, y):
     return x + y
 ", "fork-gil.py");
-        p.callFunction("make_fifos", go, ready, block, result);
+        p.callFunction("make_fifos", go, ready, block);
         auto thread = p.callFunction("hold_gil", go, ready, block);
         {
             File go_file();
@@ -103,14 +104,13 @@ def add(x, y):
             } catch (hash<ExceptionInfo> ex) {
                 errors += ex.err;
             }
-            File result_file();
-            result_file.open2(result, O_WRONLY);
-            result_file.write(errors.join(","));
-            # the result is complete when the child has exited, which closes the FIFO: the module must not wait for
+            result.write.write(errors.join(","));
+            # the result is complete when the child has exited, which closes the pipe: the module must not wait for
             # the GIL when it is deleted
             Qore::exit(0);
         }
         assertGt(0, pid);
+        result.write.close();
         # the parent continues: the thread is released, and Python is used again
         {
             File block_file();
@@ -120,9 +120,8 @@ def add(x, y):
         p.callFunction("join", thread);
         assertEq(3, p.callFunction("add", 1, 2));
         # the parent reads until the child has exited
-        ReadOnlyFile result_file(result);
         string child_result;
-        while (*binary data = result_file.readBinary(4096)) {
+        while (*binary data = result.read.readBinary(4096)) {
             child_result += data.toString();
         }
         assertEq("PYTHON-FORK-ERROR,PYTHON-FORK-ERROR", child_result);
@@ -189,14 +188,10 @@ def run():
         if (Python::FreeThreading) {
             testSkip("Python threads in sub-interpreters not supported with free-threading (PEP 703)");
         }
-        TmpDir tmp("python-fork-in-use-");
-        string result = tmp.path + DirSep + "result";
+        # the child writes its result to a pipe, which the parent reads until the child has exited
+        hash<PipeInfo> result = File::getPipe();
         PythonProgram p("
-import os
 from threading import Thread
-
-def make_fifo(path):
-    os.mkfifo(path)
 
 # calls the Qore closure, which runs without the GIL, in this thread
 def call(closure):
@@ -214,7 +209,6 @@ def join(thread):
 def add(x, y):
     return x + y
 ", "fork-in-use.py");
-        p.callFunction("make_fifo", result);
         Queue ready();
         Queue release();
         code wait_closure = sub () {
@@ -252,19 +246,17 @@ def add(x, y):
             } catch (hash<ExceptionInfo> ex) {
                 r += ex.err;
             }
-            File result_file();
-            result_file.open2(result, O_WRONLY);
-            result_file.write(r.join(","));
+            result.write.write(r.join(","));
             Qore::exit(0);
         }
         assertGt(0, pid);
+        result.write.close();
         release.push(True);
         release.push(True);
         qore_thread.waitForZero();
         p.callFunction("join", python_thread);
-        ReadOnlyFile result_file(result);
         string child_result;
-        while (*binary data = result_file.readBinary(4096)) {
+        while (*binary data = result.read.readBinary(4096)) {
             child_result += data.toString();
         }
         assertEq("call: 3,thread: 5,deleted", child_result);
