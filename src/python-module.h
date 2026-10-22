@@ -435,6 +435,12 @@ protected:
 */
 DLLLOCAL int qore_python_register_thread();
 
+//! Registers the fork handlers of the program registry locks (qoreloadermodule.cpp); returns -1 if there is no memory
+DLLLOCAL int qpy_register_fork_handlers();
+
+//! Removes the fork handlers registered with qpy_register_fork_handlers()
+DLLLOCAL void qpy_unregister_fork_handlers();
+
 //! Initializes the type used to deregister threads that Python created; called once in the main interpreter
 DLLLOCAL int qore_python_thread_registration_init();
 

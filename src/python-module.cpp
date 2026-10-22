@@ -443,6 +443,11 @@ void QorePythonQoreEntryHelper::applySandbox() {
 }
 
 static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) {
+    // registered in the initialization function and not while static objects are constructed (see QoreForkHandler.h)
+    if (QorePythonProgram::registerForkHandlers() || qpy_register_fork_handlers()) {
+        xsink.outOfMemory();
+        return;
+    }
     QoreStringNode* err = python_module_init_intern(false);
     if (err) {
         xsink.raiseException("MODULE-INIT-ERROR", err);
@@ -728,6 +733,8 @@ static void python_module_delete() {
         PNS = nullptr;
     }
     python_module_shutdown();
+    qpy_unregister_fork_handlers();
+    QorePythonProgram::unregisterForkHandlers();
 }
 
 static void python_module_parse_cmd(const QoreString& cmd, ExceptionSink* xsink) {

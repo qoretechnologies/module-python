@@ -27,6 +27,9 @@
       the environment while %Qore threads could read it, which could crash the process.  The environment variables that
       the module reads (\c PYTHONHOME, \c PYTHONPATH) and the environment that %Python copies into \c os.environ when
       it starts are read under the lock as well.
+    - a child process created with @ref Qore::fork() "fork()" while another thread holds a lock of the module can
+      use %Python, as long as no other thread held the %Python GIL; previously the child could wait forever for a lock
+      held by a thread that did not exist in it
     - a %Qore callable (closure or call reference) called from %Python runs without the %Python GIL, as %Qore
       functions and methods called from %Python do; previously a callable that waited for another %Python thread
       waited forever

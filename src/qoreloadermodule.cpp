@@ -21,6 +21,8 @@
 
 #include "python-module.h"
 #include "QoreThreadAttachHelper.h"
+
+#include <qore/QoreForkHandler.h>
 #include "QoreLoader.h"
 #include "JavaLoader.h"
 #include "QoreMetaPathFinder.h"
@@ -153,6 +155,31 @@ static QoreThreadLock qpy_global_lock;
 // Counter for how many sub-interpreters have been destroyed
 // Used to detect when destructor calls might be unsafe
 static std::atomic<int> qpy_destroyed_count{0};
+
+// fork handlers of qpy_lock and qpy_global_lock (see QoreForkHandler.h): their holders only change the sets of
+// programs, so they are leaves (QFR_MODULE_LEAF) acquired before fork()
+static QoreForkHandlerRegistration* qpy_lock_fork_reg = nullptr;
+static QoreForkHandlerRegistration* qpy_global_lock_fork_reg = nullptr;
+
+int qpy_register_fork_handlers() {
+    assert(!qpy_lock_fork_reg && !qpy_global_lock_fork_reg);
+    qpy_lock_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_program_registry",
+        qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock, &qpy_lock);
+    qpy_global_lock_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_program_validity",
+        qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock, &qpy_global_lock);
+    if (!qpy_lock_fork_reg || !qpy_global_lock_fork_reg) {
+        qpy_unregister_fork_handlers();
+        return -1;
+    }
+    return 0;
+}
+
+void qpy_unregister_fork_handlers() {
+    qore_unregister_fork_handler(qpy_global_lock_fork_reg);
+    qpy_global_lock_fork_reg = nullptr;
+    qore_unregister_fork_handler(qpy_lock_fork_reg);
+    qpy_lock_fork_reg = nullptr;
+}
 
 void qpy_global_register(QorePythonProgram* p) {
     AutoLocker al(qpy_global_lock);

@@ -23,6 +23,12 @@
 */
 
 #include "QC_PythonProgram.h"
+
+#include <qore/QoreForkHandler.h>
+
+#include <atomic>
+#include <pthread.h>
+
 #include "QorePythonPrivateData.h"
 #include "QorePythonClass.h"
 #include "QoreLoader.h"
@@ -76,6 +82,74 @@ QorePythonProgram::py_thr_map_t QorePythonProgram::py_thr_map;
 QorePythonProgram::py_global_tid_map_t QorePythonProgram::py_global_tid_map;
 QoreThreadLock QorePythonProgram::py_thr_lck;
 QoreThreadLock QorePythonProgram::main_ts_lck;
+
+// fork handlers of the process-wide locks of this class (see QoreForkHandler.h)
+//
+// py_thr_lck protects the maps of thread states and the persistent references; its holders only change containers
+// (Python reference operations are made after it is released) and never wait for the GIL while they hold it, so it
+// is a leaf (QFR_MODULE_LEAF) acquired before fork(), and the maps are consistent in the child.
+//
+// main_ts_lck serializes the use of the main thread state while an interpreter is created; its holders wait for the
+// GIL, which the thread calling os.fork() holds while the fork handlers run, so fork() must not wait for it
+// (QFR_MODULE_RESET): the child initializes it again, and takes it again if the forking thread held it.
+static QoreForkHandlerRegistration* py_thr_lck_fork_reg = nullptr;
+static QoreForkHandlerRegistration* main_ts_lck_fork_reg = nullptr;
+// the thread that holds main_ts_lck, valid while main_ts_lck_held is set; updated while the lock is held
+static std::atomic<pthread_t> main_ts_lck_holder;
+static std::atomic<bool> main_ts_lck_held{false};
+
+//! holds main_ts_lck and records the holder for its fork handler
+class MainThreadStateLockHelper {
+public:
+    DLLLOCAL MainThreadStateLockHelper(QoreThreadLock& lck) : lck(lck) {
+        lck.lock();
+        main_ts_lck_holder.store(pthread_self(), std::memory_order_relaxed);
+        main_ts_lck_held.store(true, std::memory_order_relaxed);
+    }
+
+    DLLLOCAL ~MainThreadStateLockHelper() {
+        main_ts_lck_held.store(false, std::memory_order_relaxed);
+        lck.unlock();
+    }
+
+private:
+    QoreThreadLock& lck;
+
+    MainThreadStateLockHelper(const MainThreadStateLockHelper&) = delete;
+    MainThreadStateLockHelper& operator=(const MainThreadStateLockHelper&) = delete;
+};
+
+static void main_ts_lck_fork_child(void* arg) {
+    QoreThreadLock* lck = static_cast<QoreThreadLock*>(arg);
+    bool held = main_ts_lck_held.load(std::memory_order_relaxed)
+        && pthread_equal(main_ts_lck_holder.load(std::memory_order_relaxed), pthread_self());
+    qore_fork_child_thread_lock(lck);
+    if (held) {
+        lck->lock();
+    } else {
+        main_ts_lck_held.store(false, std::memory_order_relaxed);
+    }
+}
+
+int QorePythonProgram::registerForkHandlers() {
+    assert(!py_thr_lck_fork_reg && !main_ts_lck_fork_reg);
+    py_thr_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_thread_states",
+        qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock, &py_thr_lck);
+    main_ts_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_RESET, "python_main_thread_state", nullptr,
+        nullptr, main_ts_lck_fork_child, &main_ts_lck);
+    if (!py_thr_lck_fork_reg || !main_ts_lck_fork_reg) {
+        unregisterForkHandlers();
+        return -1;
+    }
+    return 0;
+}
+
+void QorePythonProgram::unregisterForkHandlers() {
+    qore_unregister_fork_handler(main_ts_lck_fork_reg);
+    main_ts_lck_fork_reg = nullptr;
+    qore_unregister_fork_handler(py_thr_lck_fork_reg);
+    py_thr_lck_fork_reg = nullptr;
+}
 unsigned QorePythonProgram::pgm_count = 0;
 
 QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
@@ -134,7 +208,7 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
     // This avoids deadlock because:
     // - Constructor: main_ts_lck -> GIL -> py_thr_lck (acquires in this order)
     // - setContext/releaseContext: py_thr_lck (brief) -> GIL (no conflict with main_ts_lck)
-    AutoLocker mts_al(main_ts_lck);
+    MainThreadStateLockHelper mts_al(main_ts_lck);
 
     QorePythonGilHelper qpgh;
 
@@ -199,7 +273,7 @@ QorePythonProgram::QorePythonProgram(const QoreString& source_code, const QoreSt
     // This avoids deadlock because:
     // - Constructor: main_ts_lck -> GIL -> py_thr_lck (acquires in this order)
     // - setContext/releaseContext: py_thr_lck (brief) -> GIL (no conflict with main_ts_lck)
-    AutoLocker mts_al(main_ts_lck);
+    MainThreadStateLockHelper mts_al(main_ts_lck);
 
     QorePythonGilHelper qpgh;
 

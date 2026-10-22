@@ -96,6 +96,7 @@ class PythonTest inherits Test {
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
         addTestCase("Python threads run under the sandbox of the interpreter's Program", \sandboxPythonThreadTest());
         addTestCase("os.environ changes are serialized with Qore", \environmentTest());
+        addTestCase("fork() while another thread holds a lock of the module", \forkHandlersTest());
         # Set return value for compatibility with test harnesses that check the return value
         set_return_value(main());
     }
@@ -447,6 +448,27 @@ def join(thread):
         }
         p.callFunction("join", thread);
         assertEq(0, found, "a variable that was never set was not found");
+    }
+
+    # a child process created with fork() while another thread holds a process-wide lock of the module can use Python:
+    # the module registers fork handlers for its locks.  Without them, the child got the lock held by a thread that
+    # does not exist in it and waited forever for it (the test runner's time limit is only a guard).
+    forkHandlersTest() {
+        if (!Option::HAVE_FORK) {
+            testSkip("fork() is not available");
+        }
+        if (!Option::HAVE_LIBRARY_DEBUGGING) {
+            testSkip("the test needs a debug build of the library");
+        }
+        foreach string name in ("python_thread_states", "python_program_validity", "python_program_registry") {
+            # another thread holds the lock while fork() is called; the child creates an interpreter and calls it
+            hash<auto> r = call_function("dbg_fork_while_handler_held", name, int sub () {
+                PythonProgram child("def f(x):\n    return x + 1\n", "fork-child.py");
+                return child.callFunction("f", 1) == 2 ? 0 : 1;
+            });
+            assertTrue(r.waited, name + ": fork() waited for the thread holding the lock");
+            assertEq(0, r.status, name + ": the child used Python");
+        }
     }
 
     moduleSpecFailureTest() {

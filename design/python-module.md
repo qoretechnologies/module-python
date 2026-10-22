@@ -255,6 +255,32 @@ Qore serializes every access to the C environment with one process-wide read-wri
 
 **Invariant:** no thread holds the environment lock while it waits for a GIL or for a Python thread state.
 
+## fork()
+
+The module registers fork handlers (`qore_register_fork_handler()`, in the module's initialization function) for its
+process-wide locks:
+
+| Lock | Rank | Why |
+|---|---|---|
+| `QorePythonProgram::py_thr_lck` | `QFR_MODULE_LEAF` (acquired) | holders only change containers and never wait for the GIL while holding it |
+| `qpy_lock`, `qpy_global_lock` | `QFR_MODULE_LEAF` (acquired) | holders only change the program sets |
+| `QorePythonProgram::main_ts_lck` | `QFR_MODULE_RESET` | holders wait for the GIL (interpreter creation), which a thread in `os.fork()` holds while the handlers run; the child takes it again if the forking thread held it |
+
+The GIL interplay, measured on Linux with Python 3.14 (GIL build):
+
+- `os.fork()` in the main interpreter (a Python process hosting Qore) runs with the GIL held while Qore's handlers
+  acquire their locks; no holder of those locks waits for the GIL, so it does not deadlock: 200 forks while four
+  Python threads called Qore all succeeded, and the children used Qore and Python.
+- `os.fork()` in a subinterpreter (every interpreter of a Qore program or `PythonProgram`) kills the child with
+  "Fatal Python error: _PyInterpreterState_DeleteExceptMain: not main interpreter" (CPython's after-fork handling
+  only supports the main interpreter); it does not deadlock.
+- A child created with a `fork()` that Python does not make (Qore's `fork()`, or any native fork) gets the GIL in the
+  state the parent had: if another thread held it, the child's first Python call waits forever.  If no thread held it,
+  Python works in the child.  The module does not acquire the GIL before `fork()`: every `fork()` in the process,
+  including each process start by the process module, would then wait for Python.
+- No thread holds Qore's environment lock while it waits for the GIL (see "The Process Environment"), since
+  `os.fork()` holds the GIL while the environment lock is acquired.
+
 ## Python Shutdown Handling
 
 ### The Problem

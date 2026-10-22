@@ -263,6 +263,12 @@ public:
         return sandbox;
     }
 
+    //! Registers the fork handlers of the process-wide locks of this class; returns -1 if there is no memory
+    DLLLOCAL static int registerForkHandlers();
+
+    //! Removes the fork handlers registered with registerForkHandlers()
+    DLLLOCAL static void unregisterForkHandlers();
+
     DLLLOCAL bool isValid() const {
         return valid;
     }
