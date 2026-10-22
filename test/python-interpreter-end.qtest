@@ -11,6 +11,7 @@
 
 %requires python
 %requires QUnit
+%requires FsUtil
 
 %exec-class PythonInterpreterEndTest
 
@@ -24,6 +25,8 @@ class PythonInterpreterEndTest inherits QUnit::Test {
         addTestCase("created and used in a thread that ended", \createdInEndedThread());
         addTestCase("used and destroyed in another thread", \usedInOtherThread());
         addTestCase("Program destroyed in another thread", \programDestroyedInOtherThread());
+        addTestCase("a daemon thread still runs when the interpreter is destroyed", \daemonThreadAtEnd());
+        addTestCase("a non-daemon thread still runs when the interpreter is destroyed", \nonDaemonThreadAtEnd());
         set_return_value(main());
     }
 
@@ -56,6 +59,115 @@ class PythonInterpreterEndTest inherits QUnit::Test {
         pgm.loadModule("python");
         pgm.parse("%module-cmd(python) import threading\nsub f() {}\n", "program-destroyed-in-other-thread");
         endInThread(pgm);
+    }
+
+    #! a daemon thread still runs when the interpreter is destroyed: it cannot be waited for, and the process continues
+    /** Python 3.13 and earlier abort the process ("Py_EndInterpreter: not the last thread") when an interpreter is
+        finalized while a daemon thread still has a state in it, so the interpreter is left in memory with the thread
+        running its code: the thread continues when it is released, and a call it makes to Qore raises a Python
+        exception.  Python 3.14 finalizes the interpreter and makes the thread exit when it next takes the GIL.
+        Previously the process aborted with Python 3.13 and earlier.
+    */
+    daemonThreadAtEnd() {
+        TmpDir tmp("python-daemon-end-");
+        string ready = tmp.path + DirSep + "ready";
+        string release = tmp.path + DirSep + "release";
+        string result = tmp.path + DirSep + "result";
+        PythonProgram p("
+import os
+import qoreloader
+from qore.__root__.Qore import now
+from threading import Thread
+
+def make_fifos(*paths):
+    for path in paths:
+        os.mkfifo(path)
+
+def start(ready, release, result):
+    ready_fd = os.open(ready, os.O_RDWR)
+    release_fd = os.open(release, os.O_RDWR)
+    result_fd = os.open(result, os.O_RDWR)
+    def target():
+        os.write(ready_fd, b'x')
+        os.read(release_fd, 1)
+        try:
+            now()
+            msg = 'called Qore'
+        except Exception as e:
+            msg = type(e).__name__
+        os.write(result_fd, msg.encode())
+        for fd in (ready_fd, release_fd, result_fd):
+            os.close(fd)
+    Thread(target = target, daemon = True).start()
+", "daemon-at-end.py");
+        p.callFunction("make_fifos", ready, release, result);
+        p.callFunction("start", ready, release, result);
+        {
+            ReadOnlyFile ready_file(ready);
+            assertEq(<78>, ready_file.readBinary(1));
+        }
+        # the thread runs in the interpreter, waiting in os.read() without the GIL
+        delete p;
+        # the process continues and can use Python
+        PythonProgram other("", "after-daemon-at-end.py");
+        assertEq(2, other.evalExpression("1 + 1"));
+        list<softint> version = (Python::PythonVersion =~ x/^([0-9]+)\.([0-9]+)/);
+        if (version[0] > 3 || (version[0] == 3 && version[1] >= 14)) {
+            # Python 3.14 makes the thread exit when it takes the GIL again
+            return;
+        }
+        # the thread continues in the interpreter that was left
+        File release_file();
+        release_file.open2(release, O_WRONLY);
+        release_file.write(<78>);
+        ReadOnlyFile result_file(result);
+        string msg;
+        while (msg.size() < "RuntimeError".size() && (*binary data = result_file.readBinary(64))) {
+            msg += data.toString();
+        }
+        assertEq("RuntimeError", msg, "the call to Qore after the interpreter's Program was destroyed fails");
+    }
+
+    #! a non-daemon thread still runs when the interpreter is destroyed: the destruction waits for it, as in Python
+    nonDaemonThreadAtEnd() {
+        TmpDir tmp("python-non-daemon-end-");
+        string ready = tmp.path + DirSep + "ready";
+        string release = tmp.path + DirSep + "release";
+        PythonProgram p("
+import os
+from threading import Thread
+
+def make_fifos(*paths):
+    for path in paths:
+        os.mkfifo(path)
+
+def start(ready, release):
+    ready_fd = os.open(ready, os.O_RDWR)
+    release_fd = os.open(release, os.O_RDWR)
+    def target():
+        os.write(ready_fd, b'x')
+        os.read(release_fd, 1)
+        os.close(ready_fd)
+        os.close(release_fd)
+    Thread(target = target).start()
+", "non-daemon-at-end.py");
+        p.callFunction("make_fifos", ready, release);
+        p.callFunction("start", ready, release);
+        {
+            ReadOnlyFile ready_file(ready);
+            assertEq(<78>, ready_file.readBinary(1));
+        }
+        Counter done(1);
+        background sub () {
+            delete p;
+            done.dec();
+        }();
+        # the destruction waits for the thread, which ends when it is released
+        File release_file();
+        release_file.open2(release, O_WRONLY);
+        release_file.write(<78>);
+        done.waitForZero();
+        assertEq(0, done.getCount(), "the interpreter is destroyed after the thread has ended");
     }
 
     #! destroys the object in another thread

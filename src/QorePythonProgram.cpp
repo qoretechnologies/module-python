@@ -426,6 +426,52 @@ int QorePythonProgram::staticInit() {
     return 0;
 }
 
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030E0000
+bool QorePythonProgram::hasThreadsNotJoinedAtEnd(PyThreadState* finalizing) {
+    // the identifiers of the threads with a state in the interpreter, collected without running Python code, which
+    // could release the GIL to a thread that ends and deletes its state meanwhile
+    std::vector<unsigned long> idents;
+    try {
+        for (PyThreadState* state = PyInterpreterState_ThreadHead(finalizing->interp); state;
+                state = PyThreadState_Next(state)) {
+            if (state != finalizing) {
+                idents.push_back(state->thread_id);
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        // the threads cannot be checked: the interpreter is left rather than risking the abort
+        return true;
+    }
+    if (idents.empty()) {
+        return false;
+    }
+    // Py_EndInterpreter() waits for the threads of the threading module that are not daemon threads
+    // (threading._shutdown()); threading._active maps their identifiers to their Thread objects
+    QorePythonReferenceHolder threading_name(PyUnicode_FromString("threading"));
+    QorePythonReferenceHolder threading(threading_name ? PyImport_GetModule(*threading_name) : nullptr);
+    QorePythonReferenceHolder active(threading ? PyObject_GetAttrString(*threading, "_active") : nullptr);
+    bool rv = false;
+    if (!active || !PyDict_Check(*active)) {
+        rv = true;
+    } else {
+        for (unsigned long id : idents) {
+            QorePythonReferenceHolder ident(PyLong_FromUnsignedLong(id));
+            // returns a borrowed reference
+            PyObject* thread = ident ? PyDict_GetItemWithError(*active, *ident) : nullptr;
+            QorePythonReferenceHolder daemon(thread ? PyObject_GetAttrString(thread, "daemon") : nullptr);
+            if (*daemon != Py_False) {
+                rv = true;
+                break;
+            }
+        }
+    }
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+    }
+    return rv;
+}
+#endif
+
 void QorePythonProgram::waitForThreadsIntern() {
     while (pgm_thr_cnt) {
         ++pgm_thr_waiting;
@@ -654,7 +700,21 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                     PyThreadState_Clear(state);
                     PyThreadState_Delete(state);
                 }
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030E0000
+                // Python 3.13 and earlier abort the process ("Py_EndInterpreter: not the last thread") if another
+                // thread still has a state in the interpreter after the threads that Py_EndInterpreter() waits for
+                // have ended (Python 3.14 makes such threads exit when they next try to take the GIL); such a thread
+                // (a daemon thread, or a thread started with the _thread module) cannot be waited for, so the
+                // interpreter is left in memory, with the threads running its code, and is never finalized
+                if (hasThreadsNotJoinedAtEnd(sub_tstate)) {
+                    printd(5, "QorePythonProgram::deleteIntern() this: %p interpreter %p left: threads that are not "
+                        "waited for still run in it\n", this, interpreter);
+                } else {
+                    Py_EndInterpreter(sub_tstate);
+                }
+#else
                 Py_EndInterpreter(sub_tstate);
+#endif
                 initial_thread_state = nullptr;
                 interpreter = nullptr;
                 PyThreadState_Swap(old_tstate);

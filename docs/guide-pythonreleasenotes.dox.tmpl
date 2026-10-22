@@ -41,6 +41,12 @@
       waited forever
     - fixed incomplete finalization of Python subinterpreters, including atexit hooks, free-threaded builds,
       and destruction on a different native thread
+    - with %Python 3.13 and earlier, destroying a %Python interpreter (ex: a @ref Python::PythonProgram "PythonProgram"
+      object, or a @ref Qore::Program "Program" using %Python) while a %Python daemon thread still runs in it no longer
+      aborts the process with "Fatal Python error: Py_EndInterpreter: not the last thread": such a thread cannot be
+      waited for, so the interpreter is left in memory with the thread running in it, and a call it makes to %Qore
+      afterwards raises a %Python \c RuntimeError; with %Python 3.14, the interpreter is finalized and the thread exits
+      when it next runs.  The interpreter still waits for the threads that are not daemon threads, as in %Python.
     - fixed a hang finalizing a Python subinterpreter with Python 3.12 and earlier on a native thread other than the
       thread that imported \c threading in it (ex: a @ref Qore::Program "Program" using %Python destroyed in another
       thread than the one that created it): the finalization waited for that thread's state, which was never deleted

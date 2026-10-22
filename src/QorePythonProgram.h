@@ -671,6 +671,14 @@ protected:
 
     DLLLOCAL void deleteIntern(ExceptionSink* xsink);
 
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030E0000
+    //! returns true if another thread would still have a state in the interpreter after Py_EndInterpreter() has
+    //! waited for the threads it waits for, so that it would abort the process
+    /** @param finalizing the current thread state, with which the interpreter would be finalized
+    */
+    DLLLOCAL static bool hasThreadsNotJoinedAtEnd(PyThreadState* finalizing);
+#endif
+
     //! the GIL must be held when this function is called
     DLLLOCAL int createInterpreter(QorePythonGilHelper& qpgh, ExceptionSink* xsink);
 

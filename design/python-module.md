@@ -144,6 +144,17 @@ and newer use a state belonging to the finalizing native thread when destruction
 runs on a different thread. Reusing the original state on another thread prevents
 Python 3.14 from collecting the interpreter's object graph.
 
+Python 3.13 and earlier abort the process in `Py_EndInterpreter` ("not the last thread") if another thread still
+has a state in the interpreter once the threads it waits for (the threads of the threading module that are not
+daemon threads, joined by `threading._shutdown()`) have ended; Python 3.14 instead makes such threads exit when they
+next take the GIL.  Before ending an interpreter with an older Python, `deleteIntern()` therefore checks the remaining
+thread states (`hasThreadsNotJoinedAtEnd()`): their thread identifiers are collected first, without running Python
+code (which could release the GIL to a thread that deletes its state), and then looked up in `threading._active`;
+a state whose thread is not a non-daemon `threading.Thread` (a daemon thread, a dummy thread, a thread started with
+`_thread`) cannot be waited for, and the interpreter is then left in memory with those threads still running its
+code instead of being ended.  A call to Qore from such a thread afterwards raises `RuntimeError` (the program is no
+longer valid); the interpreter's memory is never released.
+
 After a Qore call releases the GIL, its auto-TSS binding points at the long-lived
 main state. A different thread can then destroy the subinterpreter without leaving
 a dangling auto-TSS pointer in the caller. Free-threaded context helpers instead
