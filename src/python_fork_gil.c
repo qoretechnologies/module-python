@@ -19,11 +19,12 @@
     Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-/* Reads the state of the GIL in the child of fork().
+/* Reads the state of the GIL in the child of fork(), and clears the thread state bound to a thread for the GIL state
+   API.
 
    This file is C and is compiled with CPython's internal headers, which are C headers: they give the layout of the
-   GIL of the Python library the module is built with, for every version, where the bundled C++ definitions of the
-   module (python*_internals.h) do not have it.
+   GIL and of the runtime state of the Python library the module is built with, for every version, where the bundled
+   C++ definitions of the module (python*_internals.h) do not have it.
 */
 
 #define Py_BUILD_CORE 1
@@ -31,9 +32,8 @@
 
 #if PY_VERSION_HEX >= 0x030C0000
 #include "internal/pycore_interp.h"
-#else
-#include "internal/pycore_runtime.h"
 #endif
+#include "internal/pycore_runtime.h"
 
 #include <pthread.h>
 
@@ -87,6 +87,14 @@ int qore_python_fork_child_gil_lost(void) {
     }
     // while the GIL is held and its mutex is free, the last holder is the thread that holds it
     return holder && holder->thread_id == PyThread_get_thread_ident() ? 0 : 1;
+#endif
+}
+
+void qore_python_gilstate_tss_clear(void) {
+#if PY_VERSION_HEX >= 0x030C0000
+    PyThread_tss_set(&_PyRuntime.autoTSSkey, NULL);
+#else
+    PyThread_tss_set(&_PyRuntime.gilstate.autoTSSkey, NULL);
 #endif
 }
 

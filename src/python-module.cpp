@@ -1028,18 +1028,25 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     mainThreadState = PyThreadState_Get();
     if (python_initialized) {
 #if PY_VERSION_HEX >= 0x030D0000
-        // Python 3.13+ changed thread state management significantly
-        // Use PyEval_ReleaseThread which properly clears both TSS and fast TLS
+        // Python 3.13+ changed thread state management significantly; the main thread state, which other threads
+        // use, is not left bound to this thread (see qore_python_release_context())
         printd(5, "python_module_init: before release, mainThreadState: %p TSS: %p GIL: %d\n",
             mainThreadState, PyGILState_GetThisThreadState(), PyGILState_Check());
-        PyEval_ReleaseThread(mainThreadState);
+        assert(PyThreadState_Get() == mainThreadState);
+        qore_python_release_context();
         printd(5, "python_module_init: after release, TSS: %p GIL: %d\n",
             PyGILState_GetThisThreadState(), PyGILState_Check());
-        _qore_PyGILState_SetThisThreadState(nullptr);
 #else
         // release the current thread state after initialization
+#if PY_VERSION_HEX >= 0x030C0000
+        // the main thread state, which other threads use, is not left bound to this thread (see
+        // qore_python_release_context())
+        assert(PyThreadState_Get() == mainThreadState);
+        qore_python_release_context();
+#else
         _qore_release_thread_state(mainThreadState);
-        // Our tracking should be cleared by _qore_release_thread_state
+#endif
+        // Our tracking should be cleared now
         assert(!_qore_PyRuntimeGILState_GetThreadState());
         _qore_PyGILState_SetThisThreadState(nullptr);
         // NOTE: In Python 3.12, PyEval_ReleaseThread does NOT clear PyGILState_GetThisThreadState()
@@ -1377,15 +1384,27 @@ static bool _qore_has_gil(PyThreadState* state0, PyThreadState* state1) {
 
 #ifndef Py_GIL_DISABLED
 void qore_python_release_context() {
-    // Detaching does not clear CPython's auto-TSS binding. A subinterpreter
-    // may subsequently be destroyed by another native thread, which cannot
-    // clear this thread's TLS. Bind the main state while we still hold the GIL
-    // so that no detached thread retains a pointer into a transient interpreter.
 #if PY_VERSION_HEX >= 0x030C0000
+#ifdef QORE_PYTHON_HAVE_INTERNAL_C_HEADERS
+    // Detaching does not clear CPython's binding of the state to the thread for the GIL state API (its auto-TSS),
+    // and the interpreter of the state can then be destroyed by another thread, which cannot clear this thread's
+    // binding: the state is unbound here, with the GIL held, as CPython unbinds a state, so that a thread that does
+    // not hold the GIL keeps no binding to a state that it is not using; attaching a state binds it again.
+    // Previously the main thread state was bound instead, in every thread that released the GIL here: threads share
+    // that state, and its bound_gilstate flag was then cleared by threads that did not hold the GIL.
+    PyThreadState* tstate = PyThreadState_Get();
+    if (PyGILState_GetThisThreadState() == tstate) {
+        qore_py_set_bound_gilstate(tstate, 0);
+        qore_python_gilstate_tss_clear();
+    }
+#else
+    // without CPython's internal headers, the binding cannot be cleared: the main state is bound instead, so that no
+    // detached thread keeps a binding to a state of an interpreter that another thread can destroy
     if (PyGILState_GetThisThreadState() != mainThreadState) {
         qore_py_set_bound_gilstate(mainThreadState, 0);
     }
     PyThreadState_Swap(mainThreadState);
+#endif
 #endif
     PyEval_SaveThread();
     _qore_PyGILState_SetThisThreadState(nullptr);
@@ -1419,11 +1438,9 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     // Python 3.13+ GIL mode - use PyEval_AcquireThread/ReleaseThread which properly
     // handle TSS and fast TLS synchronization
     if (release_gil) {
-        // If bound_gilstate is stale, clear it to avoid tstate_activate assertions.
-        if (qore_py_get_bound_gilstate(new_thread_state)
-            && PyGILState_GetThisThreadState() != new_thread_state) {
-            qore_py_set_bound_gilstate(new_thread_state, 0);
-        }
+        // No bound_gilstate flag is changed without the GIL: other threads use the state (the main thread state)
+        // with the GIL held; CPython binds it to this thread when it is attached unless it is bound to another
+        // thread (see qore_python_release_context())
         // Need to acquire the GIL with our specific thread state
         // CRITICAL: If there's a stale TSS from a previous interpreter, we must clear it first.
         // PyEval_AcquireThread -> _PyThreadState_Attach tries to detach any existing thread state,
@@ -1443,20 +1460,9 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     _qore_PyGILState_SetThisThreadState(new_thread_state);
 #else
     if (release_gil) {
-#if PY_VERSION_HEX >= 0x030C0000
-        // Ensure bound_gilstate and TSS are consistent before acquiring the GIL in Python 3.12.
-        PyThreadState* tss_before = PyGILState_GetThisThreadState();
-        if (qore_py_get_bound_gilstate(new_thread_state) && tss_before != new_thread_state) {
-            _qore_PyGILState_SetTSS(new_thread_state);
-            PyThreadState* tss_after = PyGILState_GetThisThreadState();
-            if (tss_after != new_thread_state) {
-                _qore_PyGILState_ClearTSS();
-                qore_py_set_bound_gilstate(new_thread_state, 0);
-            } else {
-                qore_py_set_bound_gilstate(new_thread_state, 1);
-            }
-        }
-#endif
+        // No bound_gilstate flag or binding is changed without the GIL: other threads use the state (the main thread
+        // state) with the GIL held; CPython binds it to this thread when it is attached unless it is bound to another
+        // thread (see qore_python_release_context())
         _qore_acquire_thread_state(new_thread_state);
         // Use _qore_tss_tstate for assertion since Python's TSS (PyGILState_GetThisThreadState)
         // might be stale from a deleted interpreter in Python 3.12

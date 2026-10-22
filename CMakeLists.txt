@@ -118,6 +118,8 @@ set(CPP_SRC
 if (QORE_PYTHON_HAVE_INTERNAL_C_HEADERS)
     set(CPP_SRC ${CPP_SRC} src/python_fork_gil.c)
     add_definitions(-DQORE_PYTHON_HAVE_FORK_GIL_CHECK=1)
+    # the internal state of CPython (src/python_fork_gil.c) is also used to unbind thread states from threads
+    add_definitions(-DQORE_PYTHON_HAVE_INTERNAL_C_HEADERS=1)
 endif()
 
 qore_wrap_qpp_value(QPP_SOURCES METALIST QPP_META_SRC ${QPP_SRC})

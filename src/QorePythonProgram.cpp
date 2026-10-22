@@ -36,6 +36,7 @@
 #include "QoreMetaPathFinder.h"
 
 #include "PythonCallableCallReferenceNode.h"
+#include "python_fork_gil.h"
 #include "PythonQoreCallable.h"
 #include "ModuleNamespace.h"
 #include "QorePythonStackLocationHelper.h"
@@ -1361,9 +1362,13 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
                 interp = PyInterpreterState_Next(interp);
             }
             if (!tss_interp_valid || tss_tstate->interp == nullptr) {
-                // TSS points to a thread state with a deleted/invalid interpreter
-                // Clear its bound_gilstate so it won't interfere with new thread state activation
+                // TSS points to a thread state with a deleted/invalid interpreter, which can be freed: the binding
+                // is cleared without touching the state (its flag)
+#ifdef QORE_PYTHON_HAVE_INTERNAL_C_HEADERS
+                qore_python_gilstate_tss_clear();
+#else
                 qore_py_set_bound_gilstate(tss_tstate, 0);
+#endif
                 // CRITICAL: Also clear TSS. PyThreadState_New() only sets TSS if it's currently NULL.
                 // If we don't clear TSS, PyThreadState_New() won't update it, and when we activate
                 // our new thread state, TSS won't match.
@@ -1373,14 +1378,6 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         }
     }
 
-    // Handle cached thread state that might have TSS mismatch
-    if (python) {
-        PyThreadState* tss_for_cached = PyGILState_GetThisThreadState();
-        // If the cached thread state has bound_gilstate=1 but TSS doesn't match, clear it
-        if (qore_py_get_bound_gilstate(python) && tss_for_cached != python) {
-            qore_py_set_bound_gilstate(python, 0);
-        }
-    }
 #endif
     printd(5, "QorePythonProgram::setContext() ENTRY this: %p owns_interpreter: %d python: %p "
         "_qore_tss_tstate: %p tid: %d\n", this, owns_interpreter, python, _qore_PyCeval_GetThreadState(),
@@ -1440,21 +1437,6 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
             assert(python);
             _QORE_GILSTATE_COUNTER_ASSERT_ONE(python);
 
-#if PY_VERSION_HEX >= 0x030D0000
-            // Python 3.14+: PyThreadState_New() tries to bind the new thread state to TSS.
-            // However, if TSS already had a stale thread state (from a deleted interpreter),
-            // the binding may have failed or TSS may still point to the stale thread state.
-            // In either case, if TSS doesn't match our new thread state and our new thread
-            // state has bound_gilstate=1, the tstate_activate assertion will fail.
-            // Solution: Check if TSS matches, and if not, clear bound_gilstate on our new
-            // thread state so the activation won't expect a TSS match.
-            PyThreadState* tss_after_new = PyGILState_GetThisThreadState();
-            if (tss_after_new != python && qore_py_get_bound_gilstate(python)) {
-                // TSS doesn't match our new thread state but it has bound_gilstate=1
-                // Clear it to prevent tstate_activate assertion failure
-                qore_py_set_bound_gilstate(python, 0);
-            }
-#endif
 
             // IMPORTANT - Python 3.12 PyThreadState_New() Behavior Change:
             // In Python 3.12, PyThreadState_New() automatically binds the newly created thread state
@@ -1551,89 +1533,18 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         // use the SAME thread state for PyEval_ReleaseThread. Using _qore_PyCeval_GetThreadState()
         // in releaseContext can return a different thread state after nested context switches.
         ceval_state = python;
-        // CRITICAL: Check for stale TSS before acquiring the GIL.
-        // If TSS points to a thread state with a deleted interpreter, we need to:
-        // 1. Clear its bound_gilstate to prevent tstate_activate assertion failure
-        // 2. Clear our python's bound_gilstate too - when tstate_activate runs,
-        //    if bound_gilstate=0, it will bind python to TSS properly
-        {
-            PyThreadState* tss_before_acquire = PyGILState_GetThisThreadState();
-            if (tss_before_acquire && tss_before_acquire != python) {
-                bool tss_interp_valid = false;
-                PyInterpreterState* interp = PyInterpreterState_Head();
-                while (interp) {
-                    if (interp == tss_before_acquire->interp) {
-                        tss_interp_valid = true;
-                        break;
-                    }
-                    interp = PyInterpreterState_Next(interp);
-                }
-                if (!tss_interp_valid) {
-                    // Stale TSS - clear bound_gilstate on our python thread state
-                    qore_py_set_bound_gilstate(python, 0);
-                    // Update our internal tracking
-                    _qore_PyGILState_SetThisThreadState(nullptr);
-                }
-            }
-        }
-        // WORKAROUND: Python 3.14's tstate_activate has strict assertions about TSS state.
-        // When there's a stale TSS from a deleted interpreter, these assertions can fail
-        // even when bound_gilstate=0 (which should make the assertion pass via !bound_gilstate).
-        // The workaround is to first use PyGILState_Ensure to get a valid GIL context,
-        // then release it, which clears any stale TSS state. Then we can safely use
-        // PyEval_RestoreThread with our specific thread state.
-        PyThreadState* tss_check = PyGILState_GetThisThreadState();
-        if (tss_check && tss_check != python) {
-            // Check if TSS has a stale thread state
-            bool tss_interp_valid = false;
-            PyInterpreterState* interp = PyInterpreterState_Head();
-            while (interp) {
-                if (interp == tss_check->interp) {
-                    tss_interp_valid = true;
-                    break;
-                }
-                interp = PyInterpreterState_Next(interp);
-            }
-            if (!tss_interp_valid) {
-                // Stale TSS - clear the stale thread state's bound_gilstate flag to prevent
-                // assertion failures. We CANNOT call PyGILState_Ensure() here because it will
-                // try to use the stale thread state (whose interpreter is freed) and crash.
-                qore_py_set_bound_gilstate(tss_check, 0);
-                // Clear our internal tracking
-                _qore_PyGILState_SetThisThreadState(nullptr);
-                // Clear python's bound_gilstate so tstate_activate will rebind it to TSS
-                qore_py_set_bound_gilstate(python, 0);
-            }
-        }
-        // CRITICAL: In Python 3.14, PyEval_RestoreThread requires no thread state currently attached.
-        // If there's a thread state from a different interpreter still attached, we need to save and
-        // release it first. We'll restore it later in releaseContext.
-        PyThreadState* currently_attached = PyGILState_GetThisThreadState();
-        if (currently_attached && currently_attached->interp != python->interp) {
-            // Verify the currently attached thread state's interpreter is still valid
-            bool currently_attached_interp_valid = false;
-            PyInterpreterState* interp = PyInterpreterState_Head();
-            while (interp) {
-                if (interp == currently_attached->interp) {
-                    currently_attached_interp_valid = true;
-                    break;
-                }
-                interp = PyInterpreterState_Next(interp);
-            }
-            if (currently_attached_interp_valid) {
-                // Verify that the currently attached thread state is actually the current one
-                PyThreadState* fast_current = PyThreadState_GetUnchecked();
-                if (fast_current != currently_attached) {
-                    // Avoid PyThreadState_Swap without the GIL; clear bound_gilstate instead
-                    qore_py_set_bound_gilstate(currently_attached, 0);
-                } else {
-                    // Save the current thread state to restore later
-                    released_other_interp_tstate = PyEval_SaveThread();  // Release GIL and detach
-                }
-            } else {
-                // The interpreter is gone - just clear the thread state
-                qore_py_set_bound_gilstate(currently_attached, 0);
-            }
+        // Without the GIL, this thread has no state bound to it for the GIL state API but one that only it uses
+        // (qore_python_release_context() unbinds the state it releases): CPython binds python to the thread when
+        // python is attached, and clears the flag of a state bound before, with the GIL held.  No bound_gilstate flag
+        // is changed here: other threads use the main thread state, and states of other interpreters, with the GIL
+        // held; previously the flags of the states bound to this thread were cleared here without the GIL, also the
+        // flag of the main thread state, which was bound to every thread, a data race.
+        //
+        // If a state of another interpreter is attached to this thread, it is released here and attached again in
+        // releaseContext(): PyEval_RestoreThread() requires that no state is attached.
+        PyThreadState* currently_attached = PyThreadState_GetUnchecked();
+        if (currently_attached && currently_attached != python && currently_attached->interp != python->interp) {
+            released_other_interp_tstate = PyEval_SaveThread();  // Release GIL and detach
         }
         PyEval_RestoreThread(python);
         g_state = PyGILState_UNLOCKED;
@@ -1671,55 +1582,10 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         }
     } else {
         // We don't have the GIL - acquire it
-        // In Python 3.12, TSS state can be stale; clear it before activating the new
-        // thread state so bind_gilstate_tstate can safely rebind.
-        PyThreadState* tss_before_acquire = PyGILState_GetThisThreadState();
-        if (tss_before_acquire && tss_before_acquire != python) {
-            // Only clear the old bound_gilstate if the thread state is still valid.
-            bool found = false;
-            PyInterpreterState* interp = PyInterpreterState_Head();
-            while (interp && !found) {
-                PyThreadState* ts = PyInterpreterState_ThreadHead(interp);
-                while (ts) {
-                    if (ts == tss_before_acquire) {
-                        found = true;
-                        break;
-                    }
-                    ts = PyThreadState_Next(ts);
-                }
-                interp = PyInterpreterState_Next(interp);
-            }
-            if (found) {
-                qore_py_set_bound_gilstate(tss_before_acquire, 0);
-            }
-        }
-        // Bind our thread state to TSS directly to avoid tstate_activate assertions.
-        _qore_PyGILState_SetTSS(python);
-        PyThreadState* tss_after_set = PyGILState_GetThisThreadState();
-        if (tss_after_set == python) {
-            qore_py_set_bound_gilstate(python, 1);
-        } else {
-            // If TSS didn't update, clear it to avoid dereferencing stale thread states.
-            if (tss_after_set) {
-                bool tss_valid = false;
-                PyInterpreterState* interp = PyInterpreterState_Head();
-                while (interp && !tss_valid) {
-                    PyThreadState* ts = PyInterpreterState_ThreadHead(interp);
-                    while (ts) {
-                        if (ts == tss_after_set) {
-                            tss_valid = true;
-                            break;
-                        }
-                        ts = PyThreadState_Next(ts);
-                    }
-                    interp = PyInterpreterState_Next(interp);
-                }
-                if (!tss_valid) {
-                    _qore_PyGILState_ClearTSS();
-                }
-            }
-            qore_py_set_bound_gilstate(python, 0);
-        }
+        // Without the GIL, this thread has no state bound to it for the GIL state API but one that only it uses
+        // (qore_python_release_context() unbinds the state it releases): CPython binds python to the thread when
+        // python is attached, and clears the flag of a state bound before, with the GIL held.  No bound_gilstate flag
+        // is changed here (see the same case for Python 3.13 and later above).
         ceval_state = nullptr;
         PyEval_RestoreThread(python);
         // Set our tracking now that we have the GIL

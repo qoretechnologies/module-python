@@ -110,10 +110,13 @@ When an interpreter is deleted:
 
 ### The Solution (Python 3.13+)
 
-Before creating a new thread state, check if TSS points to a stale one:
+Since the module unbinds the states it releases (see "Ownership during interpreter finalization"), a thread's TSS
+does not point to a state of another interpreter while the thread does not hold the GIL.  As a safeguard, before
+creating a new thread state, `setContext()` checks if TSS points to a stale one:
 1. Get TSS thread state via `PyGILState_GetThisThreadState()`
 2. Check if its interpreter still exists (iterate `PyInterpreterState_Head()` list)
-3. If interpreter is invalid, the thread state is stale - clear `_status.bound_gilstate`
+3. If interpreter is invalid, the thread state is stale (and can be freed) - clear the thread's binding
+   (`qore_python_gilstate_tss_clear()`) without touching the state
 4. This allows `PyThreadState_New()` to properly bind the new thread state
 
 ### Python 3.12 Differences
@@ -165,10 +168,22 @@ a state whose thread is not a non-daemon `threading.Thread` (a daemon thread, a 
 code instead of being ended.  A call to Qore from such a thread afterwards raises `RuntimeError` (the program is no
 longer valid); the interpreter's memory is never released.
 
-After a Qore call releases the GIL, its auto-TSS binding points at the long-lived
-main state. A different thread can then destroy the subinterpreter without leaving
-a dangling auto-TSS pointer in the caller. Free-threaded context helpers instead
-save and restore the actual attached state, including a detached (`nullptr`) state.
+When the module releases the GIL (`qore_python_release_context()`, Python 3.12 and later), it unbinds the state it
+releases from the thread's auto-TSS (`PyGILState_GetThisThreadState()`), with the GIL held, as CPython unbinds a
+state: it clears the state's `_status.bound_gilstate` flag and the thread's binding (`qore_python_gilstate_tss_clear()`
+in src/python_fork_gil.c, compiled with CPython's internal headers).  A thread that does not hold the GIL therefore
+keeps no binding to a state that it is not using, so a different thread can destroy a subinterpreter without leaving
+a dangling auto-TSS pointer in it, and attaching a state binds it again (CPython clears the flag of a state bound
+before, with the GIL held).  The binding is also cleared when the module releases the GIL after initializing Python.
+
+**Invariant:** the `bound_gilstate` flag of a state that other threads use (the main thread state, which the
+`QorePythonGilHelper` of interpreter creation and destruction uses on any thread, and the states of other
+interpreters) is only changed with the GIL held.  Previously the main thread state was bound to every thread that
+released the GIL instead, and `setContext()` and `QorePythonGilHelper` cleared the flags of the states bound to the
+thread before acquiring the GIL, so the flag of the main thread state was written by threads that did not hold the
+GIL (a data race reported by ThreadSanitizer).  Without the internal headers, the main thread state is still bound
+instead.  Free-threaded context helpers instead save and restore the actual attached state, including a detached
+(`nullptr`) state.
 
 Qore objects and call references can outlive a Python interpreter. Their persistent
 Python references register with the owning `QorePythonProgram`, retaining a weak
