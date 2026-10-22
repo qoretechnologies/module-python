@@ -16,4 +16,72 @@
     stack size is set to an appropriate size in %Qore (using \c set_default_thread_stack_size() before the %Python
     interpreter is created, for example); the %Python recursion limits are then calculated and managed dynamically
     according to the thread stack size and thread stack usage at the time of context switches to %Python.
+
+    @section python_created_threads Threads Created by Python
+
+    A thread created by %Python (ex: with \c threading.Thread, an executor pool such as
+    \c concurrent.futures.ThreadPoolExecutor, or a native thread of an extension module) can call %Qore: functions,
+    methods, constructors and callables imported from %Qore.  Such a thread becomes a %Qore thread the first time it
+    calls %Qore, and stays one while its %Python thread state exists (normally until the thread ends):
+    - the %Qore objects it creates are kept in its thread data, and %Qore resources it acquires (ex: a
+      @ref Qore::Thread::Mutex "Mutex") stay its own from one call to the next, as in a thread started by %Qore; it is
+      counted by @ref Qore::num_threads() "num_threads()" while it is registered
+    - the %Qore code it calls runs under the @ref sandboxing "sandbox" of the @ref Qore::Program "Program" whose
+      %Python interpreter runs on the thread, as when that code is called on a %Qore thread
+    - %Qore code called from %Python runs without the %Python GIL, so other %Python threads can run meanwhile
+
+    @par Example:
+    @code{.py}
+%requires python
+
+PythonProgram p("
+import threading
+from qore.__root__.Qore.Thread import Queue
+
+def start(q):
+    # the thread calls Qore: it is a Qore thread while it runs
+    t = threading.Thread(target = lambda: q.push('from a Python thread'))
+    t.start()
+    return t
+
+def join(t):
+    t.join()
+", "threads.py");
+Queue q();
+auto t = p.callFunction("start", q);
+printf("%s\n", q.get());
+p.callFunction("join", t);
+    @endcode
+
+    @subsection python_threads_daemon Daemon Threads
+
+    With %Python 3.13 and earlier, a %Python interpreter cannot be finalized while a daemon thread, or a thread started
+    with the \c _thread module, still runs in it: destroying the interpreter (ex: deleting a
+    @ref Python::PythonProgram "PythonProgram" object) then leaves it in memory, with the thread still running its
+    code; a call from that thread to %Qore raises a %Python \c RuntimeError.  With %Python 3.14, the interpreter is
+    finalized, and such threads exit when they next run.  The destruction of an interpreter waits for its threads that
+    are not daemon threads, as %Python does.
+
+    @section python_fork Processes Created with fork()
+
+    The %Python interpreters of the module are %Python subinterpreters, in which %Python does not support \c fork():
+    - \c os.fork() and \c os.forkpty() raise a %Python \c RuntimeError in them; processes can still be started, ex:
+      with \c subprocess
+    - a child process created with @ref Qore::fork() "fork()" can use %Python, unless another thread held the %Python
+      GIL when the process was created: the GIL can never be released in the child, so a call to %Python there raises a
+      \c PYTHON-FORK-ERROR exception, and if the thread that called @ref Qore::fork() "fork()" was called from %Python,
+      the child cannot return to %Python code: it writes an error message to \c stderr and exits with status 1
+    - in a %Python process that uses %Qore through the \c qoreloader module, %Python code should create child processes
+      with \c os.fork(), which %Python supports in its main interpreter: a child created with
+      @ref Qore::fork() "fork()" keeps the %Python state of the threads of the parent, and %Python's own exit then waits
+      for them forever
+
+    @section python_environment The Process Environment
+
+    Changes that %Python makes to the environment (\c os.environ, \c os.putenv(), \c os.unsetenv()) are made with the
+    environment functions of %Qore, under one process-wide lock with the changes and reads of %Qore; the copy of the
+    environment that each %Python interpreter makes into \c os.environ when it is created is read under the same lock.
+    As in %Python, \c os.environ is a copy: it does not see changes that %Qore makes with
+    @ref Qore::setenv() "setenv()" after the interpreter was created; use @ref Qore::getenv() "getenv()" to read the
+    current environment.
 */
