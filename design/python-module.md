@@ -336,6 +336,21 @@ The GIL interplay, measured on Linux with Python 3.14 (GIL build):
     calls `_exit(1)`
 - No thread holds Qore's environment lock while it waits for the GIL (see "The Process Environment"), since
   `os.fork()` holds the GIL while the environment lock is acquired.
+- In a child whose GIL is usable, the threads of the parent that were using an interpreter (a Qore thread in a
+  Qore call from Python, a thread created by Python) do not exist.  The child handler of `py_thr_lck`
+  (`forkChildThreadStates()`) counts the uses of each interpreter (`pgm_thr_cnt`) again from the
+  `QorePythonHelper` objects of the forking thread, which form a thread-local list, so that deleting an interpreter
+  does not wait for the threads of the parent; it also records the forking thread's TID, and the first use of the
+  thread-state maps in the child (`checkForkIntern()`, after every acquisition of `py_thr_lck`) removes the entries of
+  the other TIDs, which new threads of the child can get (removing them in the handler would free memory there).
+  An interpreter created before the fork (`interp_fork_generation` differs from `fork_generation`) that still has
+  thread states other than the finalizing one when it is deleted in the child (states of the parent's Python
+  threads) is left in memory instead of being ended: the threading module, which is not told of a fork() that Python
+  does not make, would wait for those threads forever in `Py_EndInterpreter()`.
+- In a Python process hosting Qore, a child created with Qore's `fork()` from Python code keeps the Python state of
+  the parent's threads, as with any `fork()` that Python does not make (ex: through ctypes): Python's own exit
+  (`Py_FinalizeEx()`, `threading._shutdown()`) waits for the parent's non-daemon threads forever.  Python code should
+  use `os.fork()`, which runs Python's fork protocol (`PyOS_BeforeFork()` / `PyOS_AfterFork_Child()`).
 
 ## Python Shutdown Handling
 

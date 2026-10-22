@@ -39,6 +39,11 @@
       %Python subinterpreters) now raises a %Python \c RuntimeError; previously the child process died with "Fatal
       Python error: _PyInterpreterState_DeleteExceptMain: not main interpreter", as %Python supports \c fork() only in
       its main interpreter.  Processes can still be started (ex: with \c subprocess).
+    - a child process created with @ref Qore::fork() "fork()" while other threads were using a %Python interpreter
+      (ex: a %Qore thread in a call from %Python to %Qore, or a thread created by %Python) can delete the interpreter;
+      previously the deletion waited forever for those threads, which do not exist in the child.  Such an interpreter
+      is not finalized in the child if threads created by %Python in the parent had a state in it; it is left in
+      memory.  New threads of the child that use an interpreter get their own %Python thread states.
     - a child process created with @ref Qore::fork() "fork()" while another thread held the %Python GIL, which can
       never be released in the child, raises a \c PYTHON-FORK-ERROR exception when it calls %Python or creates a
       %Python interpreter, and exits normally; previously it waited forever for the GIL.  If the thread that called

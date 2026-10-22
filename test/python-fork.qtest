@@ -20,6 +20,7 @@ class PythonForkTest inherits QUnit::Test {
         addTestCase("fork() while another thread holds the GIL", \forkGilHeldTest());
         addTestCase("fork() called from Python while another thread holds the GIL", \forkReturnToPythonTest());
         addTestCase("os.fork() in an interpreter of Qore", \osForkTest());
+        addTestCase("the child deletes an interpreter that another thread used", \forkInterpreterInUseTest());
         set_return_value(main());
     }
 
@@ -174,5 +175,98 @@ def run():
             # processes can be started (free-threading subinterpreters are also created with exec disallowed)
             assertEq(3, p.callFunction("run"));
         }
+    }
+
+    # a child process created with fork() while other threads were in an interpreter, without the GIL (a Qore thread
+    # in a Qore closure called from Python, a thread created by Python in such a closure), uses the interpreter,
+    # starts a thread that uses it, and deletes it.  Previously the deletion waited forever for the Qore thread, which
+    # was still counted as using the interpreter, and then for the Python thread in threading._shutdown(); the
+    # interpreter is now left in memory in this case, since the threads of the parent cannot end in the child.
+    forkInterpreterInUseTest() {
+        if (!Option::HAVE_FORK) {
+            testSkip("fork() is not available");
+        }
+        if (Python::FreeThreading) {
+            testSkip("Python threads in sub-interpreters not supported with free-threading (PEP 703)");
+        }
+        TmpDir tmp("python-fork-in-use-");
+        string result = tmp.path + DirSep + "result";
+        PythonProgram p("
+import os
+from threading import Thread
+
+def make_fifo(path):
+    os.mkfifo(path)
+
+# calls the Qore closure, which runs without the GIL, in this thread
+def call(closure):
+    closure()
+
+# calls the Qore closure in a thread created by Python
+def start(closure):
+    thread = Thread(target = closure)
+    thread.start()
+    return thread
+
+def join(thread):
+    thread.join()
+
+def add(x, y):
+    return x + y
+", "fork-in-use.py");
+        p.callFunction("make_fifo", result);
+        Queue ready();
+        Queue release();
+        code wait_closure = sub () {
+            ready.push(True);
+            release.get();
+        };
+        # a Qore thread in the interpreter
+        Counter qore_thread(1);
+        background sub () {
+            on_exit qore_thread.dec();
+            p.callFunction("call", wait_closure);
+        }();
+        # a Python thread in the interpreter
+        auto python_thread = p.callFunction("start", wait_closure);
+        ready.get();
+        ready.get();
+        # both threads wait in the closure, without the GIL
+        int pid = fork();
+        if (!pid) {
+            list<string> r;
+            try {
+                r += sprintf("call: %d", p.callFunction("add", 1, 2));
+                # a new thread of the child uses the interpreter
+                Queue q();
+                background sub () {
+                    try {
+                        q.push(sprintf("thread: %d", p.callFunction("add", 2, 3)));
+                    } catch (hash<ExceptionInfo> ex) {
+                        q.push(sprintf("thread: %s", ex.err));
+                    }
+                }();
+                r += q.get();
+                delete p;
+                r += "deleted";
+            } catch (hash<ExceptionInfo> ex) {
+                r += ex.err;
+            }
+            File result_file();
+            result_file.open2(result, O_WRONLY);
+            result_file.write(r.join(","));
+            Qore::exit(0);
+        }
+        assertGt(0, pid);
+        release.push(True);
+        release.push(True);
+        qore_thread.waitForZero();
+        p.callFunction("join", python_thread);
+        ReadOnlyFile result_file(result);
+        string child_result;
+        while (*binary data = result_file.readBinary(4096)) {
+            child_result += data.toString();
+        }
+        assertEq("call: 3,thread: 5,deleted", child_result);
     }
 }

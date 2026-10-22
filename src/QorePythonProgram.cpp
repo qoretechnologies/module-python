@@ -119,6 +119,58 @@ private:
     MainThreadStateLockHelper& operator=(const MainThreadStateLockHelper&) = delete;
 };
 
+unsigned QorePythonProgram::fork_generation = 0;
+int QorePythonProgram::fork_tid = 0;
+bool QorePythonProgram::fork_purge_pending = false;
+
+void QorePythonProgram::forkChildThreadStates(void* arg) {
+    qore_fork_child_thread_lock(static_cast<QoreThreadLock*>(arg));
+    ++fork_generation;
+    fork_tid = q_gettid();
+    fork_purge_pending = true;
+    // the threads of the parent that used an interpreter do not exist: only the uses of the forking thread remain
+    for (auto& i : py_thr_map) {
+        i.first->pgm_thr_cnt = 0;
+        i.first->pgm_thr_waiting = 0;
+    }
+    for (const QorePythonHelper* helper = QorePythonHelper::getCurrent(); helper; helper = helper->getPrevious()) {
+        if (helper->isCounted()) {
+            ++helper->getProgram()->pgm_thr_cnt;
+        }
+    }
+}
+
+void QorePythonProgram::purgeForkedThreadStatesIntern() {
+    assert(fork_purge_pending);
+    fork_purge_pending = false;
+    for (auto& i : py_thr_map) {
+        for (auto ti = i.second.begin(); ti != i.second.end();) {
+            if (ti->first == fork_tid) {
+                ++ti;
+            } else {
+                ti = i.second.erase(ti);
+            }
+        }
+    }
+    for (auto gi = py_global_tid_map.begin(); gi != py_global_tid_map.end();) {
+        if (gi->first == fork_tid) {
+            ++gi;
+        } else {
+            gi = py_global_tid_map.erase(gi);
+        }
+    }
+}
+
+bool QorePythonProgram::hasOtherThreadStates(PyThreadState* finalizing) {
+    for (PyThreadState* state = PyInterpreterState_ThreadHead(finalizing->interp); state;
+            state = PyThreadState_Next(state)) {
+        if (state != finalizing) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void main_ts_lck_fork_child(void* arg) {
     QoreThreadLock* lck = static_cast<QoreThreadLock*>(arg);
     bool held = main_ts_lck_held.load(std::memory_order_relaxed)
@@ -134,7 +186,7 @@ static void main_ts_lck_fork_child(void* arg) {
 int QorePythonProgram::registerForkHandlers() {
     assert(!py_thr_lck_fork_reg && !main_ts_lck_fork_reg);
     py_thr_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_thread_states",
-        qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock, &py_thr_lck);
+        qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, forkChildThreadStates, &py_thr_lck);
     main_ts_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_RESET, "python_main_thread_state", nullptr,
         nullptr, main_ts_lck_fork_child, &main_ts_lck);
     if (!py_thr_lck_fork_reg || !main_ts_lck_fork_reg) {
@@ -187,6 +239,7 @@ QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
 
     // insert thread state into thread map
     AutoLocker al(py_thr_lck);
+    checkForkIntern();
     assert(py_thr_map.find(this) == py_thr_map.end());
     int tid = q_gettid();
     py_thr_map[this] = {{tid, {python, false}}};
@@ -393,6 +446,7 @@ QorePythonProgram* QorePythonProgram::getContext() {
         // owner of their attached interpreter instead of falling back to the main
         // interpreter. CPython owns the attached state for the duration of this call.
         AutoLocker al(py_thr_lck);
+        checkForkIntern();
         for (const auto& entry : py_thr_map) {
             if (entry.first->interpreter == current->interp && entry.first->qpgm) {
                 return const_cast<QorePythonProgram*>(entry.first);
@@ -561,6 +615,7 @@ QorePythonPersistentReferenceHolder::~QorePythonPersistentReferenceHolder() {
 
 void QorePythonProgram::registerPersistentReference(QorePythonManualReferenceHolder* reference) {
     AutoLocker al(py_thr_lck);
+    checkForkIntern();
     assert(valid);
     assert(persistent_references.find(reference) == persistent_references.end());
     persistent_references.insert(reference);
@@ -571,6 +626,7 @@ void QorePythonProgram::releasePersistentReference(QorePythonManualReferenceHold
     PyObject* object;
     {
         AutoLocker al(py_thr_lck);
+        checkForkIntern();
         persistent_references.erase(reference);
         object = reference->release();
     }
@@ -590,6 +646,7 @@ void QorePythonProgram::clearPersistentReferences() {
         PyObject* object;
         {
             AutoLocker al(py_thr_lck);
+            checkForkIntern();
             if (persistent_references.empty()) {
                 break;
             }
@@ -637,6 +694,7 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
     if (interpreter) {
         {
             AutoLocker al(py_thr_lck);
+            checkForkIntern();
             waitForThreadsIntern();
         }
         {
@@ -667,6 +725,7 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
         // remove all thread states; the objects will be deleted by Python when the interpreter is destroyed
         {
             AutoLocker al(py_thr_lck);
+            checkForkIntern();
             if (interpreter) {
                 py_thr_map_t::iterator i = py_thr_map.find(this);
                 assert(i != py_thr_map.end());
@@ -714,6 +773,7 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                 {
                     unsigned long ident = PyThread_get_thread_ident();
                     AutoLocker al(py_thr_lck);
+                    checkForkIntern();
                     for (PyThreadState* state : owned_thread_states) {
                         if (state->thread_id == ident) {
                             sub_tstate = state;
@@ -735,6 +795,7 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                 py_thr_set_t states;
                 {
                     AutoLocker al(py_thr_lck);
+                    checkForkIntern();
                     // QorePythonHelper may have created a cleanup state after the
                     // first cache removal. Remove its reverse lookup as well.
                     auto program_states = py_thr_map.find(this);
@@ -765,21 +826,27 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
 #if PY_VERSION_HEX < 0x030D0000
                 forgetEndedThreadingMainThread();
 #endif
+                // in a child of fork(), the threads of the parent that have states in an interpreter created before
+                // the fork do not exist, and the threading module, which does not know it (Python is not told of a
+                // fork() that it does not make), waits for them forever when the interpreter ends: it is left in
+                // memory and never finalized
+                bool leave = interp_fork_generation != fork_generation && hasOtherThreadStates(sub_tstate);
 #if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030E0000
                 // Python 3.13 and earlier abort the process ("Py_EndInterpreter: not the last thread") if another
                 // thread still has a state in the interpreter after the threads that Py_EndInterpreter() waits for
                 // have ended (Python 3.14 makes such threads exit when they next try to take the GIL); such a thread
                 // (a daemon thread, or a thread started with the _thread module) cannot be waited for, so the
                 // interpreter is left in memory, with the threads running its code, and is never finalized
-                if (hasThreadsNotJoinedAtEnd(sub_tstate)) {
+                if (!leave) {
+                    leave = hasThreadsNotJoinedAtEnd(sub_tstate);
+                }
+#endif
+                if (leave) {
                     printd(5, "QorePythonProgram::deleteIntern() this: %p interpreter %p left: threads that are not "
-                        "waited for still run in it\n", this, interpreter);
+                        "waited for have states in it\n", this, interpreter);
                 } else {
                     Py_EndInterpreter(sub_tstate);
                 }
-#else
-                Py_EndInterpreter(sub_tstate);
-#endif
                 initial_thread_state = nullptr;
                 interpreter = nullptr;
                 PyThreadState_Swap(old_tstate);
@@ -900,6 +967,7 @@ bool QorePythonProgram::haveGil() {
 
     int tid = q_gettid();
     AutoLocker al(py_thr_lck);
+    checkForkIntern();
 
     py_global_tid_map_t::iterator i = py_global_tid_map.find(tid);
     if (i != py_global_tid_map.end()) {
@@ -1009,6 +1077,7 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
         _QORE_PYTHON_REENABLE_GIL_CHECK
 
         qpgh.set(python);
+        interp_fork_generation = fork_generation;
 #if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030C0000
         // before Python 3.12, a subinterpreter cannot be created with fork() disallowed (see above), so os.fork() is
         // replaced in it
@@ -1099,6 +1168,7 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
     int tid = q_gettid();
     {
         AutoLocker al(py_thr_lck);
+        checkForkIntern();
         {
             py_thr_map_t::iterator ti = py_thr_map.lower_bound(this);
             if (ti == py_thr_map.end() || ti->first != this) {
@@ -1251,6 +1321,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
             {
                 int tid = q_gettid();
                 AutoLocker al(py_thr_lck);
+                checkForkIntern();
                 py_thr_map_t::iterator i = py_thr_map.find(this);
                 if (i != py_thr_map.end()) {
                     i->second.erase(tid);
@@ -1411,6 +1482,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         // removes that lookup, but the state must still be finalized with its interpreter.
         int tid = q_gettid();
         AutoLocker al(py_thr_lck);
+        checkForkIntern();
         if (!is_python_created_thread) {
             owned_thread_states.insert(python);
         }
@@ -1863,6 +1935,7 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
     // So no thread holds py_thr_lck while waiting for the GIL, avoiding deadlocks.
     {
         AutoLocker al(py_thr_lck);
+        checkForkIntern();
         if (!--pgm_thr_cnt && pgm_thr_waiting) {
             pgm_thr_cond.signal();
         }

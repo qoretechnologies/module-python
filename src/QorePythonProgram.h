@@ -547,6 +547,21 @@ protected:
     //! number of program objects; writable only in the py_thr_lck lock
     DLLLOCAL static unsigned pgm_count;
 
+    //! the number of fork() calls that made this process and its ancestors from the process that loaded the module
+    /** Incremented in the child of each fork() by the fork handler of py_thr_lck (forkChildThreadStates()); only the
+        forking thread runs then, and threads created later read it.
+    */
+    DLLLOCAL static unsigned fork_generation;
+    //! the TID of the thread that called fork() in this process; valid if fork_generation is not 0
+    DLLLOCAL static int fork_tid;
+    //! set in a child of fork() until the thread states recorded for the threads of the parent are removed
+    /** Protected by py_thr_lck; see purgeForkedThreadStatesIntern()
+    */
+    DLLLOCAL static bool fork_purge_pending;
+
+    //! the value of fork_generation when the interpreter was created
+    unsigned interp_fork_generation = 0;
+
     // for local program thread management
     mutable int pgm_thr_cnt = 0;
     mutable int pgm_thr_waiting = 0;
@@ -671,6 +686,32 @@ protected:
 
     DLLLOCAL void deleteIntern(ExceptionSink* xsink);
 
+    //! the child handler of py_thr_lck (see QoreForkHandler.h): the child runs only the thread that called fork()
+    /** Initializes the lock again; the uses of each interpreter are counted again with the helpers of the forking
+        thread, which is the only thread left, and the thread states recorded for the other threads of the parent are
+        removed on the next use of the maps (purgeForkedThreadStatesIntern()): removing them here would free memory in
+        a fork handler.
+
+        @param arg the lock (py_thr_lck)
+    */
+    DLLLOCAL static void forkChildThreadStates(void* arg);
+
+    //! removes the thread states recorded for the threads of the parent in a child of fork(); py_thr_lck must be held
+    DLLLOCAL static void checkForkIntern() {
+        if (fork_purge_pending) {
+            purgeForkedThreadStatesIntern();
+        }
+    }
+
+    //! removes the thread states recorded for the threads of the parent; py_thr_lck must be held
+    /** Their TIDs can be used by new threads of the child, which must not use them; the states themselves stay in
+        owned_thread_states and are deleted with the interpreter.
+    */
+    DLLLOCAL static void purgeForkedThreadStatesIntern();
+
+    //! returns true if a thread state other than the given one exists in its interpreter
+    DLLLOCAL static bool hasOtherThreadStates(PyThreadState* finalizing);
+
 #if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030C0000
     //! replaces os.fork() and os.forkpty() in the current subinterpreter with functions that raise RuntimeError
     /** Python 3.12 and later create the subinterpreter with fork() disallowed instead.
@@ -708,6 +749,7 @@ protected:
     //! Returns the Python thread state for this interpreter
     DLLLOCAL PyThreadState* getAcquireThreadState() const {
         AutoLocker al(py_thr_lck);
+        checkForkIntern();
         ++pgm_thr_cnt;
         return getThreadStateIntern();
     }
@@ -715,6 +757,7 @@ protected:
     //! Returns the Python thread state for this interpreter; releases the thread context
     DLLLOCAL PyThreadState* getReleaseThreadState() const {
         AutoLocker al(py_thr_lck);
+        checkForkIntern();
         PyThreadState* python = getThreadStateIntern();
 #if 0
         // XXX DEBUG

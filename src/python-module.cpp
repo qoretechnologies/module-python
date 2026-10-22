@@ -1117,9 +1117,12 @@ extern "C" int python_module_import(ExceptionSink* xsink, QoreProgram* pgm, cons
     return pypgm->import(xsink, module, symbol);
 }
 
+thread_local const QorePythonHelper* QorePythonHelper::current = nullptr;
+
 QorePythonHelper::QorePythonHelper(const QorePythonProgram* pypgm, ExceptionSink* xsink)
         : old_pgm(q_swap_thread_local_data(python_u_tld_key, (void*)pypgm)),
-            old_state(pypgm->setContext(xsink != nullptr)), new_pypgm(pypgm) {
+            old_state(pypgm->setContext(xsink != nullptr)), new_pypgm(pypgm), prev(current) {
+    current = this;
     //printd(5, "QorePythonHelper::QorePythonHelper() new: %p old: %p\n", pypgm, old_pgm);
     if (xsink) {
         if (python_fork_lost) {
@@ -1138,6 +1141,8 @@ QorePythonHelper::QorePythonHelper(const QorePythonProgram* pypgm, ExceptionSink
 QorePythonHelper::~QorePythonHelper() {
     new_pypgm->releaseContext(old_state);
     q_swap_thread_local_data(python_u_tld_key, (void*)old_pgm);
+    assert(current == this);
+    current = prev;
 }
 
 bool QorePythonHelper::isValid() const {

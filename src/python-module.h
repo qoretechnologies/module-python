@@ -432,10 +432,37 @@ public:
     //! Returns true if context acquisition was interrupted
     DLLLOCAL bool wasInterrupted() const;
 
+    //! Returns true if the helper is counted as a use of its program (see QorePythonProgram::getAcquireThreadState())
+    DLLLOCAL bool isCounted() const {
+        return old_state.valid;
+    }
+
+    //! Returns the program whose context the helper holds
+    DLLLOCAL const QorePythonProgram* getProgram() const {
+        return new_pypgm;
+    }
+
+    //! Returns the helper that the current thread created before this one and that still exists, if any
+    DLLLOCAL const QorePythonHelper* getPrevious() const {
+        return prev;
+    }
+
+    //! Returns the last helper that the current thread created and that still exists, if any
+    /** The helpers of a thread form a list, so that the uses of each program by the thread can be found in the child
+        of a fork() (see QorePythonProgram::forkChildThreadStates())
+    */
+    DLLLOCAL static const QorePythonHelper* getCurrent() {
+        return current;
+    }
+
 protected:
     void* old_pgm;
     QorePythonThreadInfo old_state;
     const QorePythonProgram* new_pypgm;
+    //! the helper created before this one in this thread
+    const QorePythonHelper* prev;
+
+    DLLLOCAL static thread_local const QorePythonHelper* current;
 };
 
 //! Registers a thread that Python created with Qore, for the life of its Python thread state
