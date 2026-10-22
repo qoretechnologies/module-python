@@ -671,6 +671,15 @@ protected:
 
     DLLLOCAL void deleteIntern(ExceptionSink* xsink);
 
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030C0000
+    //! replaces os.fork() and os.forkpty() in the current subinterpreter with functions that raise RuntimeError
+    /** Python 3.12 and later create the subinterpreter with fork() disallowed instead.
+
+        @return 0 for OK, -1 if a Python exception was raised
+    */
+    DLLLOCAL static int disallowFork();
+#endif
+
 #if PY_VERSION_HEX < 0x030D0000
     //! makes threading._shutdown() treat the current thread as another thread than the one that imported threading
     /** threading._shutdown() (Python 3.12 and earlier) treats the thread that finalizes the interpreter as the thread

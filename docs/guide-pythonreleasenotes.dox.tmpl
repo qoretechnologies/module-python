@@ -30,6 +30,11 @@
     - a child process created with @ref Qore::fork() "fork()" while another thread holds a lock of the module can
       use %Python, as long as no other thread held the %Python GIL; previously the child could wait forever for a lock
       held by a thread that did not exist in it
+    - \c os.fork() (and \c os.forkpty()) called in a %Python interpreter of the module (every interpreter of a
+      @ref Python::PythonProgram "PythonProgram" or of a @ref Qore::Program "Program" using %Python, which are
+      %Python subinterpreters) now raises a %Python \c RuntimeError; previously the child process died with "Fatal
+      Python error: _PyInterpreterState_DeleteExceptMain: not main interpreter", as %Python supports \c fork() only in
+      its main interpreter.  Processes can still be started (ex: with \c subprocess).
     - a child process created with @ref Qore::fork() "fork()" while another thread held the %Python GIL, which can
       never be released in the child, raises a \c PYTHON-FORK-ERROR exception when it calls %Python or creates a
       %Python interpreter, and exits normally; previously it waited forever for the GIL.  If the thread that called

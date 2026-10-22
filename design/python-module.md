@@ -292,9 +292,16 @@ The GIL interplay, measured on Linux with Python 3.14 (GIL build):
 - `os.fork()` in the main interpreter (a Python process hosting Qore) runs with the GIL held while Qore's handlers
   acquire their locks; no holder of those locks waits for the GIL, so it does not deadlock: 200 forks while four
   Python threads called Qore all succeeded, and the children used Qore and Python.
-- `os.fork()` in a subinterpreter (every interpreter of a Qore program or `PythonProgram`) kills the child with
+- `os.fork()` in a subinterpreter (every interpreter of a Qore program or `PythonProgram`) killed the child with
   "Fatal Python error: _PyInterpreterState_DeleteExceptMain: not main interpreter" (CPython's after-fork handling
-  only supports the main interpreter); it does not deadlock.
+  only supports the main interpreter); it did not deadlock.  The subinterpreters are therefore created with fork()
+  disallowed: with Python 3.12 and later, `createInterpreter()` uses `Py_NewInterpreterFromConfig()` with the
+  configuration of `Py_NewInterpreter()` (`_PyInterpreterConfig_LEGACY_INIT`) except `allow_fork = 0`, so
+  `os.fork()` and `os.forkpty()` raise `RuntimeError` ("fork not supported for isolated subinterpreters"); before
+  3.12, which has no such configuration, `disallowFork()` replaces `fork` and `forkpty` of `posix` and `os` in the new
+  interpreter with functions that raise `RuntimeError`.  Starting processes (`subprocess`, `allow_exec`) is still
+  allowed: CPython's `_posixsubprocess` runs no Python code in the child unless `preexec_fn` is given, which CPython
+  refuses in subinterpreters.
 - A child created with a `fork()` that Python does not make (Qore's `fork()`, or any native fork) gets the GIL in the
   state the parent had: if another thread held it, it can never be acquired in the child.  If no thread held it,
   Python works in the child.  The module does not acquire the GIL before `fork()`: every `fork()` in the process,

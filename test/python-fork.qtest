@@ -19,6 +19,7 @@ class PythonForkTest inherits QUnit::Test {
     constructor() : Test("python fork test", "1.0", \ARGV) {
         addTestCase("fork() while another thread holds the GIL", \forkGilHeldTest());
         addTestCase("fork() called from Python while another thread holds the GIL", \forkReturnToPythonTest());
+        addTestCase("os.fork() in an interpreter of Qore", \osForkTest());
         set_return_value(main());
     }
 
@@ -141,5 +142,37 @@ def add(x, y):
         string output = backquote(sprintf("qore %s 2>&1", script));
         assertRegex("parent: child started", output);
         assertRegex("a child process created with fork\\(\\) cannot return to Python code", output);
+    }
+
+    # CPython supports os.fork() only in the main interpreter: the child of a fork made in a subinterpreter (every
+    # interpreter of a PythonProgram or of a Program using Python) died with "Fatal Python error:
+    # _PyInterpreterState_DeleteExceptMain: not main interpreter".  The subinterpreters are created with fork()
+    # disallowed, so os.fork() raises RuntimeError in the interpreter, while processes can still be started.
+    osForkTest() {
+        if (!Option::HAVE_FORK) {
+            testSkip("fork() is not available");
+        }
+        PythonProgram p("
+import os
+import subprocess
+
+def fork():
+    try:
+        pid = os.fork()
+    except RuntimeError as e:
+        return 'RuntimeError: ' + str(e)
+    if not pid:
+        os._exit(0)
+    os.waitpid(pid, 0)
+    return 'forked'
+
+def run():
+    return subprocess.run(['sh', '-c', 'exit 3']).returncode
+", "os-fork.py");
+        assertRegex("^RuntimeError: fork not supported", p.callFunction("fork"));
+        if (!Python::FreeThreading) {
+            # processes can be started (free-threading subinterpreters are also created with exec disallowed)
+            assertEq(3, p.callFunction("run"));
+        }
     }
 }

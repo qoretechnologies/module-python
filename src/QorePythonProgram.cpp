@@ -496,6 +496,44 @@ void QorePythonProgram::forgetEndedThreadingMainThread() {
 }
 #endif
 
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030C0000
+// os.fork(), os.forkpty() in a subinterpreter: CPython supports fork() only in the main interpreter, and the child of
+// a fork() made in a subinterpreter dies
+static PyObject* qore_python_subinterpreter_fork(PyObject* self, PyObject* args) {
+    PyErr_SetString(PyExc_RuntimeError, "fork not supported for subinterpreters");
+    return nullptr;
+}
+
+static PyMethodDef qore_python_subinterpreter_fork_def = {
+    "fork", qore_python_subinterpreter_fork, METH_NOARGS,
+    "Raises RuntimeError: fork() is not supported in a subinterpreter"
+};
+
+static PyMethodDef qore_python_subinterpreter_forkpty_def = {
+    "forkpty", qore_python_subinterpreter_fork, METH_NOARGS,
+    "Raises RuntimeError: fork() is not supported in a subinterpreter"
+};
+
+int QorePythonProgram::disallowFork() {
+    for (const char* name : {"posix", "os"}) {
+        QorePythonReferenceHolder mod(PyImport_ImportModule(name));
+        if (!mod) {
+            return -1;
+        }
+        for (PyMethodDef* def : {&qore_python_subinterpreter_fork_def, &qore_python_subinterpreter_forkpty_def}) {
+            if (!PyObject_HasAttrString(*mod, def->ml_name)) {
+                continue;
+            }
+            QorePythonReferenceHolder func(PyCFunction_New(def, nullptr));
+            if (!func || PyObject_SetAttrString(*mod, def->ml_name, *func) < 0) {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+#endif
+
 void QorePythonProgram::waitForThreadsIntern() {
     while (pgm_thr_cnt) {
         ++pgm_thr_waiting;
@@ -931,6 +969,29 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
             }
             return -1;
         }
+#elif PY_VERSION_HEX >= 0x030C0000
+        // the configuration of Py_NewInterpreter() (_PyInterpreterConfig_LEGACY_INIT), except that os.fork() is not
+        // allowed: CPython supports fork() only in the main interpreter, and a child forked in a subinterpreter
+        // dies ("Fatal Python error: _PyInterpreterState_DeleteExceptMain: not main interpreter"), while with
+        // allow_fork = 0, os.fork() raises RuntimeError in the parent; processes can still be started (allow_exec)
+        PyInterpreterConfig config = {
+            .use_main_obmalloc = 1,
+            .allow_fork = 0,
+            .allow_exec = 1,
+            .allow_threads = 1,
+            .allow_daemon_threads = 1,
+            .check_multi_interp_extensions = 0,
+            .gil = PyInterpreterConfig_SHARED_GIL,
+        };
+        python = nullptr;
+        PyStatus status = Py_NewInterpreterFromConfig(&python, &config);
+        if (PyStatus_Exception(status)) {
+            if (xsink) {
+                xsink->raiseException("PYTHON-COMPILE-ERROR", "error creating the Python subinterpreter: %s",
+                    status.err_msg ? status.err_msg : "unknown error");
+            }
+            return -1;
+        }
 #else
         python = Py_NewInterpreter();
 #endif
@@ -948,6 +1009,16 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
         _QORE_PYTHON_REENABLE_GIL_CHECK
 
         qpgh.set(python);
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030C0000
+        // before Python 3.12, a subinterpreter cannot be created with fork() disallowed (see above), so os.fork() is
+        // replaced in it
+        if (disallowFork()) {
+            if (xsink && !checkPythonException(xsink)) {
+                xsink->raiseException("PYTHON-COMPILE-ERROR", "cannot disallow fork() in the Python subinterpreter");
+            }
+            PyErr_Clear();
+        }
+#endif
         // Ensure the sub-interpreter has a usable sys.path (stdlib + extension modules).
         // copies made under the environment lock: another thread can change the environment meanwhile
         QoreEnvironmentValue pyhome_value("PYTHONHOME");
