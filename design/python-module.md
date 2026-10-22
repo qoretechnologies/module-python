@@ -230,6 +230,31 @@ interpreter, when it is constructed, before the creator calls `Program::setSandb
 sandbox, the sandbox captured when the interpreter was created (the creating code's, `QorePythonProgram::sandbox`)
 applies.  On a Qore thread, the sandbox of the thread's own callers governs the call, as for any synchronous call.
 
+## The Process Environment
+
+Qore serializes every access to the C environment with one process-wide read-write lock (`SystemEnvironment`,
+`QoreEnvironmentReadLock`); Python does not take it.  The module bridges the two:
+
+- `os.environ` is a Python dict copied from the C environment when the `posix` module of an interpreter initializes;
+  setting or deleting one of its keys calls the `putenv()` / `unsetenv()` of the `os` module, which change the C
+  environment.  When `qoreloader` is initialized in an interpreter (the main interpreter at module initialization, a
+  subinterpreter when its `QorePythonProgram` imports `qoreloader`, and the host interpreter when Python imports
+  `qoreloader`), `qore_python_install_environment_functions()` replaces `posix.putenv`, `posix.unsetenv`,
+  `os.putenv` and `os.unsetenv` with functions that convert, check and audit their arguments as CPython 3.9+ does and
+  change the environment with `SystemEnvironment::set()` / `unset()`, with the GIL released while the lock is waited
+  for.  `os.environ` itself stays Python's copy: it does not see changes made with Qore's `setenv()`, as in plain
+  Python it does not see changes made by C code.
+- `PYTHONHOME` and `PYTHONPATH` are read with `QoreEnvironmentValue`.
+- `Py_InitializeEx()` runs under a `QoreEnvironmentReadLock`: Python reads its configuration variables and copies the
+  environment into `os.environ` while it initializes, and no other Python thread exists yet.
+- Subinterpreter creation (`Py_NewInterpreter()`) also copies the environment, but it runs Python code (`site`) that
+  can release the GIL to another Python thread; holding the environment lock there would deadlock with a Python
+  thread that calls `os.fork()` (it holds the GIL while Qore's fork handlers wait for the environment lock), so the
+  lock is not held, and the copy can race with a concurrent `setenv()` in another thread.
+- Python C code that calls `getenv()` or `setenv()` directly (ex: `time.tzset()`) is not serialized with Qore.
+
+**Invariant:** no thread holds the environment lock while it waits for a GIL or for a Python thread state.
+
 ## Python Shutdown Handling
 
 ### The Problem

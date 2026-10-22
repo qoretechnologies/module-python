@@ -21,6 +21,10 @@
 %try-module xml
 %define NO_XML
 %endtry
+# Process::getEnvironment() reads the whole environment; see environmentTest()
+%try-module process
+%define NO_PROCESS
+%endtry
 
 %exec-class PythonTest
 
@@ -91,6 +95,7 @@ class PythonTest inherits Test {
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
         addTestCase("Python threads run under the sandbox of the interpreter's Program", \sandboxPythonThreadTest());
+        addTestCase("os.environ changes are serialized with Qore", \environmentTest());
         # Set return value for compatibility with test harnesses that check the return value
         set_return_value(main());
     }
@@ -345,6 +350,103 @@ def py_call_in_thread(reader, path):
             "the closure called on the Qore thread is denied");
         assertRegex("FILESYSTEM-ACCESS-DENIED", pgm.callFunction("py_call_in_thread", reader, secret),
             "the closure called on the Python thread is denied");
+    }
+
+    # os.putenv() and os.unsetenv(), which os.environ uses, change the environment under the lock that serializes the
+    # environment with Qore: a Python thread changing variables while Qore reads the environment.  Previously Python
+    # changed the environment without the lock, and a Qore thread reading it at the same time could read freed memory
+    # (a crash, shown by repeated runs, not deterministically).
+    environmentTest() {
+        if (Python::FreeThreading) {
+            testSkip("Python threads in sub-interpreters not supported with free-threading (PEP 703)");
+        }
+        PythonProgram p("
+import os
+from threading import Thread
+
+def set_var(name, value):
+    os.environ[name] = value
+
+def del_var(name):
+    del os.environ[name]
+
+def check(fn, *args):
+    try:
+        fn(*args)
+        return 'accepted'
+    except OSError as e:
+        return 'OSError %d' % e.errno
+    except ValueError as e:
+        return str(e)
+
+def checks():
+    return [check(os.putenv, '', 'x'), check(os.putenv, 'A=B', 'x'), check(os.putenv, 'A\\0B', 'x'),
+        check(os.unsetenv, 'A=B')]
+
+def change_in_thread(prefix, count, start, done):
+    def target():
+        try:
+            start.get()
+            for i in range(count):
+                name = '%s%d' % (prefix, i % 50)
+                os.environ[name] = 'v' * (64 + i % 64)
+                if i % 3:
+                    del os.environ[name]
+        finally:
+            done.dec()
+    thread = Thread(target = target)
+    thread.start()
+    return thread
+
+def join(thread):
+    thread.join()
+", "environment.py");
+
+        string name = sprintf("QORE_PYTHON_ENV_%d", getpid());
+        on_exit unsetenv(name);
+        # a change made in Python is seen by Qore
+        p.callFunction("set_var", name, "set in Python");
+        assertEq("set in Python", getenv(name));
+        p.callFunction("del_var", name);
+        assertNothing(getenv(name));
+        # the arguments are checked as Python checks them
+        assertEq(("OSError " + EINVAL, "illegal environment variable name", "embedded null byte", "OSError " + EINVAL),
+            p.callFunction("checks"));
+
+        # Qore reads the environment while a Python thread changes it
+        string prefix = sprintf("QORE_PYTHON_ENV_CHANGE_%d_", getpid());
+        on_exit {
+            for (int i = 0; i < 50; ++i) {
+                unsetenv(prefix + i);
+            }
+        }
+        # with a process module that has Process::getEnvironment(), the whole environment is also read, which keeps a
+        # reader in the environment for longer (previously a crash in every run)
+        *code read_all;
+%ifndef NO_PROCESS
+        try {
+            call_static_method("Qore::Process::Process", "getEnvironment");
+            read_all = sub () { call_static_method("Qore::Process::Process", "getEnvironment"); };
+        } catch (hash<ExceptionInfo> ex) {
+            # the process module has no Process::getEnvironment()
+        }
+%endif
+        Queue start();
+        Counter done(1);
+        auto thread = p.callFunction("change_in_thread", prefix, 20000, start, done);
+        int found = 0;
+        # the Python thread starts changing the environment when the reads start
+        start.push(True);
+        while (done.getCount()) {
+            if (exists getenv(prefix + "unset")) {
+                ++found;
+            }
+            if (read_all) {
+                read_all();
+            }
+        }
+        p.callFunction("join", thread);
+        assertEq(0, found, "a variable that was never set was not found");
     }
 
     moduleSpecFailureTest() {

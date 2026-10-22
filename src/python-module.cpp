@@ -22,6 +22,7 @@
 #include "python-module.h"
 
 #include <pthread.h>
+#include <cstring>
 #include "QC_PythonProgram.h"
 #include "QorePythonProgram.h"
 #include "QorePythonStackLocationHelper.h"
@@ -322,6 +323,101 @@ int qore_python_register_thread() {
     return 0;
 }
 
+#ifndef _Q_WINDOWS
+//! Replaces os.putenv(): changes the environment under the lock that serializes the environment with Qore
+/** Python changes the C environment with setenv() when a variable of os.environ is set; without the lock, a Qore
+    thread reading the environment at the same time could read freed memory.  The arguments are converted, checked
+    and audited as Python's own os.putenv() does (Python 3.9 and later).  The GIL is released while the lock is waited for, so that no thread
+    holds the environment lock while it waits for the GIL.
+*/
+static PyObject* qore_python_putenv(PyObject* self, PyObject* args) {
+    PyObject* name = nullptr;
+    PyObject* value = nullptr;
+    if (!PyArg_ParseTuple(args, "O&O&:putenv", PyUnicode_FSConverter, &name, PyUnicode_FSConverter, &value)) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder name_holder(name);
+    QorePythonReferenceHolder value_holder(value);
+    const char* name_str = PyBytes_AS_STRING(name);
+    // an empty name is refused by setenv() with EINVAL, as with Python's own function
+    if (strchr(name_str, '=')) {
+        PyErr_SetString(PyExc_ValueError, "illegal environment variable name");
+        return nullptr;
+    }
+    if (PySys_Audit("os.putenv", "OO", name, value) < 0) {
+        return nullptr;
+    }
+    int rc, err;
+    {
+        QorePythonReleaseGilHelper prgh;
+        rc = SystemEnvironment::set(name_str, PyBytes_AS_STRING(value));
+        err = errno;
+    }
+    if (rc) {
+        errno = err;
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    Py_RETURN_NONE;
+}
+
+//! Replaces os.unsetenv(): removes a variable under the lock that serializes the environment with Qore
+/** See qore_python_putenv()
+*/
+static PyObject* qore_python_unsetenv(PyObject* self, PyObject* args) {
+    PyObject* name = nullptr;
+    if (!PyArg_ParseTuple(args, "O&:unsetenv", PyUnicode_FSConverter, &name)) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder name_holder(name);
+    // an empty name or one with '=' is refused by unsetenv() with EINVAL, as with Python's own function
+    const char* name_str = PyBytes_AS_STRING(name);
+    if (PySys_Audit("os.unsetenv", "(O)", name) < 0) {
+        return nullptr;
+    }
+    int rc, err;
+    {
+        QorePythonReleaseGilHelper prgh;
+        rc = SystemEnvironment::unset(name_str);
+        err = errno;
+    }
+    if (rc) {
+        errno = err;
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef qore_python_putenv_def = {
+    "putenv", qore_python_putenv, METH_VARARGS,
+    "Change or add an environment variable; serialized with the environment changes of Qore."
+};
+
+static PyMethodDef qore_python_unsetenv_def = {
+    "unsetenv", qore_python_unsetenv, METH_VARARGS,
+    "Delete an environment variable; serialized with the environment changes of Qore."
+};
+#endif
+
+int qore_python_install_environment_functions() {
+#ifndef _Q_WINDOWS
+    // os.environ calls the putenv() and unsetenv() of the os module, which are the functions of posix
+    for (const char* name : {"posix", "os"}) {
+        QorePythonReferenceHolder mod(PyImport_ImportModule(name));
+        if (!mod) {
+            return -1;
+        }
+        QorePythonReferenceHolder putenv_func(PyCFunction_New(&qore_python_putenv_def, nullptr));
+        QorePythonReferenceHolder unsetenv_func(PyCFunction_New(&qore_python_unsetenv_def, nullptr));
+        if (!putenv_func || !unsetenv_func
+                || PyObject_SetAttrString(*mod, "putenv", *putenv_func) < 0
+                || PyObject_SetAttrString(*mod, "unsetenv", *unsetenv_func) < 0) {
+            return -1;
+        }
+    }
+#endif
+    return 0;
+}
+
 void QorePythonQoreEntryHelper::applySandbox() {
     if (!python_thread_registered) {
         return;
@@ -386,7 +482,13 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
             throw QoreStandardException("PYTHON-MODULE-ERROR", "cannot append the qoreloader module to Python");
         }
 
-        Py_InitializeEx(0);
+        {
+            // Python reads the environment while it initializes (its configuration variables and the copy that
+            // becomes os.environ); no other Python thread exists yet, so the lock is not held while a thread waits
+            // for the GIL, which a thread forking with os.fork() could hold while it waits for the lock
+            QoreEnvironmentReadLock env_lock;
+            Py_InitializeEx(0);
+        }
 #ifdef QORE_ALLOW_PYTHON_SHUTDOWN
         // issue# 4290: if we actively shut down Python on exit, then exit handlers in modules
         // (such as the h5py module in version 3.3.0) will cause a crash when the process exits,
@@ -427,8 +529,11 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     check_python_version();
 
     // Ensure sys.path is initialized when embedding (esp. for debug builds).
-    const char* pyhome = getenv("PYTHONHOME");
-    const char* pypath = getenv("PYTHONPATH");
+    // copies made under the environment lock: another thread can change the environment meanwhile
+    QoreEnvironmentValue pyhome_value("PYTHONHOME");
+    QoreEnvironmentValue pypath_value("PYTHONPATH");
+    const char* pyhome = pyhome_value.c_str();
+    const char* pypath = pypath_value.c_str();
     if ((pyhome && *pyhome) || (pypath && *pypath)) {
 #ifdef _Q_WINDOWS
         const char path_sep = ';';

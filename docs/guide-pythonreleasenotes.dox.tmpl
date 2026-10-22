@@ -22,6 +22,11 @@
     - %Qore code called from a thread created by %Python (ex: a %Qore closure or a class from a %Qore module) runs
       under the @ref sandboxing "sandbox" of the %Program whose %Python code runs on the thread, as when that code is
       called on a %Qore thread; previously it ran with no sandbox
+    - changes made to \c os.environ (and with \c os.putenv() and \c os.unsetenv()) are serialized with the
+      environment functions of %Qore, which read and change the environment under one lock; previously %Python changed
+      the environment while %Qore threads could read it, which could crash the process.  The environment variables that
+      the module reads (\c PYTHONHOME, \c PYTHONPATH) and the environment that %Python copies into \c os.environ when
+      it starts are read under the lock as well.
     - a %Qore callable (closure or call reference) called from %Python runs without the %Python GIL, as %Qore
       functions and methods called from %Python do; previously a callable that waited for another %Python thread
       waited forever

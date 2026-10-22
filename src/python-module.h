@@ -438,6 +438,14 @@ DLLLOCAL int qore_python_register_thread();
 //! Initializes the type used to deregister threads that Python created; called once in the main interpreter
 DLLLOCAL int qore_python_thread_registration_init();
 
+//! Replaces os.putenv() and os.unsetenv() in the current interpreter with functions that change the environment
+//! under the lock that serializes the environment with Qore
+/** Called with the GIL held when the qoreloader module is initialized in an interpreter
+
+    @return 0 for OK, -1 if a Python exception was raised
+*/
+DLLLOCAL int qore_python_install_environment_functions();
+
 //! Enters Qore from a function or slot that Python calls; see qore_python_register_thread()
 /** Create it before any other Qore API is used in the call, with the GIL held.
 */

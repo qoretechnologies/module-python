@@ -311,6 +311,11 @@ static int slot_qoreloader_exec(PyObject *m) {
 
     QoreMetaPathFinder::setupModules();
 
+    // changes to os.environ in this interpreter are serialized with the environment changes of Qore
+    if (qore_python_install_environment_functions()) {
+        return -1;
+    }
+
     return 0;
 }
 

@@ -765,8 +765,11 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
 
         qpgh.set(python);
         // Ensure the sub-interpreter has a usable sys.path (stdlib + extension modules).
-        const char* pyhome = getenv("PYTHONHOME");
-        const char* pypath = getenv("PYTHONPATH");
+        // copies made under the environment lock: another thread can change the environment meanwhile
+        QoreEnvironmentValue pyhome_value("PYTHONHOME");
+        QoreEnvironmentValue pypath_value("PYTHONPATH");
+        const char* pyhome = pyhome_value.c_str();
+        const char* pypath = pypath_value.c_str();
         if ((pyhome && *pyhome) || (pypath && *pypath)) {
 #ifdef _Q_WINDOWS
             const char path_sep = ';';
