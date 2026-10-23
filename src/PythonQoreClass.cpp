@@ -125,8 +125,8 @@ static int qore_exception_init(PyObject* self, PyObject* args, PyObject* kwds) {
 }
 
 PyTypeObject PythonQoreException_Type = {
-    PyVarObject_HEAD_INIT(nullptr, 0)
 #if !defined(__clang__) && __GNUC__ < 8
+    PyVarObject_HEAD_INIT(nullptr, 0)
     // g++ 5.4.0 does not accept the short-form initialization below :(
     "QoreException",                // tp_name
     sizeof(PyBaseExceptionObject),  // tp_basicsize
@@ -166,6 +166,7 @@ PyTypeObject PythonQoreException_Type = {
     0,                              // tp_alloc
     0,                              // tp_new
 #else
+    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
     .tp_name = "QoreException",
     .tp_basicsize = sizeof(PyBaseExceptionObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,

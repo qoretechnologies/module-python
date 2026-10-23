@@ -113,6 +113,17 @@ def main_thread_ended():
         Previously the process aborted with Python 3.13 and earlier.
     */
     daemonThreadAtEnd() {
+        if (Python::FreeThreading) {
+            # daemon threads are disabled in the interpreters of the module with free-threading (PEP 703)
+            PythonProgram p("
+from threading import Thread
+
+def start():
+    Thread(target = lambda: None, daemon = True).start()
+", "daemon-disabled.py");
+            assertThrows("builtins.RuntimeError", "daemon threads are disabled", \p.callFunction(), "start");
+            return;
+        }
         TmpDir tmp("python-daemon-end-");
         string ready = tmp.path + DirSep + "ready";
         string release = tmp.path + DirSep + "release";

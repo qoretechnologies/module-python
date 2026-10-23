@@ -2,7 +2,7 @@
 /*
     qore Python module
 
-    Copyright (C) 2020 - 2021 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -31,8 +31,8 @@ static PyObject* qore_callable_call(PyQoreCallable* self, PyObject* args, PyObje
 static void qore_callable_free(PyQoreCallable* self);
 
 PyTypeObject PythonQoreCallable_Type = {
-    PyVarObject_HEAD_INIT(nullptr, 0)
 #if !defined(__clang__) && __GNUC__ < 8
+    PyVarObject_HEAD_INIT(nullptr, 0)
     // g++ 5.4.0 does not accept the short-form initialization below :(
     "QoreCallable",                 // tp_name
     sizeof(PyQoreCallable),         // tp_basicsize
@@ -73,6 +73,7 @@ PyTypeObject PythonQoreCallable_Type = {
     qore_callable_new,              // tp_new
     (freefunc)qore_callable_free,   // tp_free
 #else
+    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
     .tp_name = "QoreCallable",
     .tp_basicsize = sizeof(PyQoreCallable),
     .tp_dealloc = (destructor)qore_callable_dealloc,

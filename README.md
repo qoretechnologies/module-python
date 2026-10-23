@@ -9,7 +9,7 @@ This module provides bidirectional integration between Qore and Python, allowing
 ## Requirements
 
 - Qore 1.0+
-- Python 3.7 - 3.14
+- Python 3.7 - 3.16
 - CMake 3.12+
 - C++17 compatible compiler
 

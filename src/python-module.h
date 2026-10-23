@@ -36,8 +36,21 @@
 #endif
 
 #define PY_SSIZE_T_CLEAN
+// Python 3.16 deprecates PyStatus::exitcode, a member of a structure that the API passes by value (ex:
+// PyStatus_Exception()); the implicit copy constructor of PyStatus then uses the deprecated member, which clang reports
+// at the definition of the structure in the Python headers, where a pragma around the call has no effect.  Deprecation
+// warnings are disabled for the Python headers only: a deprecated API that the module uses is still reported where the
+// module uses it
+#include <patchlevel.h>
+#if PY_VERSION_HEX >= 0x03100000
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 #include <Python.h>
 #include <structmember.h>
+#if PY_VERSION_HEX >= 0x03100000
+#pragma GCC diagnostic pop
+#endif
 
 #include <qore/Qore.h>
 #include <qore/QoreSandboxManager.h>

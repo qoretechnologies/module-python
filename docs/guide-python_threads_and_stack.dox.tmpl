@@ -62,6 +62,9 @@ p.callFunction("join", t);
     finalized, and such threads exit when they next run.  The destruction of an interpreter waits for its threads that
     are not daemon threads, as %Python does.
 
+    With a free-threaded %Python build (PEP 703), daemon threads are disabled in the interpreters of the module:
+    starting one raises a %Python \c RuntimeError.
+
     @section python_fork Processes Created with fork()
 
     The %Python interpreters of the module are %Python subinterpreters, in which %Python does not support \c fork():

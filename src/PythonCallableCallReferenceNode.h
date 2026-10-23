@@ -41,15 +41,15 @@ public:
     //! all args must already be referenced before the call
     DLLLOCAL PythonCallableCallReferenceNode(QorePythonProgram* pypgm, PyObject* val, PyObject* self = nullptr);
 
-    DLLLOCAL virtual QoreValue execValue(const QoreListNode* args, ExceptionSink* xsink) const;
+    DLLLOCAL virtual QoreValue execValue(const QoreListNode* args, ExceptionSink* xsink) const override;
 
     DLLLOCAL virtual QoreFunction* getFunction() const override {
         return nullptr;
     }
 
-    DLLLOCAL virtual int getAsString(QoreString& str, int foff, ExceptionSink* xsink) const;
-    DLLLOCAL virtual QoreString* getAsString(bool& del, int foff, ExceptionSink* xsink) const;
-    DLLLOCAL virtual const char* getTypeName() const {
+    DLLLOCAL virtual int getAsString(QoreString& str, int foff, ExceptionSink* xsink) const override;
+    DLLLOCAL virtual QoreString* getAsString(bool& del, int foff, ExceptionSink* xsink) const override;
+    DLLLOCAL virtual const char* getTypeName() const override {
         return "python callable call";
     }
 

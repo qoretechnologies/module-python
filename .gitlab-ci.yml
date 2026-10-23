@@ -15,7 +15,7 @@ default:
 variables:
   REPO_NAME: module-python
 
-test-ubuntu:
+.test-ubuntu:
   stage: test
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
   script:
@@ -31,6 +31,30 @@ test-ubuntu:
             -d "{\"state\": \"failure\", \"context\": \"${REPO_NAME}\", \"description\": \"Gitlab CI\", \"target_url\": \"${CI_JOB_URL}\"}"
           exit 1
         fi
+
+test-ubuntu:
+  extends: .test-ubuntu
+
+# Python versions that the images do not provide: test/docker_test/test-ubuntu.sh builds CPython from the python.org
+# source release (version and SHA-256 of Python-<version>.tar.xz) before building and testing the module
+test-ubuntu-python3.15:
+  extends: .test-ubuntu
+  variables:
+    PYTHON_SRC_VERSION: "3.15.1"
+    PYTHON_SRC_SHA256: "673ae7232d84c894729882c8257d300ef2d26523911bfd3917ec8ce7f526f99b"
+
+test-ubuntu-python3.15t:
+  extends: .test-ubuntu
+  variables:
+    PYTHON_SRC_VERSION: "3.15.1"
+    PYTHON_SRC_SHA256: "673ae7232d84c894729882c8257d300ef2d26523911bfd3917ec8ce7f526f99b"
+    PYTHON_SRC_CONFIGURE: "--disable-gil"
+
+test-ubuntu-python3.16:
+  extends: .test-ubuntu
+  variables:
+    PYTHON_SRC_VERSION: "3.16.0a1"
+    PYTHON_SRC_SHA256: "dcaa9029436b723e33412c68ca17f0130be73058e47a3a7c049cb8cdf6034ee9"
 
 test-alpine:
   stage: test

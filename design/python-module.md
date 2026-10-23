@@ -8,7 +8,20 @@ for the Qore Python module to facilitate future debugging and development.
 The module supports multiple Python versions with different internal behaviors:
 - **Python 3.12**: Uses `python312_internals.h` for GIL tracking
 - **Python 3.13**: Uses `python313_internals.h` with updated thread state management
-- **Python 3.14+**: Uses `python314_internals.h` with free-threading support (`Py_GIL_DISABLED`)
+- **Python 3.14+**: Uses `python314_internals.h` with free-threading support (`Py_GIL_DISABLED`); Python 3.15 and
+  3.16 use it as well (tested with 3.15.1 and 3.16.0a1, GIL and free-threaded builds)
+
+CI builds and tests the module with the Python of each `qore-test-base` image and, in the `test-ubuntu-python*` jobs,
+with CPython 3.15, 3.15 free-threaded and 3.16, built from the python.org source releases pinned (version and SHA-256)
+in `.gitlab-ci.yml` (`test/docker_test/install-cpython.sh`).  A new Python version that changes the internals the module
+uses gives a CMake warning and a build without the affected feature (see the fork GIL check and
+`QORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE`), so the configure output of a new version must be checked for warnings.
+
+Python 3.16 deprecates `PyStatus::exitcode`; since the API passes `PyStatus` by value (`PyStatus_Exception()`), the
+implicit copy constructor of the structure uses the deprecated member, which clang reports at the definition of the
+structure in `cpython/initconfig.h`, where a pragma around the call has no effect.  `python-module.h` therefore
+disables `-Wdeprecated-declarations` around the inclusion of the Python headers only (Python 3.16 and later): a
+deprecated API that the module uses is still reported where the module uses it.
 
 ## GIL (Global Interpreter Lock) Management
 
@@ -441,6 +454,8 @@ Key differences in our code:
 - `_qore_gil_held` is always false (no GIL to hold)
 - `_qore_acquire_thread_state()` / `_qore_release_thread_state()` handle attachment
 - `PyThreadState_Swap()` internally handles `_PyThreadState_Attach()`
+- the interpreters of the module are created with `allow_daemon_threads = 0` (and `allow_exec = 0`,
+  `check_multi_interp_extensions = 1`): starting a daemon thread raises `RuntimeError`
 
 ## Debugging Tips
 
