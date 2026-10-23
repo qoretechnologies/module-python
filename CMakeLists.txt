@@ -23,8 +23,8 @@ if (UNIX AND NOT APPLE)
     set(LINUX TRUE)
 endif()
 
-# thread-state management only works with Python 3.7+
-set(MIN_PY_MINOR_VER 7)
+# the minimum Python version: the thread state management of the module supports Python 3.11 and later
+set(MIN_PY_MINOR_VER 11)
 
 find_package(Qore 1.0 REQUIRED)
 

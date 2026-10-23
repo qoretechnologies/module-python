@@ -851,10 +851,8 @@ PyObject* PythonQoreClass::py_new(PyTypeObject* type, PyObject* args, PyObject* 
 }
 
 int PythonQoreClass::py_traverse(PyObject* self, visitproc visit, void* arg) {
-#if PY_VERSION_HEX >= 0x03090000
     // Heap instances own their type, including cycles through class constants.
     Py_VISIT(Py_TYPE(self));
-#endif
     return 0;
 }
 

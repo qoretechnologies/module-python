@@ -123,11 +123,7 @@ DLLLOCAL int qore_python_register_at_fork_functions();
 
 //! returns the interpreter of the given thread state
 DLLLOCAL static inline PyInterpreterState* qore_python_get_interpreter(PyThreadState* tstate) {
-#if PY_VERSION_HEX >= 0x03090000
     return PyThreadState_GetInterpreter(tstate);
-#else
-    return tstate->interp;
-#endif
 }
 DLLLOCAL bool _qore_has_gil(PyThreadState* t_state);
 
@@ -267,16 +263,8 @@ DLLLOCAL static inline PyThreadState* _qore_check_python_created_thread_gil() {
 #include "python312_internals.h"
 #elif PY_MINOR_VERSION == 11
 #include "python311_internals.h"
-#elif PY_MINOR_VERSION == 10
-#include "python310_internals.h"
-#elif PY_MINOR_VERSION == 9
-#include "python39_internals.h"
-#elif PY_MINOR_VERSION == 8
-#include "python38_internals.h"
-#elif PY_MINOR_VERSION == 7
-#include "python37_internals.h"
 #else
-#error unsupported python version
+#error unsupported python version: the minimum Python version is 3.11
 #endif
 #endif
 #endif

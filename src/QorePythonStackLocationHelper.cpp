@@ -118,7 +118,6 @@ void QorePythonStackLocationHelper::checkInit() const {
         const char* filename;
         int line;
         const char* funcname;
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION > 10
         // get line number
         QorePythonReferenceHolder code((PyObject*)PyFrame_GetCode(frame));
         line = PyCode_Addr2Line((PyCodeObject*)*code, PyFrame_GetLasti(frame));
@@ -127,11 +126,6 @@ void QorePythonStackLocationHelper::checkInit() const {
 
         QorePythonReferenceHolder funcname_obj(PyObject_GetAttrString(*code, "co_qualname"));
         funcname = PyUnicode_AsUTF8(*funcname_obj);
-#else
-        line = PyCode_Addr2Line(frame->f_code, frame->f_lasti);
-        filename = QorePythonProgram::getCString(frame->f_code->co_filename);
-        funcname = QorePythonProgram::getCString(frame->f_code->co_name);
-#endif
         // get normalized path
         QorePythonReferenceHolder np_obj(normalizePath(filename));
         if (!np_obj) {

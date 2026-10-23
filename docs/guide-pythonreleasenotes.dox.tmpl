@@ -8,6 +8,7 @@
     <b>New Features and Enhancements:</b>
     - Added support for Python 3.12, 3.13, 3.14, 3.15, and 3.16 (tested with the first alpha release of 3.16)
     - Added support for the free-threading mode (PEP 703) of Python 3.14 and later
+    - The minimum supported %Python version is now 3.11
     - Added support for interruptible I/O for graceful termination of sandboxed programs; interrupt checks are
       performed before acquiring the Python GIL when a sandbox manager is active
       (<a href="https://github.com/qoretechnologies/qore/issues/5116">issue 5116</a>)
@@ -29,7 +30,7 @@
       it starts are read under the lock as well.
     - the copy of the environment that each %Python interpreter makes into \c os.environ when it is created, and the
       \c TZ variable that its \c time module reads when it is imported, are read under the environment lock of
-      %Qore (with %Python 3.10 and later); previously a %Python interpreter created while a %Qore thread changed the
+      %Qore; previously a %Python interpreter created while a %Qore thread changed the
       environment could read it while it changed
     - a child process created with @ref Qore::fork() "fork()" while another thread holds a lock of the module can
       use %Python, as long as no other thread held the %Python GIL; previously the child could wait forever for a lock

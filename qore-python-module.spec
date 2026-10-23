@@ -14,7 +14,7 @@
 %global python_extension_suffix %(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')
 Name: qore-python-module
 Version: 1.3.0
-Release: 2%{?dist}
+Release: 3%{?dist}
 Summary: Bidirectional Qore and Python integration
 License: LGPL-2.1-or-later AND MIT AND Python-2.0
 URL: https://github.com/qoretechnologies/module-python
@@ -22,7 +22,7 @@ Source0: %{name}-%{version}.tar.xz
 BuildRequires: cmake >= 3.12
 BuildRequires: make
 BuildRequires: gcc-c++
-BuildRequires: python3-devel >= 3.7
+BuildRequires: python3-devel >= 3.11
 BuildRequires: qore-devel >= 3.0.0~
 BuildRequires: qore-rpm-macros >= 3.0.0~
 %if %{with tests}
@@ -105,6 +105,8 @@ hardlink -t -O %{buildroot}%{_docdir}/%{name}-doc
 %doc %{_docdir}/%{name}-doc/
 %endif
 %changelog
+* Fri Oct 23 2026 David Nichols <david@qore.org> - 1.3.0-3
+- Require Python 3.11 or later; support Python 3.15 and 3.16.
 * Fri Oct 02 2026 David Nichols <david@qore.org> - 1.3.0-2
 - Package the bidirectional bridge, Python ABI alias and compiler metadata.
 - Run isolated embedded and standalone suites and build strict API documentation.

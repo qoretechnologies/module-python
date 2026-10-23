@@ -2581,8 +2581,7 @@ DateTimeNode* QorePythonProgram::getQoreDateTimeFromDateTime(ExceptionSink* xsin
 
     const AbstractQoreZoneInfo* zone = nullptr;
 
-#if PY_VERSION_HEX >= 0x030A0000
-    // Python 3.10+: Use PyDateTime_DATE_GET_TZINFO() macro to directly access the tzinfo field.
+    // Use the PyDateTime_DATE_GET_TZINFO() macro to directly access the tzinfo field.
     //
     // CRITICAL: In Python 3.13+ with sub-interpreters, PyObject_HasAttrString() can SIGSEGV because:
     // 1. PyDateTimeAPI is a per-interpreter global pointer initialized by PyDateTime_IMPORT
@@ -2620,41 +2619,6 @@ DateTimeNode* QorePythonProgram::getQoreDateTimeFromDateTime(ExceptionSink* xsin
             zone = findCreateOffsetZone(PyDateTime_DELTA_GET_SECONDS(*delta));
         }
     }
-#else
-    // Python 3.7-3.9: Use attribute-based access (PyDateTime_DATE_GET_TZINFO not available)
-    if (PyObject_HasAttrString(val, "tzinfo")) {
-        QorePythonReferenceHolder tzinfo(PyObject_GetAttrString(val, "tzinfo"));
-        if (tzinfo && PyTZInfo_Check(*tzinfo)) {
-            QorePythonReferenceHolder utcoffset_func(PyObject_GetAttrString(*tzinfo, "utcoffset"));
-            if (utcoffset_func && PyCallable_Check(*utcoffset_func)) {
-                QorePythonReferenceHolder args(PyTuple_New(1));
-                Py_INCREF(val);
-                PyTuple_SET_ITEM(*args, 0, val);
-                QorePythonReferenceHolder delta(PyObject_CallObject(*utcoffset_func, *args));
-                if (!delta) {
-                    // utcoffset() raised an exception - propagate to caller if xsink provided
-                    if (xsink) {
-                        QorePythonReferenceHolder ex_type, ex_value, traceback;
-                        PyErr_Fetch(ex_type.getRef(), ex_value.getRef(), traceback.getRef());
-                        QoreStringNode* desc = new QoreStringNode("tzinfo.utcoffset() failed");
-                        if (ex_value) {
-                            QorePythonReferenceHolder str(PyObject_Str(*ex_value));
-                            if (str) {
-                                desc->concat(": ");
-                                desc->concat(PyUnicode_AsUTF8(*str));
-                            }
-                        }
-                        xsink->raiseException("PYTHON-DATETIME-ERROR", desc);
-                        return nullptr;
-                    }
-                    PyErr_Clear();
-                } else if (PyDelta_Check(*delta)) {
-                    zone = findCreateOffsetZone(PyDateTime_DELTA_GET_SECONDS(*delta));
-                }
-            }
-        }
-    }
-#endif
 
     return DateTimeNode::makeAbsolute(zone ? zone : currentTZ(), PyDateTime_GET_YEAR(val), PyDateTime_GET_MONTH(val),
         PyDateTime_GET_DAY(val), PyDateTime_DATE_GET_HOUR(val), PyDateTime_DATE_GET_MINUTE(val),
@@ -3362,7 +3326,6 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
 
         PyFrameObject* frame = tb->tb_frame;
         const char* funcname = nullptr;
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION > 10
         QorePythonReferenceHolder owned_frame;
         QoreString function_name;
         while (frame) {
@@ -3394,29 +3357,6 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
             owned_frame = reinterpret_cast<PyObject*>(next);
             frame = next;
         }
-#else
-        while (frame) {
-            int line = PyCode_Addr2Line(frame->f_code, frame->f_lasti);
-            const char* filename;
-            Py_INCREF(frame->f_code->co_filename);
-            QorePythonReferenceHolder np_obj(QorePythonStackLocationHelper::normalizePath(
-                frame->f_code->co_filename
-            ));
-            if (np_obj) {
-                filename = getCString(*np_obj);
-            } else {
-                filename = getCString(frame->f_code->co_filename);
-            }
-
-            if (frame == tb->tb_frame) {
-                 loc.set(filename, line, line, nullptr, 0, QORE_PYTHON_LANG_NAME);
-             } else {
-                 callstack.add(CT_USER, filename, line, line, funcname, QORE_PYTHON_LANG_NAME);
-             }
-            funcname = getCString(frame->f_code->co_name);
-            frame = frame->f_back;
-        }
-#endif
         if (funcname) {
             callstack.add(CT_BUILTIN, this_file, __LINE__, __LINE__, funcname, "c++");
         }

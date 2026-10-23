@@ -657,7 +657,6 @@ void QorePythonQoreEntryHelper::applySandbox() {
     }
 }
 
-#if PY_VERSION_HEX >= 0x030A0000
 /* The environment copies that Python makes when an interpreter is created or imports a module are made under Qore's
    environment lock: the exec function of the posix module copies the C environment into posix.environ (which becomes
    os.environ) in every interpreter, including each subinterpreter while Py_NewInterpreter() runs, and the exec
@@ -766,7 +765,6 @@ static void python_unwrap_environment_exec_slots() {
         }
     }
 }
-#endif
 
 static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) {
     // registered in the initialization function and not while static objects are constructed (see QoreForkHandler.h)
@@ -853,7 +851,6 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
             // for the GIL, which a thread forking with os.fork() could hold while it waits for the lock
             QoreEnvironmentReadLock env_lock;
             Py_InitializeEx(0);
-#if PY_VERSION_HEX >= 0x030A0000
             // the time module reads the environment (TZ) when it is created; it is created here, while the lock is
             // held and no other thread can run Python code, so that its definition can be found and its exec
             // function replaced (see python_wrap_environment_exec_slots())
@@ -861,7 +858,6 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
             if (!time_module) {
                 PyErr_Clear();
             }
-#endif
         }
 #ifdef QORE_ALLOW_PYTHON_SHUTDOWN
         // issue# 4290: if we actively shut down Python on exit, then exit handlers in modules
@@ -1005,13 +1001,11 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     //    PyGILState_GetThisThreadState());
 #endif
 
-#if PY_VERSION_HEX >= 0x030A0000
     if (python_wrap_environment_exec_slots()) {
         PyErr_Clear();
         throw QoreStandardException("PYTHON-MODULE-ERROR", "cannot initialize the environment functions of the "
             "posix and time modules");
     }
-#endif
 
     // Initialize the process-wide bridge types in the main interpreter. If the
     // first import happens in a transient subinterpreter, the static type objects
@@ -1117,9 +1111,7 @@ static void python_module_delete() {
         PNS = nullptr;
     }
     python_module_shutdown();
-#if PY_VERSION_HEX >= 0x030A0000
     python_unwrap_environment_exec_slots();
-#endif
 #ifdef QORE_PYTHON_HAVE_FORK_GIL_CHECK
     qore_unregister_fork_handler(python_gil_fork_reg);
     python_gil_fork_reg = nullptr;

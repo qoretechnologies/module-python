@@ -1,10 +1,10 @@
 /* -*- mode: c++; indent-tabs-mode: nil -*- */
 /*
-    python38_internals.h
+    python311_internals.h
 
     Qore Programming Language
 
-    Copyright 2020 - 2022 Qore Technologies, s.r.o.
+    Copyright 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public

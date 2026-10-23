@@ -15,10 +15,7 @@ License: MIT
 Comment: These supporting files also offer GPL/LGPL alternatives; this
  distribution retains the MIT permission shown in their headers.
 
-Files: src/python36_internals.h src/python37_internals.h
-       src/python38_internals.h src/python39_internals.h
-       src/python310_internals.h src/python311_internals.h
-       src/python312_internals.h
+Files: src/python311_internals.h src/python312_internals.h
 Copyright: 2020-2026 Qore Technologies, s.r.o.
            2001-2023 Python Software Foundation
            2000 BeOpen.com

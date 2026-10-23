@@ -5,17 +5,27 @@ for the Qore Python module to facilitate future debugging and development.
 
 ## Python Version Support
 
+The minimum Python version is 3.11 (`MIN_PY_MINOR_VER` in `CMakeLists.txt`): the thread state tracking of the module
+(`_qore_tss_tstate`, `_qore_gil_held`, `_qore_check_python_created_thread_gil()`) exists only in the internals headers
+of Python 3.11 and later, and the headers of Python 3.6 to 3.10 were removed.
+
 The module supports multiple Python versions with different internal behaviors:
+- **Python 3.11**: Uses `python311_internals.h`
 - **Python 3.12**: Uses `python312_internals.h` for GIL tracking
 - **Python 3.13**: Uses `python313_internals.h` with updated thread state management
 - **Python 3.14+**: Uses `python314_internals.h` with free-threading support (`Py_GIL_DISABLED`); Python 3.15 and
   3.16 use it as well (tested with 3.15.1 and 3.16.0a1, GIL and free-threaded builds)
 
 CI builds and tests the module with the Python of each `qore-test-base` image and, in the `test-ubuntu-python*` jobs,
-with CPython 3.15, 3.15 free-threaded and 3.16, built from the python.org source releases pinned (version and SHA-256)
-in `.gitlab-ci.yml` (`test/docker_test/install-cpython.sh`).  A new Python version that changes the internals the module
-uses gives a CMake warning and a build without the affected feature (see the fork GIL check and
-`QORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE`), so the configure output of a new version must be checked for warnings.
+with CPython 3.11 (the minimum), 3.15, 3.15 free-threaded and 3.16, built from the python.org source releases pinned
+(version and SHA-256) in `.gitlab-ci.yml` (`test/docker_test/install-cpython.sh`).  A new Python version that changes
+the internals the module uses gives a CMake warning and a build without the affected feature (see the fork GIL check
+and `QORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE`); these jobs fail on any CMake warning.
+
+Each CI job reports its result to GitHub in its own status context (`module-python/<job>`); the `module-python`
+context, which the branch protection of `develop` requires, is set once for the pipeline: pending in the `.pre` stage
+and success or failure by the `on_success` and `on_failure` jobs of the `report` stage, so that the job that ends last
+cannot overwrite a failure.
 
 Python 3.16 deprecates `PyStatus::exitcode`; since the API passes `PyStatus` by value (`PyStatus_Exception()`), the
 implicit copy constructor of the structure uses the deprecated member, which clang reports at the definition of the
@@ -308,10 +318,10 @@ Qore serializes every access to the C environment with one process-wide read-wri
   `qoreloader` is initialized; through them, a change would fail with `EDEADLK` while the lock is held).
 - Every interpreter copies the environment when its `posix` module is created, including each subinterpreter while
   `Py_NewInterpreter()` runs, and the `time` module of every interpreter reads `TZ` (`tzset()`) when it is created.
-  Both modules use multi-phase initialization (Python 3.10 and later are handled): their exec functions are slots of
-  module definitions shared by all interpreters, and `python_wrap_environment_exec_slots()` (module initialization,
-  in the main interpreter) replaces them with functions that hold a `QoreEnvironmentReadLock` while they call the
-  original ones, with garbage collection disabled meanwhile; the originals are restored when the module is deleted.
+  Both modules use multi-phase initialization: their exec functions are slots of module definitions shared by all
+  interpreters, and `python_wrap_environment_exec_slots()` (module initialization, in the main interpreter) replaces
+  them with functions that hold a `QoreEnvironmentReadLock` while they call the original ones, with garbage collection
+  disabled meanwhile; the originals are restored when the module is deleted.
   These exec functions run C code only, so the lock is never held while a thread waits for the GIL.  The lock is not
   held for all of `Py_NewInterpreter()`: the new interpreter runs Python code (importlib, `site`), which can release
   the GIL to another thread, and a thread that holds the GIL while it forks (`os.fork()` in the main interpreter of
