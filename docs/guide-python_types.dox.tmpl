@@ -26,7 +26,7 @@
 
     |!Source Python Type|!Target %Qore Type
     |\c bool|\c bool
-    |\c int|\c int or \c number if greater than 64-bits
+    |\c int|\c int, or \c number outside the 64-bit signed integer range
     |\c float|\c float
     |\c bytes|\c binary
     |\c bytearray|\c binary
@@ -40,4 +40,12 @@
 
     All other %Python types are converted to a %Qore object using a dynamically-created class that wraps the %Python
     type or class.
+
+    Values that a %Qore value cannot represent raise an exception:
+    - a container (\c list, \c tuple or \c dict) that contains itself, directly or through other containers, raises
+      a \c PYTHON-VALUE-ERROR exception; a container referenced more than once without a cycle is converted each time
+    - a string (or a \c dict key) with lone surrogates, which cannot be encoded in UTF-8, raises the %Python
+      \c UnicodeEncodeError exception (\c builtins.UnicodeEncodeError)
+    - an \c int with more significant bits than the maximum precision of a %Qore \c number (8192 bits, about 2466
+      decimal digits) raises a \c PYTHON-VALUE-ERROR exception, as it cannot be converted exactly
 */

@@ -91,6 +91,7 @@ class PythonTest inherits Test {
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
         addTestCase("type conversion test", \typeConversionTest());
+        addTestCase("conversion of cyclic, shared and unrepresentable Python values", \unrepresentableValueTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
@@ -2148,6 +2149,91 @@ class Calc:
         PythonProgram::evalStatementKeep(source_code: "static_named_value = 11", source_label: "static_keep.py");
         assertEq(11, PythonProgram::evalExpression(source_code: "static_named_value", source_label: "static_expr.py"));
         PythonProgram::setSaveObjectCallback(save_object_callback: NOTHING);
+    }
+
+    # Python values that a Qore value cannot represent raise an exception instead of crashing the process: containers
+    # that contain themselves (the conversion recursed until the stack overflowed), strings with lone surrogates (the
+    # failed UTF-8 conversion was not checked), and ints with more significant bits than a Qore number can hold (ints
+    # were converted through repr(), which fails above sys.get_int_max_str_digits()); containers referenced more than
+    # once without a cycle are converted each time (a dict was dropped or tripped an assertion), and ints at the int64
+    # boundaries convert to the right type
+    unrepresentableValueTest() {
+        PythonProgram p("
+import sys
+
+def list_cycle():
+    l = [1]
+    l.append(l)
+    return l
+
+def tuple_cycle():
+    t = ([],)
+    t[0].append(t)
+    return t
+
+def dict_cycle():
+    d = {}
+    d['x'] = [d]
+    return d
+
+def shared():
+    s = {'a': 1}
+    l = [1, 2]
+    return {'x': s, 'y': s, 'l': [l, l], 'd': [s, s]}
+
+def surrogate():
+    return '\\ud800'
+
+def surrogate_key():
+    return {'\\ud800': 1}
+
+def bounds():
+    return [-2**63, 2**63 - 1, 2**63, -2**63 - 1, -10**18, 10**18]
+
+def big(n):
+    return -(10**n + 123)
+
+def big_low_limit(n):
+    # the lowest limit allowed for converting ints to decimal strings
+    old = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(640)
+    try:
+        return big(n)
+    finally:
+        sys.set_int_max_str_digits(old)
+
+def pow2(n):
+    return 2**n
+", "unrepresentable.py");
+
+        map assertThrows("PYTHON-VALUE-ERROR", "contains itself", \p.callFunction(), $1), ("list_cycle", "tuple_cycle",
+            "dict_cycle");
+        assertEq({"x": {"a": 1}, "y": {"a": 1}, "l": ((1, 2), (1, 2)), "d": ({"a": 1}, {"a": 1})},
+            p.callFunction("shared"));
+        map assertThrows("builtins.UnicodeEncodeError", "surrogates not allowed", \p.callFunction(), $1),
+            ("surrogate", "surrogate_key");
+
+        list<auto> bounds = p.callFunction("bounds");
+        assertEq((NT_INT, NT_INT, NT_NUMBER, NT_NUMBER, NT_INT, NT_INT), (map $1.typeCode(), bounds));
+        assertEq(MININT, bounds[0]);
+        assertEq(MAXINT, bounds[1]);
+        assertEq(9223372036854775808n, bounds[2]);
+        assertEq(-9223372036854775809n, bounds[3]);
+        assertEq(-1000000000000000000, bounds[4]);
+
+        # ints outside the int64 range are converted exactly, also with more digits than the limit for converting ints
+        # to decimal strings
+        foreach int digits in ((30, 2000)) {
+            foreach string f in (("big", "big_low_limit")) {
+                number n = p.callFunction(f, digits);
+                assertEq(number("-1" + strmul("0", digits - 3) + "123"), n, sprintf("%s(%d)", f, digits));
+                assertEq(-123n, n + number("1" + strmul("0", digits)), sprintf("%s(%d) exact", f, digits));
+            }
+        }
+        # an int whose significant bits a Qore number can hold, although its bit length is bigger
+        assertEq(p.callFunction("pow2", 8999) * 2, p.callFunction("pow2", 9000));
+        # more significant bits than a Qore number can hold
+        assertThrows("PYTHON-VALUE-ERROR", "significant bits", \p.callFunction(), ("big", 5000));
     }
 
     typeConversionTest() {

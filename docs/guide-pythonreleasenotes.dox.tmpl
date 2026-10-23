@@ -26,6 +26,13 @@
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
 
     <b>Bug Fixes:</b>
+    - %Python values that a %Qore value cannot represent raise an exception instead of crashing the process: a
+      \c list or \c tuple that contains itself, a string or \c dict key with lone surrogates, and an \c int with more
+      than 4300 digits (or more significant bits than a %Qore \c number can hold); a \c dict referenced more than
+      once in a value is converted each time, where it was dropped or tripped an assertion, a \c dict that contains
+      itself raises an exception instead of losing the key, and negative ints between -10^18 and the minimum 64-bit
+      integer convert to \c int instead of \c number
+      (<a href="https://github.com/qoretechnologies/qore/issues/5488">issue 5488</a>)
     - fixed crashes when a thread created by %Python (ex: \c threading.Thread) called a %Qore function or callable,
       constructed a %Qore object, read a member of a %Qore object, imported a %Qore class or released the last
       reference to a %Qore callable; such a thread is now registered with %Qore while it runs, so the %Qore objects

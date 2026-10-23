@@ -44,6 +44,7 @@
 #include <frameobject.h>
 #include <datetime.h>
 
+#include <climits>
 #include <vector>
 #include <string>
 
@@ -2482,8 +2483,54 @@ QoreListNode* QorePythonProgram::getQoreListFromList(ExceptionSink* xsink, PyObj
     return getQoreListFromList(xsink, val, rset);
 }
 
+namespace {
+//! keeps a Python container on the path of a conversion to Qore while its elements are converted
+/** A container that is already on the path is part of a cycle, which a Qore value cannot represent; a container that
+    is referenced more than once without a cycle is converted each time.
+*/
+class QorePythonConversionPathHelper {
+public:
+    DLLLOCAL QorePythonConversionPathHelper(std::set<PyObject*>& path, PyObject* val)
+            : path(path), val(val), cycle(!path.insert(val).second) {
+    }
+
+    DLLLOCAL ~QorePythonConversionPathHelper() {
+        if (!cycle) {
+            path.erase(val);
+        }
+    }
+
+    //! returns true and raises a Qore exception if the container is part of a cycle
+    DLLLOCAL bool checkCycle(ExceptionSink* xsink) const {
+        if (cycle && xsink) {
+            xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert a Python value of type '%s' that contains "
+                "itself to a Qore value", Py_TYPE(val)->tp_name);
+        }
+        return cycle;
+    }
+
+private:
+    std::set<PyObject*>& path;
+    PyObject* val;
+    bool cycle;
+};
+}
+
+//! converts the pending Python exception to a Qore exception, or clears it if there is no ExceptionSink
+static void qore_python_conversion_error(QorePythonProgram* pypgm, ExceptionSink* xsink) {
+    if (xsink) {
+        pypgm->checkPythonException(xsink);
+    } else {
+        PyErr_Clear();
+    }
+}
+
 QoreListNode* QorePythonProgram::getQoreListFromList(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset) {
     assert(PyList_Check(val));
+    QorePythonConversionPathHelper path(rset, val);
+    if (path.checkCycle(xsink)) {
+        return nullptr;
+    }
     ReferenceHolder<QoreListNode> rv(new QoreListNode(autoTypeInfo), xsink);
     Py_ssize_t len = PyList_Size(val);
     for (Py_ssize_t i = 0; i < len; ++i) {
@@ -2500,7 +2547,7 @@ QoreListNode* QorePythonProgram::getQoreListFromList(ExceptionSink* xsink, PyObj
 QoreListNode* QorePythonProgram::getQoreListFromTuple(ExceptionSink* xsink, PyObject* val, size_t offset,
     bool for_args) {
     pyobj_set_t rset;
-    return getQoreListFromTuple(xsink, val, rset, offset);
+    return getQoreListFromTuple(xsink, val, rset, offset, for_args);
 }
 
 QoreListNode* QorePythonProgram::getQoreListFromTuple(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset,
@@ -2508,6 +2555,10 @@ QoreListNode* QorePythonProgram::getQoreListFromTuple(ExceptionSink* xsink, PyOb
     assert(PyTuple_Check(val));
     Py_ssize_t len = PyTuple_Size(val);
     if (for_args && !len) {
+        return nullptr;
+    }
+    QorePythonConversionPathHelper path(rset, val);
+    if (path.checkCycle(xsink)) {
         return nullptr;
     }
     ReferenceHolder<QoreListNode> rv(new QoreListNode(autoTypeInfo), xsink);
@@ -2524,8 +2575,10 @@ QoreListNode* QorePythonProgram::getQoreListFromTuple(ExceptionSink* xsink, PyOb
 
 QoreHashNode* QorePythonProgram::getQoreHashFromDict(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset) {
     assert(PyDict_Check(val));
-    assert(rset.find(val) == rset.end());
-    rset.insert(val);
+    QorePythonConversionPathHelper path(rset, val);
+    if (path.checkCycle(xsink)) {
+        return nullptr;
+    }
 
     ReferenceHolder<QoreHashNode> rv(new QoreHashNode(autoTypeInfo), xsink);
 
@@ -2538,13 +2591,12 @@ QoreHashNode* QorePythonProgram::getQoreHashFromDict(ExceptionSink* xsink, PyObj
             keystr = PyUnicode_AsUTF8(key);
         } else {
             tkey = PyObject_Repr(key);
-            assert(Py_TYPE(*tkey) == &PyUnicode_Type);
-            keystr = PyUnicode_AsUTF8(*tkey);
+            keystr = tkey ? PyUnicode_AsUTF8(*tkey) : nullptr;
         }
-
-        // skip recursive refs
-        if (PyDict_Check(value) && (rset.find(value) != rset.end())) {
-            continue;
+        // ex: a key with lone surrogates, which cannot be encoded in UTF-8
+        if (!keystr) {
+            qore_python_conversion_error(this, xsink);
+            return nullptr;
         }
 
         ValueHolder qval(getQoreValue(xsink, value, rset), xsink);
@@ -2656,6 +2708,98 @@ ResolvedCallReferenceNode* QorePythonProgram::getQoreCallRefFromMethod(Exception
     return new PythonCallableCallReferenceNode(this, m->im_func, PyType_Check(m->im_self) ? nullptr : m->im_self);
 }
 
+// the number of decimal digits converted at once for a Python int outside the int64 range: Python refuses to convert an
+// int with more digits than sys.get_int_max_str_digits() (4300 by default, at least 640) to a decimal string
+static constexpr int QORE_PYTHON_INT_PART_DIGITS = 600;
+
+QoreValue QorePythonProgram::getQoreIntegerFromLong(ExceptionSink* xsink, PyObject* val) {
+    assert(PyLong_Check(val));
+    int overflow;
+    long long ival = PyLong_AsLongLongAndOverflow(val, &overflow);
+    if (!overflow) {
+        if (ival == -1 && PyErr_Occurred()) {
+            qore_python_conversion_error(this, xsink);
+            return QoreValue();
+        }
+        return static_cast<int64>(ival);
+    }
+
+    // outside the int64 range: a Qore number, if it can hold the value exactly: the number of significant bits (the
+    // bit length without the trailing zero bits: (n & -n).bit_length() - 1) must not exceed the precision of a Qore
+    // number, which has a maximum
+    QorePythonReferenceHolder rest(PyNumber_Absolute(val));
+    QorePythonReferenceHolder neg(rest ? PyNumber_Negative(*rest) : nullptr);
+    QorePythonReferenceHolder lowest(neg ? PyNumber_And(*rest, *neg) : nullptr);
+    QorePythonReferenceHolder bits(rest ? PyObject_CallMethod(*rest, "bit_length", nullptr) : nullptr);
+    QorePythonReferenceHolder lowest_bits(lowest ? PyObject_CallMethod(*lowest, "bit_length", nullptr) : nullptr);
+    long long sig_bits = bits && lowest_bits ? PyLong_AsLongLong(*bits) - PyLong_AsLongLong(*lowest_bits) + 1 : -1;
+    if (sig_bits < 0 || PyErr_Occurred()) {
+        qore_python_conversion_error(this, xsink);
+        return QoreValue();
+    }
+    {
+        SimpleRefHolder<QoreNumberNode> probe(new QoreNumberNode("0",
+            sig_bits > UINT_MAX ? UINT_MAX : static_cast<unsigned>(sig_bits)));
+        if (probe->getPrec() < sig_bits) {
+            if (xsink) {
+                xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert a Python int with %lld significant bits "
+                    "to a Qore number exactly; the maximum precision of a Qore number is %u bits", sig_bits,
+                    probe->getPrec());
+            }
+            return QoreValue();
+        }
+    }
+
+    // the decimal digits of the absolute value are taken in parts of QORE_PYTHON_INT_PART_DIGITS digits, from the
+    // least significant one
+    QorePythonReferenceHolder ten(PyLong_FromLong(10));
+    QorePythonReferenceHolder exp(PyLong_FromLong(QORE_PYTHON_INT_PART_DIGITS));
+    QorePythonReferenceHolder divisor(ten && exp ? PyNumber_Power(*ten, *exp, Py_None) : nullptr);
+    if (!divisor) {
+        qore_python_conversion_error(this, xsink);
+        return QoreValue();
+    }
+    std::vector<std::string> parts;
+    while (true) {
+        int more = PyObject_RichCompareBool(*rest, *divisor, Py_GE);
+        if (more < 0) {
+            qore_python_conversion_error(this, xsink);
+            return QoreValue();
+        }
+        if (!more) {
+            break;
+        }
+        QorePythonReferenceHolder qr(PyNumber_Divmod(*rest, *divisor));
+        QorePythonReferenceHolder part(qr ? PyObject_Str(PyTuple_GET_ITEM(*qr, 1)) : nullptr);
+        const char* part_str = part ? PyUnicode_AsUTF8(*part) : nullptr;
+        if (!part_str) {
+            qore_python_conversion_error(this, xsink);
+            return QoreValue();
+        }
+        // the part with its leading zeros
+        parts.push_back(std::string(QORE_PYTHON_INT_PART_DIGITS - strlen(part_str), '0') + part_str);
+        PyObject* quotient = PyTuple_GET_ITEM(*qr, 0);
+        Py_INCREF(quotient);
+        rest = quotient;
+    }
+    QorePythonReferenceHolder first(PyObject_Str(*rest));
+    const char* first_str = first ? PyUnicode_AsUTF8(*first) : nullptr;
+    if (!first_str) {
+        qore_python_conversion_error(this, xsink);
+        return QoreValue();
+    }
+
+    QoreString digits;
+    if (overflow < 0) {
+        digits.concat('-');
+    }
+    digits.concat(first_str);
+    for (std::vector<std::string>::const_reverse_iterator i = parts.rbegin(), e = parts.rend(); i != e; ++i) {
+        digits.concat(i->c_str(), i->size());
+    }
+    return new QoreNumberNode(digits.c_str());
+}
+
 QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, QorePythonReferenceHolder& val) {
     return getQoreValue(xsink, *val);
 }
@@ -2702,20 +2846,7 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
     }
 
     if (type == &PyLong_Type) {
-        // Python 3+ implements "long" as an arbitrary-precision number (= Qore "number")
-        QorePythonReferenceHolder longval(PyObject_Repr(val));
-        assert(Py_TYPE(*longval) == &PyUnicode_Type);
-        const char* longstr = PyUnicode_AsUTF8(*longval);
-
-        // see if we can convert to a Qore integer
-        bool sign = longstr[0] == '-';
-        size_t len = strlen(longstr);
-        if (len < 19 || (len == 19
-            && ((!sign && strcmp(longstr, "9223372036854775807") <= 0)
-                || (sign && strcmp(longstr, "-9223372036854775808") <= 0)))) {
-            return strtoll(longstr, 0, 10);
-        }
-        return new QoreNumberNode(longstr);
+        return getQoreIntegerFromLong(xsink, val);
     }
 
     if (type == &PyFloat_Type) {
@@ -2725,6 +2856,11 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
     if (type == &PyUnicode_Type) {
         Py_ssize_t size;
         const char* str = PyUnicode_AsUTF8AndSize(val, &size);
+        // ex: a string with lone surrogates, which cannot be encoded in UTF-8
+        if (!str) {
+            qore_python_conversion_error(this, xsink);
+            return QoreValue();
+        }
         return new QoreStringNode(str, size, QCS_UTF8);
     }
 

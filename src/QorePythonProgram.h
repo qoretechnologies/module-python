@@ -626,6 +626,8 @@ protected:
     DLLLOCAL QoreValue getQoreValue(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset);
     //! Returns a Qore value for the given Python value
     DLLLOCAL QoreValue getQoreValue(ExceptionSink* xsink, QorePythonReferenceHolder& val, pyobj_set_t& rset);
+    //! Returns a Qore integer, or a number outside the int64 range, for the given Python int
+    DLLLOCAL QoreValue getQoreIntegerFromLong(ExceptionSink* xsink, PyObject* val);
     //! Returns a Qore hash from a Python dict
     DLLLOCAL QoreHashNode* getQoreHashFromDict(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset);
     //! Returns a Qore list from a Python list
