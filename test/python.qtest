@@ -94,7 +94,9 @@ class PythonTest inherits Test {
         addTestCase("conversion of cyclic, shared and unrepresentable Python values", \unrepresentableValueTest());
         addTestCase("Qore number <-> Python int and decimal.Decimal", \numberConversionTest());
         addTestCase("date/time conversion: time zones, relative dates and times of day", \dateConversionTest());
-        addTestCase("conversion of subclasses, named tuples, sets, memoryviews and dict keys", \subclassConversionTest());
+        addTestCase("conversion of subclasses, named tuples, sets, memoryviews and dict keys",
+            \subclassConversionTest());
+        addTestCase("special Qore method names and the builtins namespace", \specialNameTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
@@ -2404,8 +2406,8 @@ def us_offset():
     }
 
     # subclasses of the converted types are converted as their base types (they were wrapped objects): ex: IntEnum,
-    # StrEnum, OrderedDict, defaultdict, Counter; a named tuple is a hash of its fields, a set or frozenset a list, and a
-    # memoryview a binary; dict keys that are not strings are converted with repr(), and a key that gives the same Qore
+    # StrEnum, OrderedDict, defaultdict, Counter; a named tuple is a hash of its fields, a set or frozenset a list, and
+    # a memoryview a binary; dict keys that are not strings are converted with repr(), and a key that gives the same Qore
     # key as another one raises an exception (one value replaced the other silently)
     subclassConversionTest() {
         PythonProgram p("
@@ -2495,6 +2497,55 @@ def colliding_keys():
 
         assertEq({"1": "a", "None": "b", "(1, 2)": "c"}, p.callFunction("keys"));
         assertThrows("PYTHON-VALUE-ERROR", "same Qore hash key", \p.callFunction(), "colliding_keys");
+    }
+
+    # Python methods with the names of special Qore methods are imported with a '_' prefix (a method named constructor
+    # or destructor tripped an assertion and could not be called; only copy was renamed); the constants of Python's
+    # builtins module are not imported into Python::builtins (its exit and quit objects shadowed Qore's exit(), and
+    # reading such a constant aborted the process at exit), while its functions and classes are
+    specialNameTest() {
+        PythonProgram p("
+class Special:
+    def constructor(self):
+        return 'constructor'
+    def destructor(self):
+        return 'destructor'
+    def copy(self):
+        return 'copy'
+    def methodGate(self, name):
+        return 'methodGate ' + name
+    def memberGate(self, name):
+        return 'memberGate ' + name
+    def memberNotification(self, name):
+        return 'memberNotification ' + name
+    @staticmethod
+    def constructor_static():
+        return 'static'
+
+def get():
+    return Special()
+", "special.py");
+        object o = p.callFunction("get");
+        assertEq("constructor", o._constructor());
+        assertEq("destructor", o._destructor());
+        assertEq("copy", o._copy());
+        assertEq("methodGate x", o._methodGate("x"));
+        assertEq("memberGate x", o._memberGate("x"));
+        assertEq("memberNotification x", o._memberNotification("x"));
+        assertEq("static", o.constructor_static());
+
+        # Qore's exit() is not shadowed by the exit object of Python's builtins, which has no constants in Qore
+        Program pgm(PO_NEW_STYLE);
+        pgm.loadModule("python");
+        pgm.parse("sub stop() { exit(0); }", "special");
+        Program pgm_quit(PO_NEW_STYLE);
+        pgm_quit.loadModule("python");
+        assertThrows("PARSE-EXCEPTION", "quit", \pgm_quit.parse(), ("auto sub get_quit() { return "
+            "Python::builtins::quit; }", "special-quit"));
+        Program pgm2(PO_NEW_STYLE);
+        pgm2.loadModule("python");
+        pgm2.parse("int sub py_len(list<auto> l) { return Python::builtins::len(l); }", "special-len");
+        assertEq(3, pgm2.callFunction("py_len", (1, 2, 3)));
     }
 
     typeConversionTest() {

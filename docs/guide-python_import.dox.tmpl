@@ -25,6 +25,17 @@ p.loadModule("python");
 p.issueModuleCmd("python", "import math");
     @endcode
 
+    %Python functions become %Qore functions, %Python classes %Qore classes, and other attributes of the module %Qore
+    constants with their converted values (see @ref python_typesguide).  The builtin functions and classes of %Python
+    (the \c builtins module) are available in the \c Python::builtins namespace of every %Program that loads the
+    module (ex: \c Python::builtins::len()); the constants of the \c builtins module are not imported, as they are
+    %Python objects (ex: \c exit and \c quit, which would hide %Qore's @ref Qore::exit() "exit()") or values with
+    %Qore equivalents (\c True, \c False, \c None).
+
+    The methods of a %Python class whose names have a special meaning in %Qore classes (\c constructor,
+    \c destructor, \c copy, \c methodGate, \c memberGate and \c memberNotification) are imported with a \c _
+    prefix: ex: the \c copy() method of a %Python class is \c _copy() in %Qore.
+
     @section python_module_path Set the Python Module Path
 
     Elements can be added to the %Python import module path by using the following module command:

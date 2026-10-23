@@ -51,6 +51,8 @@ class PythonQoreClass;
 #define IF_CLASS (1 << 0)
 #define IF_OTHER (1 << 1)
 #define IF_ALL   (IF_CLASS | IF_OTHER)
+//! do not import module attributes as constants
+#define IF_NO_CONSTANTS (1 << 2)
 
 //! best guess at the ratio of stack size / x = python recursion limit to avoid crashes
 constexpr int PYTHON_LARGE_STACK_FACTOR = 10 * 1024;
@@ -179,7 +181,7 @@ public:
             size_t arg_offset = 0);
 
     //! Import Python code into the Qore program object
-    DLLLOCAL int import(ExceptionSink* xsink, const char* module, const char* symbol = nullptr);
+    DLLLOCAL int import(ExceptionSink* xsink, const char* module, const char* symbol = nullptr, int filter = IF_ALL);
 
     //! Returns the attribute of the given object as a Qore value
     /** must already have the Python thread context set

@@ -277,7 +277,10 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
     module = PyImport_AddModule("__main__");
     module.py_ref();
 
-    import(&xsink, "builtins");
+    // the builtin functions and classes are imported (ex: Python::builtins::len()); its constants are not: they are
+    // Python objects (ex: exit and quit, which shadowed Qore's exit() function, and the other helpers of the site
+    // module) or values with Qore equivalents (True, False, None)
+    import(&xsink, "builtins", nullptr, IF_ALL | IF_NO_CONSTANTS);
     if (xsink) {
         valid = false;
         return;
@@ -4062,6 +4065,12 @@ QorePythonClass* QorePythonProgram::addClassToNamespaceIntern(ExceptionSink* xsi
 static constexpr int static_meth_flags = QCF_USES_EXTRA_ARGS;
 static constexpr int normal_meth_flags = static_meth_flags | QCF_ABSTRACT_OVERRIDE_ALL;
 
+//! returns true for the names of the methods that have a special meaning in Qore classes
+static bool qore_python_is_special_method_name(const char* name) {
+    return !strcmp(name, "constructor") || !strcmp(name, "destructor") || !strcmp(name, "copy")
+        || !strcmp(name, "methodGate") || !strcmp(name, "memberGate") || !strcmp(name, "memberNotification");
+}
+
 QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, QoreNamespace* ns, PyTypeObject* type,
         std::unique_ptr<QorePythonClass>& cls, strset_t& nsset, int flags) {
     //printd(5, "QorePythonProgram::setupQorePythonClass() ns: '%s' cls: '%s' (%s) flags: %d\n", ns->getName(),
@@ -4103,6 +4112,17 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
         while (PyDict_Next(type->tp_dict, &pos, &key, &value)) {
             assert(Py_TYPE(key) == &PyUnicode_Type);
             const char* keystr = PyUnicode_AsUTF8(key);
+            if (!keystr) {
+                PyErr_Clear();
+                continue;
+            }
+            // the names of special Qore methods (ex: constructor, copy, methodGate) are imported with a '_' prefix
+            // (ex: Python's copy() is _copy() in Qore), as Qore gives these names special semantics
+            QoreString special_name;
+            if (qore_python_is_special_method_name(keystr)) {
+                special_name.sprintf("_%s", keystr);
+                keystr = special_name.c_str();
+            }
 
             PyTypeObject* var_type = Py_TYPE(value);
             // check for static method
@@ -4123,9 +4143,6 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
             if (var_type == &PyWrapperDescr_Type) {
                 Py_INCREF(value);
                 cls->addObj(value);
-                if (!strcmp(keystr, "copy")) {
-                    keystr = "_copy";
-                }
                 cls->addMethod((void*)value, keystr,
                     (q_external_method_t)QorePythonProgram::execPythonNormalWrapperDescriptorMethod, Public,
                     normal_meth_flags, QDOM_UNCONTROLLED_API, autoTypeInfo);
@@ -4138,9 +4155,6 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
             if (var_type == &PyMethodDescr_Type) {
                 Py_INCREF(value);
                 cls->addObj(value);
-                if (!strcmp(keystr, "copy")) {
-                    keystr = "_copy";
-                }
                 cls->addMethod((void*)value, keystr,
                     (q_external_method_t)QorePythonProgram::execPythonNormalMethodDescriptorMethod, Public,
                     normal_meth_flags, QDOM_UNCONTROLLED_API, autoTypeInfo);
@@ -4152,9 +4166,6 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
             // check for classmethod descriptors -> normal method
             if (var_type == &PyClassMethodDescr_Type) {
                 // do not need to save reference here
-                if (!strcmp(keystr, "copy")) {
-                    keystr = "_copy";
-                }
                 cls->addMethod((void*)value, keystr,
                     (q_external_method_t)QorePythonProgram::execPythonNormalClassMethodDescriptorMethod, Public,
                     normal_meth_flags, QDOM_UNCONTROLLED_API, autoTypeInfo);
@@ -4166,9 +4177,6 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
             if (PyFunction_Check(value)) {
                 Py_INCREF(value);
                 cls->addObj(value);
-                if (!strcmp(keystr, "copy")) {
-                    keystr = "_copy";
-                }
                 cls->addMethod((void*)value, keystr,
                     (q_external_method_t)QorePythonProgram::execPythonNormalMethod, Public, normal_meth_flags,
                     QDOM_UNCONTROLLED_API, autoTypeInfo);
@@ -4423,7 +4431,7 @@ int QorePythonProgram::saveModule(const char* name, PyObject* mod) {
     return PyDict_SetItemString(*modules, name, mod);
 }
 
-int QorePythonProgram::import(ExceptionSink* xsink, const char* module, const char* symbol) {
+int QorePythonProgram::import(ExceptionSink* xsink, const char* module, const char* symbol, int filter) {
     //printd(5, "QorePythonProgram::import() module: '%s' symbol: '%s'\n", module, symbol ? symbol : "n/a");
 
     QoreString mod_name(module);
@@ -4460,7 +4468,7 @@ int QorePythonProgram::import(ExceptionSink* xsink, const char* module, const ch
             // https://docs.python.org/3/reference/import.html:
             // any module that contains a __path__ attribute is considered a package
             return checkImportSymbol(xsink, mod_name.c_str(), *mod, PyObject_HasAttrString(*mod, "__path__"), symbol,
-                IF_ALL, false);
+                filter, false);
         }
     }
 
@@ -4478,7 +4486,7 @@ int QorePythonProgram::import(ExceptionSink* xsink, const char* module, const ch
         return 0;
     }
 
-    return importModule(xsink, *mod, module, IF_ALL);
+    return importModule(xsink, *mod, module, filter);
 }
 
 int QorePythonProgram::importModule(ExceptionSink* xsink, PyObject* mod, const char* module,
@@ -4653,6 +4661,10 @@ int QorePythonProgram::importSymbol(ExceptionSink* xsink, PyObject* value, const
     if (PyModule_Check(value)) {
         QoreStringMaker sub_module("%s::%s", module, symbol);
         return importModule(xsink, value, sub_module.c_str(), filter);
+    }
+
+    if (filter & IF_NO_CONSTANTS) {
+        return 0;
     }
 
     //printd(5, "QorePythonProgram::importSymbol() adding const %s.%s = '%s'\n", module, symbol,

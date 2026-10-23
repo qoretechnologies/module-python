@@ -26,6 +26,12 @@
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
 
     <b>Bug Fixes:</b>
+    - \c %%requires \c python no longer hides %Qore's @ref Qore::exit() "exit()": the constants of %Python's
+      \c builtins module, including its \c exit and \c quit objects, are no longer imported into the
+      \c Python::builtins namespace (reading such a constant also aborted the process at exit); its functions and
+      classes still are.  %Python methods named \c constructor, \c destructor, \c methodGate, \c memberGate or
+      \c memberNotification are imported with a \c _ prefix, as \c copy already was, instead of tripping an
+      assertion or being uncallable (<a href="https://github.com/qoretechnologies/qore/issues/5495">issue 5495</a>)
     - subclasses of the %Python types converted to %Qore (ex: \c enum.IntEnum, \c collections.OrderedDict,
       \c collections.defaultdict) are converted as their base types instead of being wrapped objects; named tuples are
       hashes of their fields, \c set and \c frozenset values are lists and \c memoryview values are binaries; a
