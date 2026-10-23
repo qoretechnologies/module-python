@@ -31,7 +31,9 @@ Python 3.16 deprecates `PyStatus::exitcode`; since the API passes `PyStatus` by 
 implicit copy constructor of the structure uses the deprecated member, which clang reports at the definition of the
 structure in `cpython/initconfig.h`, where a pragma around the call has no effect.  `python-module.h` therefore
 disables `-Wdeprecated-declarations` around the inclusion of the Python headers only (Python 3.16 and later): a
-deprecated API that the module uses is still reported where the module uses it.
+deprecated API that the module uses is still reported where the module uses it.  Reported upstream as
+[CPython issue 160436](https://github.com/python/cpython/issues/160436); the suppression can be limited to the Python
+versions without the fix once it is released.
 
 ## GIL (Global Interpreter Lock) Management
 

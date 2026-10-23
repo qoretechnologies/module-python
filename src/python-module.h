@@ -40,7 +40,7 @@
 // PyStatus_Exception()); the implicit copy constructor of PyStatus then uses the deprecated member, which clang reports
 // at the definition of the structure in the Python headers, where a pragma around the call has no effect.  Deprecation
 // warnings are disabled for the Python headers only: a deprecated API that the module uses is still reported where the
-// module uses it
+// module uses it (https://github.com/python/cpython/issues/160436)
 #include <patchlevel.h>
 #if PY_VERSION_HEX >= 0x03100000
 #pragma GCC diagnostic push
