@@ -93,6 +93,7 @@ class PythonTest inherits Test {
         addTestCase("type conversion test", \typeConversionTest());
         addTestCase("conversion of cyclic, shared and unrepresentable Python values", \unrepresentableValueTest());
         addTestCase("Qore number <-> Python int and decimal.Decimal", \numberConversionTest());
+        addTestCase("date/time conversion: time zones, relative dates and times of day", \dateConversionTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
@@ -2297,6 +2298,108 @@ def echo(x):
         # a Qore value that has no Python representation
         int i = 1;
         assertThrows("PYTHON-VALUE-ERROR", "reference", \p.callFunction(), ("typ", \i));
+    }
+
+    # absolute dates keep their instant in both directions: a Qore date in the current time zone is a naive datetime,
+    # a date in another zone an aware datetime with the date's UTC offset, and the UTC offset of an aware datetime is
+    # read in full (west of UTC, a timedelta has days=-1, which were ignored, so -05:00 was +19:00; UTC was read as the
+    # current time zone; dates in other zones were naive datetimes of their wall-clock time); relative dates of any
+    # size and sign round-trip equal (they overflowed int, and -PT1S came back as -1 day + 86399 seconds); a time of
+    # day is a Qore date on 1970-01-01 (it was a date in year 0, which could not be converted back)
+    dateConversionTest() {
+        # the current time zone, in which naive datetimes are read and Qore dates are naive, is set for the thread, so
+        # that the test does not depend on the local time zone (ex: UTC); local dates are created at runtime in it
+        set_thread_tz(new TimeZone(3600));
+        on_exit set_thread_tz();
+        date local_noon = date("2020-01-01T12:00:00");
+
+        PythonProgram p("
+from datetime import datetime, timedelta, time, timezone
+
+def echo(x):
+    return x
+
+def offset_secs(d):
+    return None if d.tzinfo is None else int(d.utcoffset().total_seconds())
+
+def same(a, b):
+    return a == b and type(a) is type(b) and (a.tzinfo is None) == (b.tzinfo is None) \\
+        and (a.tzinfo is None or a.utcoffset() == b.utcoffset())
+
+def py_dates():
+    return [
+        datetime(2020, 1, 1, 12, 0, 0, 123456),
+        datetime(2020, 1, 1, 12, tzinfo=timezone.utc),
+        datetime(2020, 1, 1, 12, tzinfo=timezone(timedelta(hours=-5))),
+        datetime(2020, 1, 1, 12, tzinfo=timezone(timedelta(hours=-5, minutes=-30))),
+        datetime(2020, 1, 1, 12, tzinfo=timezone(timedelta(hours=9))),
+    ]
+
+def py_deltas():
+    return [timedelta.max, timedelta.min, timedelta(microseconds=-1), timedelta(seconds=-1.5),
+        timedelta(hours=1000000)]
+
+def total_secs(d):
+    return d.total_seconds()
+
+def times():
+    return [time(10, 20, 30, 123456), time(10, 20, tzinfo=timezone(timedelta(hours=-5)))]
+
+def us_offset():
+    return datetime(2020, 1, 1, tzinfo=timezone(timedelta(microseconds=1)))
+", "dates.py");
+
+        # Python -> Qore: the instant and the UTC offset
+        list<date> pd = p.callFunction("py_dates");
+        assertEq(get_epoch_seconds(2020-01-01T12:00:00+01:00), get_epoch_seconds(pd[0]), "naive: current time zone");
+        assertEq(3600, pd[0].info().utc_secs_east);
+        assertEq(123456, pd[0].microseconds());
+        list<int> offsets = (0, -18000, -19800, 32400);
+        foreach int off in (offsets) {
+            date d = pd[$# + 1];
+            assertEq(off, d.info().utc_secs_east, sprintf("UTC offset %d", off));
+            assertEq(get_epoch_seconds(2020-01-01T12:00:00Z) - off, get_epoch_seconds(d), sprintf("instant %d", off));
+        }
+        # Python round trips keep the value, the type and whether the datetime is naive
+        foreach date d in (pd) {
+            assertTrue(p.callFunction("same", p.callFunction("py_dates")[$#], p.callFunction("echo", d)),
+                sprintf("Python round trip %d", $#));
+        }
+
+        # Qore -> Python: dates in other zones are aware datetimes with their offset, local dates are naive
+        date tokyo = 2020-01-01T12:00:00+09:00;
+        assertEq(32400, p.callFunction("offset_secs", tokyo));
+        assertEq(0, p.callFunction("offset_secs", 2020-01-01T12:00:00Z));
+        assertNothing(p.callFunction("offset_secs", local_noon));
+        foreach date d in ((tokyo, 2020-01-01T12:00:00Z, 2020-01-01T12:00:00-05:30, local_noon + PT0.5S)) {
+            date r = p.callFunction("echo", d);
+            assertEq(get_epoch_seconds(d), get_epoch_seconds(r), sprintf("Qore round trip instant %y", d));
+            assertEq(d.info().utc_secs_east, r.info().utc_secs_east, sprintf("Qore round trip offset %y", d));
+            assertEq(d.microseconds(), r.microseconds(), sprintf("Qore round trip us %y", d));
+        }
+
+        # relative dates
+        assertEq(3600000000.0, p.callFunction("total_secs", PT1000000H));
+        foreach date d in ((PT1000000H, PT1H, -PT1S, -PT1.5S, -P1D, PT0S, P3DT4H5M6.7S)) {
+            assertEq(d, p.callFunction("echo", d), sprintf("relative round trip %y", d));
+        }
+        list<date> pdelta = p.callFunction("py_deltas");
+        assertEq(pdelta, p.callFunction("echo", pdelta), "timedelta round trip");
+        assertEq(-PT0.000001S, pdelta[2]);
+        assertEq(-PT1.5S, pdelta[3]);
+        assertEq(PT1000000H, pdelta[4]);
+
+        # times of day
+        list<date> t = p.callFunction("times");
+        assertEq((1970, 1, 1, 10, 20, 30, 123456), (map t[0].info(){$1}, ("year", "month", "day", "hour", "minute",
+            "second")) + t[0].microseconds());
+        assertEq(3600, t[0].info().utc_secs_east);
+        assertEq(-18000, t[1].info().utc_secs_east);
+        assertEq(10, t[1].hours());
+        # a time of day converts back (as a datetime on 1970-01-01)
+        assertEq(t[0], p.callFunction("echo", t[0]));
+
+        assertThrows("PYTHON-DATETIME-ERROR", "microseconds", \p.callFunction(), "us_offset");
     }
 
     typeConversionTest() {

@@ -9,7 +9,7 @@
     |!Source %Qore Type|!Target Python Type
     |\c binary|\c bytearray
     |\c bool|\c bool
-    |\c date|\c datetime.datetime (absolute date/time values) or \c datetime.delta (relative date/time values)
+    |\c date|\c datetime.datetime (absolute date/time values) or \c datetime.timedelta (relative date/time values)
     |\c float|\c float
     |\c number|\c int (an exact integral value outside the 64-bit signed integer range) or \c decimal.Decimal
     |\c hash|\c dict
@@ -24,6 +24,11 @@
     binary approximation, and its \c decimal.Decimal has the shortest decimal digits that give the same value.
 
     A value of any other %Qore type (ex: a reference) raises a \c PYTHON-VALUE-ERROR exception.
+
+    An absolute %Qore date/time value in the current time zone is a naive \c datetime.datetime (%Python's local time);
+    a value in another time zone is an aware \c datetime.datetime with the value's UTC offset, so that the instant is
+    preserved.  A relative date/time value is a \c datetime.timedelta; years are converted to 365 days and months to
+    30 days.
 
     @note \c datetime.datetime supports years 1 - 9999 only; converting an absolute %Qore date/time value with a
     year outside this range raises an exception, as the value has no %Python representation.  When a value that cannot
@@ -40,7 +45,9 @@
     |\c bytes|\c binary
     |\c bytearray|\c binary
     |\c datetime.datetime|\c date (absolute date/time values)
-    |\c datetime.delta|\c date (relative date/time values)
+    |\c datetime.date|\c date (absolute date/time values at midnight in the current time zone)
+    |\c datetime.time|\c date (absolute date/time values on 1970-01-01)
+    |\c datetime.timedelta|\c date (relative date/time values)
     |\c dict|\c hash
     |\c list|\c list
     |\c str|\c string
@@ -49,6 +56,13 @@
 
     All other %Python types are converted to a %Qore object using a dynamically-created class that wraps the %Python
     type or class.
+
+    A naive \c datetime.datetime is in the current time zone; an aware one is in a time zone with its UTC offset (UTC
+    for an offset of 0), and an offset with microseconds, which a %Qore time zone cannot have, raises a
+    \c PYTHON-DATETIME-ERROR exception.  A \c datetime.time is a time of day on 1970-01-01, as with the time values of
+    %Qore's database drivers, in the time zone of its UTC offset or in the current time zone; it is converted back to
+    %Python as a \c datetime.datetime.  A \c datetime.timedelta is a relative date/time value whose components all
+    have the sign of the value, so that it compares equal to the same value made from other units.
 
     Values that a %Qore value cannot represent raise an exception:
     - a container (\c list, \c tuple or \c dict) that contains itself, directly or through other containers, raises

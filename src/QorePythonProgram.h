@@ -396,8 +396,13 @@ public:
     //! Returns a Qore absolute date time value from a Python Date object
     DLLLOCAL static DateTimeNode* getQoreDateTimeFromDate(PyObject* val);
 
-    //! Returns a Qore absolute date time value from a Python Time object
-    DLLLOCAL static DateTimeNode* getQoreDateTimeFromTime(PyObject* val);
+    //! Returns a Qore absolute date time value on 1970-01-01 from a Python Time object
+    DLLLOCAL DateTimeNode* getQoreDateTimeFromTime(ExceptionSink* xsink, PyObject* val);
+
+    //! Sets the Qore time zone for the given Python UTC offset (a datetime.timedelta); nullptr is UTC
+    /** @return 0 for OK, -1 with a Qore exception (if xsink is set) if the offset has microseconds
+    */
+    DLLLOCAL static int getQoreOffsetZone(ExceptionSink* xsink, PyObject* offset, const AbstractQoreZoneInfo*& zone);
 
     //! Returns a Python string for the given Qore string
     DLLLOCAL static PyObject* getPythonString(ExceptionSink* xsink, const QoreString* str);

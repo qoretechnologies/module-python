@@ -2628,14 +2628,31 @@ BinaryNode* QorePythonProgram::getQoreBinaryFromByteArray(PyObject* val) {
 
 DateTimeNode* QorePythonProgram::getQoreDateTimeFromDelta(PyObject* val) {
     assert(PyDelta_Check(val));
-    return DateTimeNode::makeRelative(0, 0, PyDateTime_DELTA_GET_DAYS(val), 0, 0, PyDateTime_DELTA_GET_SECONDS(val),
-        PyDateTime_DELTA_GET_MICROSECONDS(val));
+    // datetime.timedelta keeps its seconds and microseconds positive (-1 second is days=-1, seconds=86399); the Qore
+    // value is made of days, hours, minutes, seconds and microseconds that all have the sign of the value, which
+    // compares equal to the same value made from other units (a relative date with components of different signs
+    // does not); each component fits an int for every timedelta (at most 999999999 days)
+    int64 secs = static_cast<int64>(PyDateTime_DELTA_GET_DAYS(val)) * 86400 + PyDateTime_DELTA_GET_SECONDS(val);
+    int64 us = PyDateTime_DELTA_GET_MICROSECONDS(val);
+    bool neg = secs < 0;
+    if (neg) {
+        secs = -secs;
+        if (us) {
+            --secs;
+            us = 1000000 - us;
+        }
+    }
+    int sign = neg ? -1 : 1;
+    return DateTimeNode::makeRelative(0, 0, sign * static_cast<int>(secs / 86400),
+        sign * static_cast<int>((secs % 86400) / 3600), sign * static_cast<int>((secs % 3600) / 60),
+        sign * static_cast<int>(secs % 60), sign * static_cast<int>(us));
 }
 
 DateTimeNode* QorePythonProgram::getQoreDateTimeFromDateTime(ExceptionSink* xsink, PyObject* val) {
     assert(PyDateTime_Check(val));
 
-    const AbstractQoreZoneInfo* zone = nullptr;
+    // a naive datetime is in the current time zone; nullptr is UTC
+    const AbstractQoreZoneInfo* zone = currentTZ();
 
     // Use the PyDateTime_DATE_GET_TZINFO() macro to directly access the tzinfo field.
     //
@@ -2671,12 +2688,12 @@ DateTimeNode* QorePythonProgram::getQoreDateTimeFromDateTime(ExceptionSink* xsin
             }
             // No xsink provided - clear exception and proceed without timezone
             PyErr_Clear();
-        } else if (*delta != Py_None && PyDelta_Check(*delta)) {
-            zone = findCreateOffsetZone(PyDateTime_DELTA_GET_SECONDS(*delta));
+        } else if (*delta != Py_None && PyDelta_Check(*delta) && getQoreOffsetZone(xsink, *delta, zone)) {
+            return nullptr;
         }
     }
 
-    return DateTimeNode::makeAbsolute(zone ? zone : currentTZ(), PyDateTime_GET_YEAR(val), PyDateTime_GET_MONTH(val),
+    return DateTimeNode::makeAbsolute(zone, PyDateTime_GET_YEAR(val), PyDateTime_GET_MONTH(val),
         PyDateTime_GET_DAY(val), PyDateTime_DATE_GET_HOUR(val), PyDateTime_DATE_GET_MINUTE(val),
         PyDateTime_DATE_GET_SECOND(val), PyDateTime_DATE_GET_MICROSECOND(val));
 }
@@ -2687,9 +2704,37 @@ DateTimeNode* QorePythonProgram::getQoreDateTimeFromDate(PyObject* val) {
         PyDateTime_GET_DAY(val), 0, 0, 0, 0);
 }
 
-DateTimeNode* QorePythonProgram::getQoreDateTimeFromTime(PyObject* val) {
+int QorePythonProgram::getQoreOffsetZone(ExceptionSink* xsink, PyObject* offset, const AbstractQoreZoneInfo*& zone) {
+    assert(PyDelta_Check(offset));
+    // the offset is a timedelta strictly between -24 and 24 hours; its days are -1 for negative offsets
+    int secs = PyDateTime_DELTA_GET_DAYS(offset) * 86400 + PyDateTime_DELTA_GET_SECONDS(offset);
+    if (PyDateTime_DELTA_GET_MICROSECONDS(offset)) {
+        if (xsink) {
+            xsink->raiseException("PYTHON-DATETIME-ERROR", "cannot convert a UTC offset with microseconds (%d seconds "
+                "and %d microseconds) to a Qore time zone, which has an offset in seconds", secs,
+                PyDateTime_DELTA_GET_MICROSECONDS(offset));
+        }
+        return -1;
+    }
+    // nullptr for UTC
+    zone = findCreateOffsetZone(secs);
+    return 0;
+}
+
+DateTimeNode* QorePythonProgram::getQoreDateTimeFromTime(ExceptionSink* xsink, PyObject* val) {
     assert(Py_TYPE(val) == PyDateTimeAPI->TimeType);
-    return DateTimeNode::makeAbsolute(currentTZ(), 0, 0, 0, PyDateTime_TIME_GET_HOUR(val),
+    // a time of day is an absolute date on 1970-01-01, as with the time values of Qore's database drivers, in the
+    // zone given by the time's UTC offset, or in the current time zone
+    const AbstractQoreZoneInfo* zone = currentTZ();
+    QorePythonReferenceHolder offset(PyObject_CallMethod(val, "utcoffset", nullptr));
+    if (!offset) {
+        qore_python_conversion_error(this, xsink);
+        return nullptr;
+    }
+    if (*offset != Py_None && getQoreOffsetZone(xsink, *offset, zone)) {
+        return nullptr;
+    }
+    return DateTimeNode::makeAbsolute(zone, 1970, 1, 1, PyDateTime_TIME_GET_HOUR(val),
         PyDateTime_TIME_GET_MINUTE(val), PyDateTime_TIME_GET_SECOND(val), PyDateTime_TIME_GET_MICROSECOND(val));
 }
 
@@ -2903,7 +2948,7 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
     }
 
     if (have_datetime_api && type == PyDateTimeAPI->TimeType) {
-        return getQoreDateTimeFromTime(val);
+        return getQoreDateTimeFromTime(xsink, val);
     }
 
     if (have_datetime_api && type == PyDateTimeAPI->DateTimeType) {
@@ -3064,56 +3109,38 @@ PyObject* QorePythonProgram::getPythonDelta(ExceptionSink* xsink, const DateTime
     // outside the range of a 16-bit integer
     qore_tm info;
     dt->getInfo(info);
-    int days = info.year * 365 + info.month * 30 + info.day;
-    int secs = info.hour * 3600 + info.minute * 60 + info.second;
+    // the components are normalized as datetime.timedelta does it (seconds in [0, 86400), microseconds in
+    // [0, 1000000)), in 64-bit arithmetic, as the components of a relative date can exceed these ranges
+    // (ex: PT1000000H)
+    auto floor_div = [](int64 n, int64 d) -> int64 {
+        return n >= 0 ? n / d : -((d - 1 - n) / d);
+    };
+    int64 us = info.us;
+    int64 secs = static_cast<int64>(info.hour) * 3600 + static_cast<int64>(info.minute) * 60 + info.second
+        + floor_div(us, 1000000);
+    us -= floor_div(us, 1000000) * 1000000;
+    int64 days = static_cast<int64>(info.year) * 365 + static_cast<int64>(info.month) * 30 + info.day
+        + floor_div(secs, 86400);
+    secs -= floor_div(secs, 86400) * 86400;
+    if (days > INT_MAX || days < INT_MIN) {
+        PyErr_Format(PyExc_OverflowError, "the relative date/time value has %lld days, which is outside the range of "
+            "datetime.timedelta", static_cast<long long>(days));
+        return nullptr;
+    }
 
     if (PyDateTimeAPI) {
-        return PyDelta_FromDSU(days, secs, info.us);
+        return PyDelta_FromDSU(static_cast<int>(days), static_cast<int>(secs), static_cast<int>(us));
     }
 
     // Fallback: create datetime.timedelta via Python when PyDateTimeAPI is unavailable.
     QorePythonReferenceHolder datetime_mod(PyImport_ImportModule("datetime"));
-    if (!datetime_mod) {
-        if (xsink) {
-            QorePythonProgram* ctx = QorePythonProgram::getContext();
-            if (!ctx || !ctx->checkPythonException(xsink)) {
-                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to import Python datetime module");
-            }
-        }
-        return nullptr;
-    }
-    QorePythonReferenceHolder timedelta_cls(PyObject_GetAttrString(*datetime_mod, "timedelta"));
+    QorePythonReferenceHolder timedelta_cls(datetime_mod ? PyObject_GetAttrString(*datetime_mod, "timedelta")
+        : nullptr);
     if (!timedelta_cls) {
-        if (xsink) {
-            QorePythonProgram* ctx = QorePythonProgram::getContext();
-            if (!ctx || !ctx->checkPythonException(xsink)) {
-                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to resolve datetime.timedelta");
-            }
-        }
         return nullptr;
     }
-    PyObject* args = Py_BuildValue("(iii)", days, secs, info.us);
-    if (!args) {
-        if (xsink) {
-            QorePythonProgram* ctx = QorePythonProgram::getContext();
-            if (!ctx || !ctx->checkPythonException(xsink)) {
-                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to build timedelta arguments");
-            }
-        }
-        return nullptr;
-    }
-    PyObject* rv = PyObject_CallObject(*timedelta_cls, args);
-    Py_DECREF(args);
-    if (!rv) {
-        if (xsink) {
-            QorePythonProgram* ctx = QorePythonProgram::getContext();
-            if (!ctx || !ctx->checkPythonException(xsink)) {
-                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to create datetime.timedelta");
-            }
-        }
-        return nullptr;
-    }
-    return rv;
+    return PyObject_CallFunction(*timedelta_cls, "iii", static_cast<int>(days), static_cast<int>(secs),
+        static_cast<int>(us));
 }
 
 PyObject* QorePythonProgram::getPythonDateTime(ExceptionSink* xsink, const DateTime* dt) {
@@ -3126,55 +3153,49 @@ PyObject* QorePythonProgram::getPythonDateTime(ExceptionSink* xsink, const DateT
     qore_tm info;
     dt->getInfo(info);
 
+    // a date in the current time zone is a naive datetime (Python's local time), which is converted back in the
+    // current time zone; a date in another zone is an aware datetime with the date's UTC offset, so that the instant
+    // is preserved
+    bool naive = info.zone == currentTZ();
+
     if (PyDateTimeAPI) {
-        return PyDateTime_FromDateAndTime(info.year, info.month, info.day, info.hour, info.minute, info.second,
-            info.us);
+        if (naive) {
+            return PyDateTime_FromDateAndTime(info.year, info.month, info.day, info.hour, info.minute, info.second,
+                info.us);
+        }
+        QorePythonReferenceHolder offset(PyDelta_FromDSU(0, info.utc_secs_east, 0));
+        QorePythonReferenceHolder tz(offset ? PyTimeZone_FromOffset(*offset) : nullptr);
+        if (!tz) {
+            return nullptr;
+        }
+        return PyDateTimeAPI->DateTime_FromDateAndTime(info.year, info.month, info.day, info.hour, info.minute,
+            info.second, info.us, *tz, PyDateTimeAPI->DateTimeType);
     }
 
     // Fallback: create datetime.datetime via Python when PyDateTimeAPI is unavailable.
     QorePythonReferenceHolder datetime_mod(PyImport_ImportModule("datetime"));
-    if (!datetime_mod) {
-        if (xsink) {
-            QorePythonProgram* ctx = QorePythonProgram::getContext();
-            if (!ctx || !ctx->checkPythonException(xsink)) {
-                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to import Python datetime module");
-            }
-        }
-        return nullptr;
-    }
-    QorePythonReferenceHolder datetime_cls(PyObject_GetAttrString(*datetime_mod, "datetime"));
+    QorePythonReferenceHolder datetime_cls(datetime_mod ? PyObject_GetAttrString(*datetime_mod, "datetime")
+        : nullptr);
     if (!datetime_cls) {
-        if (xsink) {
-            QorePythonProgram* ctx = QorePythonProgram::getContext();
-            if (!ctx || !ctx->checkPythonException(xsink)) {
-                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to resolve datetime.datetime");
-            }
-        }
         return nullptr;
     }
-    PyObject* args = Py_BuildValue("(iiiiiii)", info.year, info.month, info.day, info.hour, info.minute,
-        info.second, info.us);
-    if (!args) {
-        if (xsink) {
-            QorePythonProgram* ctx = QorePythonProgram::getContext();
-            if (!ctx || !ctx->checkPythonException(xsink)) {
-                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to build datetime arguments");
-            }
+    QorePythonReferenceHolder tz;
+    if (naive) {
+        Py_INCREF(Py_None);
+        tz = Py_None;
+    } else {
+        QorePythonReferenceHolder timedelta_cls(PyObject_GetAttrString(*datetime_mod, "timedelta"));
+        QorePythonReferenceHolder timezone_cls(timedelta_cls ? PyObject_GetAttrString(*datetime_mod, "timezone")
+            : nullptr);
+        QorePythonReferenceHolder offset(timezone_cls
+            ? PyObject_CallFunction(*timedelta_cls, "ii", 0, info.utc_secs_east) : nullptr);
+        tz = offset ? PyObject_CallFunctionObjArgs(*timezone_cls, *offset, nullptr) : nullptr;
+        if (!tz) {
+            return nullptr;
         }
-        return nullptr;
     }
-    PyObject* rv = PyObject_CallObject(*datetime_cls, args);
-    Py_DECREF(args);
-    if (!rv) {
-        if (xsink) {
-            QorePythonProgram* ctx = QorePythonProgram::getContext();
-            if (!ctx || !ctx->checkPythonException(xsink)) {
-                xsink->raiseException("PYTHON-DATETIME-ERROR", "failed to create datetime.datetime");
-            }
-        }
-        return nullptr;
-    }
-    return rv;
+    return PyObject_CallFunction(*datetime_cls, "iiiiiiiO", info.year, info.month, info.day, info.hour, info.minute,
+        info.second, info.us, *tz);
 }
 
 PyObject* QorePythonProgram::getPythonCallable(ExceptionSink* xsink, const ResolvedCallReferenceNode* call) {
