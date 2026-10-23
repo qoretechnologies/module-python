@@ -57,6 +57,8 @@ class PythonQoreClass;
 //! best guess at the ratio of stack size / x = python recursion limit to avoid crashes
 constexpr int PYTHON_LARGE_STACK_FACTOR = 10 * 1024;
 constexpr int PYTHON_SMALL_STACK_FACTOR = 6 * 1024;
+//! the stack bytes reserved for each level of recursion counted by the C recursion counter of Python 3.11 - 3.13
+constexpr int PYTHON_C_STACK_FACTOR = 1024;
 
 struct QorePythonThreadStateInfo {
     PyThreadState* state;

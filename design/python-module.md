@@ -123,6 +123,20 @@ These functions manage the Python execution context for Qore threads:
 3. Thread states must only be used with their owning interpreter
 4. When an interpreter is deleted, all its thread states become invalid
 
+## Stack Usage and Recursion
+
+CPython 3.11 - 3.13 bound the recursion that uses the C stack with a counter in each thread state that is sized for the
+stack of the main thread: `recursion_remaining` in 3.11 (which also counts Python calls) and `c_recursion_remaining`
+in 3.12 and 3.13 (checked by CMake: `QORE_PYTHON_TSTATE_C_RECURSION_COUNTER` names the member).  `setContext()`
+reduces the counter to `q_thread_stack_remaining() / PYTHON_C_STACK_FACTOR` (1 KB per level) when that is lower, and
+`releaseContext()` adds the reduction back (`QorePythonThreadInfo::c_recursion_reduction`); nested contexts on the same
+thread reduce it further and restore their own reductions.  Only the counter can be changed: when it reaches zero,
+`_Py_CheckRecursiveCall()` compares the depth (the thread state's limit minus the counter) with the interpreter's
+limit and resets the counter if the depth is lower, so the module's former reduction of the thread state's limit
+(`recursion_limit`, `py_recursion_limit`) let the recursion continue.  CPython 3.14 checks the stack of the thread
+itself (`c_stack_soft_limit`).  The 3.11 - 3.13 parser has its own nesting limit (`MAXSTACK`), which the module cannot
+bound: parsing deeply nested code can overflow stacks below 512 KB.  Test: `smallStackRecursionTest()`.
+
 ## Sub-Interpreter Management
 
 ### Creation Flow

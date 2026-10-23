@@ -71,6 +71,7 @@ class PythonTest inherits Test {
         addTestCase("exception frame ownership", \exceptionFrameOwnershipTest());
         addTestCase("qore test", \qoreTest());
         addTestCase("stack test", \stackTest());
+        addTestCase("deep recursion on a thread with a small stack", \smallStackRecursionTest());
         addTestCase("thread test", \threadTest());
         addTestCase("python callbacks", \pythonCallbackTest());
         addTestCase("indirect references", \indirectReferencesTest());
@@ -1375,6 +1376,57 @@ def f():
         });
     }
 
+    # recursion that uses the C stack (ex: repr() of nested lists) raises RecursionError on a Qore thread with a small
+    # stack: Python 3.11 - 3.13 count it with a counter sized for the stack of the main thread, which the module now
+    # reduces for the remaining stack of the Qore thread (it changed the recursion limit of the thread state instead,
+    # which CPython ignores), and the stack overflowed (SIGBUS); Python 3.14 checks the stack itself
+    smallStackRecursionTest() {
+        if (Python::FreeThreading) {
+            testSkip("Background threads with Python not supported with free-threading (PEP 703)");
+        }
+        PythonProgram p("
+import copy, json, pickle
+
+def nested(n):
+    l = []
+    for i in range(n):
+        l = [l]
+    return l
+
+def do_repr(n):
+    return len(repr(nested(n)))
+
+def do_json(n):
+    return len(json.dumps(nested(n)))
+
+def do_deepcopy(n):
+    return len(copy.deepcopy(nested(n)))
+
+def do_pickle(n):
+    return len(pickle.dumps(nested(n)))
+
+def do_python(n):
+    def r(i):
+        return 0 if i == 0 else 1 + r(i - 1)
+    return r(n)
+", "small-stack.py");
+
+        int old_size = get_default_thread_stack_size();
+        on_exit set_default_thread_stack_size(old_size);
+        set_default_thread_stack_size(256 * 1024);
+        Queue q();
+        foreach string f in (("do_repr", "do_json", "do_deepcopy", "do_pickle", "do_python")) {
+            background sub () {
+                try {
+                    q.push(sprintf("no exception: %y", p.callFunction(f, 200000)));
+                } catch (hash<ExceptionInfo> ex) {
+                    q.push(ex.err);
+                }
+            }();
+            assertEq("builtins.RecursionError", q.get(), f);
+        }
+    }
+
     threadTest() {
         # Multi-threaded access to Python sub-interpreters not supported with free-threading
         # due to mimalloc heap initialization issues
@@ -2407,8 +2459,8 @@ def us_offset():
 
     # subclasses of the converted types are converted as their base types (they were wrapped objects): ex: IntEnum,
     # StrEnum, OrderedDict, defaultdict, Counter; a named tuple is a hash of its fields, a set or frozenset a list, and
-    # a memoryview a binary; dict keys that are not strings are converted with repr(), and a key that gives the same Qore
-    # key as another one raises an exception (one value replaced the other silently)
+    # a memoryview a binary; dict keys that are not strings are converted with repr(), and a key that gives the same
+    # Qore key as another one raises an exception (one value replaced the other silently)
     subclassConversionTest() {
         PythonProgram p("
 import array, collections, datetime, enum

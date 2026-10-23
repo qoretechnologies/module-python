@@ -7,15 +7,23 @@
     This module implements support for multiple %Python interpreters along with multithreading by managing the %Python
     interpreter thread state manually.
 
-    Additionally, the %Python recursion limit is also set automatically depending on the current thread stack size set
-    in %Qore.
+    @section python_stack Stack Usage and Recursion
 
-    This is done to avoid crashes due to stack exhaustion in combination %Qore and %Python code.
+    %Python code called from a %Qore thread runs on the stack of the %Qore thread, which can be smaller than the stack
+    that %Python's limits assume (the stack of the main thread), so the module bounds %Python's recursion by the stack
+    that the %Qore thread has left, and deep recursion raises a %Python \c RecursionError instead of overflowing the
+    stack:
+    - %Python's recursion limit (\c sys.getrecursionlimit()) is set from the stack of the thread that creates the
+      interpreter
+    - with %Python 3.11 - 3.13, the recursion that uses the C stack (ex: \c repr(), \c json.dumps() or
+      \c copy.deepcopy() of deeply nested containers, or %Python 3.11 function calls) is limited each time a %Qore
+      thread enters %Python to the levels that its remaining stack can hold (an estimated 1 KB per level)
+    - %Python 3.14 and later check the stack of the thread themselves
 
-    To avoid \c RecursionError exceptions when mixing %Qore and %Python in multithreaded code, make sure the thread
-    stack size is set to an appropriate size in %Qore (using \c set_default_thread_stack_size() before the %Python
-    interpreter is created, for example); the %Python recursion limits are then calculated and managed dynamically
-    according to the thread stack size and thread stack usage at the time of context switches to %Python.
+    @note With %Python 3.11 - 3.13, %Python's parser has its own nesting limit, which a small stack cannot hold:
+    parsing deeply nested code (ex: \c eval() of about 200 nested brackets) can overflow a %Qore thread stack smaller
+    than 512 KB.  The default %Qore thread stack size is large enough; use \c set_default_thread_stack_size() to change
+    it.
 
     @section python_created_threads Threads Created by Python
 

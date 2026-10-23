@@ -1266,17 +1266,17 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // CRITICAL: Check if Python is shutting down before any Python API calls.
     // After Py_FinalizeEx(), calling PyGILState_Ensure() or PyEval_RestoreThread() will crash.
     if (python_shutdown || !Py_IsInitialized()) {
-        return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, 0, false};
+        return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, false};
     }
 
     if (!valid) {
-        return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, 0, false};
+        return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, false};
     }
 
     // Check for interrupt before acquiring any state (only if requested)
     if (check_interrupt) {
         if (qore_check_cancel(nullptr, "Python execution")) {
-            return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, 0, false};
+            return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, false};
         }
     }
 
@@ -1284,7 +1284,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // This can happen when another PythonProgram that owned the shared interpreter
     // has been destroyed, deleting the interpreter out from under us.
     if (!interpreter) {
-        return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, 0, false};
+        return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, false};
     }
 
     // Check if interpreter is still valid by verifying it's in the global list
@@ -1301,7 +1301,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         if (!found) {
             // Interpreter has been deleted - mark ourselves as invalid and return
             const_cast<QorePythonProgram*>(this)->valid = false;
-            return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, 0, false};
+            return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, false};
         }
     }
 
@@ -1658,23 +1658,22 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 
     _QORE_GILSTATE_COUNTER_INC(python);
 
-#if defined(Py_GIL_DISABLED) || PY_VERSION_HEX >= 0x030D0000
-    // In free-threading mode and Python 3.13+, skip recursion limit handling
-    // - Free-threading: requires an attached interpreter which may not be available
-    // - Python 3.13+: uses global limits instead of per-thread, and Py_GetRecursionLimit()
-    //   may not be safe to call in all contexts (e.g., during cleanup)
-    int recursion_depth = 1000;  // Use a default value
-#else
-    // calculate new recursion depth
-    int recursion_depth = PyThreadState_GetRecursionLimit(python);
-    // be conservative when calculating the new recursion depth based on remaining stack space
-    int new_recursion_depth = q_thread_stack_remaining() / PYTHON_SMALL_STACK_FACTOR;
-    //printd(5, "QorePythonProgram::setContext() recursion_depth: %d -> %d\n", python->recursion_depth,
-    //  new_recursion_depth);
-    PyThreadState_UpdateRecursionLimit(python, new_recursion_depth);
+    QorePythonThreadInfo rv = {tss_state, t_state, ceval_state, released_other_interp_tstate, g_state, true};
+#ifdef QORE_PYTHON_TSTATE_C_RECURSION_COUNTER
+    // Python 3.11 - 3.13 limit the recursion that uses the C stack (ex: repr() of nested containers) with a counter
+    // in the thread state that is sized for the stack of the main thread (ex: 10000 levels), while a Qore thread can
+    // have a much smaller stack, which the recursion then overflows (SIGBUS); the counter is reduced to the levels
+    // that the remaining stack can hold, and restored by releaseContext() (Python 3.14 checks the stack of the thread
+    // itself).  Only the counter can be changed: when it reaches zero, CPython compares the depth (the thread
+    // state's limit minus the counter) with the interpreter's recursion limit, so a lower limit in the thread state
+    // would let the recursion continue
+    int c_limit = static_cast<int>(q_thread_stack_remaining() / PYTHON_C_STACK_FACTOR);
+    if (c_limit < python->QORE_PYTHON_TSTATE_C_RECURSION_COUNTER) {
+        rv.c_recursion_reduction = python->QORE_PYTHON_TSTATE_C_RECURSION_COUNTER - c_limit;
+        python->QORE_PYTHON_TSTATE_C_RECURSION_COUNTER = c_limit;
+    }
 #endif
-
-    return {tss_state, t_state, ceval_state, released_other_interp_tstate, g_state, recursion_depth, true};
+    return rv;
 }
 
 // releaseContext() - Release the Python execution context acquired by setContext()
@@ -1709,13 +1708,8 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
     assert(_qore_PyThreadState_IsCurrent(python));
 #endif
 
-    //printd(5, "QorePythonProgram::releaseContext() rd: %d -> ord: %d\n", PyThreadState_GetRecursionLimit(python),
-    //  oldstate.recursion_depth);
-
-#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030D0000
-    // restore recursion depth
-    // Skip for Python 3.13+ which uses global limits
-    PyThreadState_UpdateRecursionLimit(python, oldstate.recursion_depth);
+#ifdef QORE_PYTHON_TSTATE_C_RECURSION_COUNTER
+    python->QORE_PYTHON_TSTATE_C_RECURSION_COUNTER += oldstate.c_recursion_reduction;
 #endif
 
     // restore the old state

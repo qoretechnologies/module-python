@@ -446,8 +446,9 @@ struct QorePythonThreadInfo {
     PyThreadState* ceval_state;
     PyThreadState* released_other_interp_tstate;  // Thread state from another interpreter we released
     PyGILState_STATE g_state;
-    int recursion_depth;
     bool valid;
+    //! the levels by which setContext() reduced the C recursion counter of the thread state (Python 3.11 - 3.13)
+    int c_recursion_reduction = 0;
 };
 
 //! acquires the GIL and manages thread state

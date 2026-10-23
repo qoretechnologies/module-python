@@ -107,6 +107,32 @@ int main(void) {
     endif()
 endif()
 
+# Python 3.11 - 3.13 limit the recursion that uses the C stack with a counter in each thread state (a CPython-specific
+# member: recursion_remaining in 3.11, which also counts Python calls, and c_recursion_remaining in 3.12 and 3.13) that
+# is sized for the stack of the main thread; the module reduces it for the stack of the Qore thread (Python 3.14
+# checks the stack of the thread itself and has no such member)
+if (${Python3_VERSION_MINOR} EQUAL 11)
+    set(_qore_python_c_recursion_field recursion_remaining)
+elseif (${Python3_VERSION_MINOR} EQUAL 12 OR ${Python3_VERSION_MINOR} EQUAL 13)
+    set(_qore_python_c_recursion_field c_recursion_remaining)
+endif()
+if (DEFINED _qore_python_c_recursion_field)
+    set(CMAKE_REQUIRED_INCLUDES ${Python3_INCLUDE_DIRS})
+    check_c_source_compiles("
+#include <Python.h>
+int main(void) {
+    PyThreadState tstate;
+    tstate.${_qore_python_c_recursion_field} = 0;
+    return tstate.${_qore_python_c_recursion_field};
+}" QORE_PYTHON_HAVE_TSTATE_C_RECURSION_COUNTER)
+    if (QORE_PYTHON_HAVE_TSTATE_C_RECURSION_COUNTER)
+        add_definitions(-DQORE_PYTHON_TSTATE_C_RECURSION_COUNTER=${_qore_python_c_recursion_field})
+    else()
+        message(WARNING "Python ${Python3_VERSION} has no PyThreadState::${_qore_python_c_recursion_field} member: "
+            "deep recursion can overflow the stack of Qore threads with small stacks")
+    endif()
+endif()
+
 # Check for C++17 (required for Python 3.13+ and inline thread_local).
 include(CheckCXXCompilerFlag)
 CHECK_CXX_COMPILER_FLAG("-std=c++17" COMPILER_SUPPORTS_CXX17)
