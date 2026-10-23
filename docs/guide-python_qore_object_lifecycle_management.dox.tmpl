@@ -4,25 +4,30 @@
 
     @tableofcontents
 
-    %Qore's deterministic garbage collection approach and reliance on destructors means that %Qore objects created by
-    %Python must have their lifecycles managed externally.
+    %Python objects for %Qore objects hold strong references to the %Qore objects: a %Qore object exists as long as
+    %Qore code or %Python code references it, and its destructor runs when the last reference is released, as with
+    %Qore's own deterministic garbage collection.  %Python also releases its objects deterministically, when their
+    last reference is released, so a %Qore object that %Python code creates, receives or returns is destroyed when
+    neither %Qore nor %Python references it anymore.
 
-    %Python objects wrapping %Qore objects hold only weak references to %Qore objects.
+    @section python_qore_object_lifecycle_cycles Reference Cycles
 
-    @section python_qore_object_lifecycle_default Default Qore Object Lifecycle Management
+    %Python objects that reference each other in a cycle are released by %Python's cycle collector, which runs
+    automatically from time to time (and when \c gc.collect() is called) instead of when the last reference is
+    released.  An instance of a %Python class that inherits a %Qore class is part of such a cycle (the %Python object
+    holds its %Qore object, whose data holds the %Python object): while %Qore code references the %Qore object, the
+    %Python object exists as well, and when only the %Python object references it, the cycle collector releases both,
+    and the %Qore object's destructor runs at that time.
 
-    By default, %Qore objects are saved in thread-local data, so the lifecycle of the object is automatically limited
-    to the existence of the thread.
-
-    The thread-local hash key name used to save the list of objects created is determined by the value of the
-    \c "_python_save" thread-local key, if set.  If no such key is set, then \c "_python_save" is used instead as the
-    literal key for saving the list of objects.
+    The destructors of %Qore objects released by %Python run without the %Python GIL, on the thread that releases
+    them.
 
     @section python_qore_object_lifecycle_explicit Explicit Qore Object Lifecycle Management
 
-    The lifecycle of %Qore objects can be managed explicitly by using the
+    The lifecycle of %Qore objects can additionally be managed explicitly by using the
     @ref Python::PythonProgram::setSaveObjectCallback() "PythonProgram::setSaveObjectCallback()" method to set a
-    callback that is called every time a %Qore object is created using the %Python API.
+    callback that is called every time a %Qore object is created using the %Python API; the callback runs without the
+    %Python GIL.  A reference that the callback keeps keeps the object alive.
 
     This callback must take a single object argument as in the following example:
 

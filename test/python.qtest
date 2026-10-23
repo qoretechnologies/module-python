@@ -35,6 +35,26 @@ class PythonSandboxTestReader {
     }
 }
 
+#! counts its destructions; used to check the lifetime of Qore objects used from Python
+class PythonLifecycleTracked {
+    public {
+        static int destroyed = 0;
+        string name;
+    }
+
+    constructor(string name) {
+        self.name = name;
+    }
+
+    destructor() {
+        ++destroyed;
+    }
+
+    string get() {
+        return "qore:" + name;
+    }
+}
+
 class PythonTest inherits Test {
     public {
         const ExprTests = (
@@ -98,6 +118,7 @@ class PythonTest inherits Test {
         addTestCase("conversion of subclasses, named tuples, sets, memoryviews and dict keys",
             \subclassConversionTest());
         addTestCase("special Qore method names and the builtins namespace", \specialNameTest());
+        addTestCase("lifetime of Qore objects used from Python", \qoreObjectLifetimeTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
@@ -2598,6 +2619,134 @@ def get():
         pgm2.loadModule("python");
         pgm2.parse("int sub py_len(list<auto> l) { return Python::builtins::len(l); }", "special-len");
         assertEq(3, pgm2.callFunction("py_len", (1, 2, 3)));
+    }
+
+    # Python objects for Qore objects hold strong references: a Qore object exists as long as Qore or Python references
+    # it, and its destructor runs when the last reference is released; previously every Qore object passed to Python
+    # was added to the thread-local _python_save list, so it lived until the thread ended (once per pass), and objects
+    # created from Python were saved there as well; an instance of a Python subclass of a Qore class is collected by
+    # Python's cycle collector when only it keeps its Qore object alive (it was never collected); the save object
+    # callback, which is still called for objects created from Python, runs without the GIL, so it cannot deadlock with
+    # a thread that holds a Qore lock and waits for the GIL
+    qoreObjectLifetimeTest() {
+        PythonProgram p("
+import gc
+from qore.__root__ import PythonLifecycleTracked
+
+class Sub(PythonLifecycleTracked):
+    def get(self):
+        return 'python:' + self.name
+
+kept = []
+
+def touch(o):
+    return o.get()
+
+def keep(o):
+    kept.append(o)
+
+def drop():
+    kept.clear()
+    gc.collect()
+
+def make_and_drop():
+    return PythonLifecycleTracked('dropped').get()
+
+def make():
+    return PythonLifecycleTracked('made')
+
+def make_sub():
+    s = Sub('sub')
+    kept.append(s)
+    return s
+", "lifetime.py");
+
+        int destroyed = PythonLifecycleTracked::destroyed;
+        # a Qore object passed to Python and not kept there is destroyed when its last Qore reference is released
+        {
+            PythonLifecycleTracked o("passed");
+            for (int i = 0; i < 1000; ++i) {
+                assertEq("qore:passed", p.callFunction("touch", o));
+            }
+            assertEq(destroyed, PythonLifecycleTracked::destroyed);
+        }
+        assertEq(destroyed + 1, PythonLifecycleTracked::destroyed, "destroyed at the end of its scope");
+        assertNothing(get_thread_data("_python_save"), "no objects are saved in thread-local data");
+
+        # an object kept in Python lives until Python releases it
+        {
+            PythonLifecycleTracked o("kept");
+            p.callFunction("keep", o);
+        }
+        assertEq(destroyed + 1, PythonLifecycleTracked::destroyed, "kept in Python");
+        p.callFunction("drop");
+        assertEq(destroyed + 2, PythonLifecycleTracked::destroyed, "released by Python");
+
+        # objects created from Python
+        assertEq("qore:dropped", p.callFunction("make_and_drop"));
+        assertEq(destroyed + 3, PythonLifecycleTracked::destroyed, "created and released by Python");
+        {
+            object o = p.callFunction("make");
+            assertEq(destroyed + 3, PythonLifecycleTracked::destroyed, "held by Qore");
+            assertEq("qore:made", o.get());
+        }
+        assertEq(destroyed + 4, PythonLifecycleTracked::destroyed, "released by Qore");
+
+        # an instance of a Python subclass of a Qore class: kept alive by Qore, collected when only Python held it
+        {
+            object strong = p.callFunction("make_sub");
+            p.callFunction("drop");
+            assertEq("python:sub", strong.get(), "Qore keeps the Python object alive");
+        }
+        # a method called through a weak reference to a destroyed object raises OBJECT-ALREADY-DELETED or, depending
+        # on Qore's execution mode, runs on the emptied object (qoretechnologies/qore#5509): the object has a member
+        # while it exists
+        auto weak;
+        weak := p.callFunction("make_sub");
+        assertTrue(weak.val());
+        p.callFunction("drop");
+        bool collected;
+        try {
+            collected = !weak.val();
+        } catch (hash<ExceptionInfo> ex) {
+            collected = ex.err == "OBJECT-ALREADY-DELETED";
+        }
+        assertTrue(collected, "collected by Python");
+
+        # the save object callback is called once for each object created from Python, not for objects passed to it
+        list<object> saved;
+        p.setSaveObjectCallback(sub (object o) { saved += o; });
+        on_exit p.setSaveObjectCallback();
+        {
+            PythonLifecycleTracked o("passed");
+            p.callFunction("touch", o);
+            p.callFunction("touch", o);
+        }
+        p.callFunction("make_and_drop");
+        assertEq(1, saved.size());
+        assertEq("dropped", saved[0].name);
+
+        # the callback runs without the GIL: it waits for a lock held by a thread that calls Python meanwhile
+        if (!Python::FreeThreading) {
+            Mutex m();
+            Queue locked();
+            Queue in_callback();
+            p.setSaveObjectCallback(sub (object o) {
+                in_callback.push(True);
+                # the thread holding the lock calls Python, which needs the GIL, before releasing it
+                assertEq(0, m.lock(10s), "the lock is released by the thread that calls Python");
+                m.unlock();
+            });
+            background sub () {
+                m.lock();
+                on_exit m.unlock();
+                locked.push(True);
+                in_callback.get();
+                p.callFunction("touch", new PythonLifecycleTracked("thread"));
+            }();
+            locked.get();
+            p.callFunction("make_and_drop");
+        }
     }
 
     typeConversionTest() {

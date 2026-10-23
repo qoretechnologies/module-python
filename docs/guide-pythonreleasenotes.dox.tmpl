@@ -26,6 +26,15 @@
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
 
     <b>Bug Fixes:</b>
+    - %Python objects for %Qore objects hold strong references, so a %Qore object exists as long as %Qore or %Python
+      references it and its destructor runs when the last reference is released; previously every %Qore object passed
+      to %Python was added to the thread-local \c "_python_save" list (once for each time it was passed), so it lived
+      until the thread ended, and objects created from %Python were saved there as well.  %Qore objects are no longer
+      saved in thread-local data; the save object callback is still called for the objects created from %Python.  An
+      instance of a %Python subclass of a %Qore class is released by %Python's cycle collector when only it references
+      its %Qore object (it was never released).  The destructors of %Qore objects released by %Python, and the save
+      object callback, run without the GIL, so they cannot deadlock with a thread that holds a %Qore lock and waits for
+      the GIL (<a href="https://github.com/qoretechnologies/qore/issues/5492">issue 5492</a>)
     - deep recursion in %Python code called from a %Qore thread with a small stack raises \c RecursionError instead of
       crashing the process with %Python 3.11 - 3.13: the C recursion counter of the thread state is now reduced to the
       levels that the remaining stack of the %Qore thread can hold; the module previously lowered the recursion limit

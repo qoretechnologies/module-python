@@ -30,7 +30,7 @@
 ///@{
 namespace Python;
 
-//! Sets the callback used to give %Qore objects created from Python a deterministic lifetime
+//! Sets the callback called for each %Qore object created from Python
 /** This is the function form of @ref Python::PythonProgram::setSaveObjectCallback(), provided so
     that object capture can be enabled the same way as for the \c jni module's
     \c jni::set_save_object_callback(): a privileged parent %Program can enable capture on a
@@ -39,9 +39,10 @@ namespace Python;
     functional-domain check against the calling (parent) %Program's parse options.  The callback is
     registered on the calling %Program context.
 
-    @param save_object_callback the callback to save any %Qore objects created in Python code; must
-    take an argument of type @ref object_type "object".  If not set, the standard thread-local
-    implementation is used where %Qore objects are saved in a thread-local hash.
+    @param save_object_callback the callback called with each %Qore object created in Python code (without the
+    %Python GIL); must take an argument of type @ref object_type "object".  %Python objects for %Qore objects hold
+    strong references, so a %Qore object exists as long as %Qore or %Python references it; a reference that the
+    callback keeps keeps the object alive.
 
     @see
     - @ref Python::PythonProgram::setSaveObjectCallback()

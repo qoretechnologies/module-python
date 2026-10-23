@@ -212,6 +212,7 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
         {Py_tp_doc, (void*)docstr},
         {Py_tp_dealloc, (void*)PythonQoreClass::py_dealloc},
         {Py_tp_traverse, (void*)PythonQoreClass::py_traverse},
+        {Py_tp_clear, (void*)PythonQoreClass::py_clear},
         {Py_tp_repr, (void*)PythonQoreClass::py_repr},
         {Py_tp_getattro, (void*)PythonQoreClass::py_getattro},
         {Py_tp_base, (void*)&PythonQoreObjectBase_Type},
@@ -460,15 +461,14 @@ void PythonQoreClass::populateClass(QorePythonProgram* pypgm, const QoreClass& q
 
 PyObject* PythonQoreClass::wrap(QoreObject* obj) {
     PyQoreObject* self = (PyQoreObject*)py_type->tp_alloc(py_type, 0);
-    obj->tRef();
-    self->qobj = obj;
-    // save a strong reference to the Qore object
-    ExceptionSink xsink;
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
-    qore_python_pgm->saveQoreObjectFromPython(obj, xsink);
-    if (xsink) {
-        qore_python_pgm->raisePythonException(xsink);
+    if (!self) {
+        return nullptr;
     }
+    // the Python object holds a strong reference: the Qore object exists as long as Qore or Python references it, and
+    // its destructor runs when the last reference is released
+    obj->ref();
+    self->qobj = obj;
+    self->strong = true;
     //printd(5, "PythonQoreClass::wrap() obj: %p (%s)\n", obj, obj->getClassName());
     return (PyObject*)self;
 }
@@ -704,6 +704,7 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
     //  self, type->tp_name, qcls->getName(), qcls->getID(), constructor_cls->getName(), constructor_cls->getID(),
     //  qobj, args);
     if (qobj && qobj->getClass() == qcls) {
+        // the Qore object was created by Qore, which manages its lifetime; this object is its Python part
         qobj->tRef();
         pyself->qobj = qobj;
         return 0;
@@ -745,19 +746,19 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
 
 int PythonQoreClass::newQoreObject(ExceptionSink& xsink, PyQoreObject* pyself, QoreObject* qobj,
         const QoreClass* qcls, QorePythonProgram* qore_python_pgm) {
-    // execConstructor transfers an owning reference. The saved-object list (or
-    // caller's save callback) takes its own reference; retain the original until
-    // setup succeeds, then release it on both success and failure.
-    ReferenceHolder<QoreObject> holder(qobj, &xsink);
-    qobj->tRef();
+    // the Python object takes over the reference returned by the constructor: the Qore object exists as long as Qore
+    // or Python references it
     pyself->qobj = qobj;
+    pyself->strong = true;
 
     if (qcls) {
-        // add private data for python class
+        // add private data for python class; the reference cycle between the two objects is visible to Python's cycle
+        // collector while the Python object holds the only reference to the Qore object (see py_traverse())
         Py_INCREF(pyself);
         qobj->setPrivate(qcls->getID(), new QorePythonPrivateData(qore_python_pgm, (PyObject*)pyself));
+        pyself->qobj_refs_self = true;
     }
-    // save a strong reference to the Qore object
+    // call the save object callback, if any
     qore_python_pgm->saveQoreObjectFromPython(qobj, xsink);
     if (!xsink) {
         return 0;
@@ -853,16 +854,49 @@ PyObject* PythonQoreClass::py_new(PyTypeObject* type, PyObject* args, PyObject* 
 int PythonQoreClass::py_traverse(PyObject* self, visitproc visit, void* arg) {
     // Heap instances own their type, including cycles through class constants.
     Py_VISIT(Py_TYPE(self));
+    // an instance of a Python subclass of a Qore class is referenced by the private data of its Qore object; while it
+    // holds the only reference to the Qore object, that reference is part of a cycle that only this object keeps
+    // alive, which py_clear() breaks; while Qore code also references the Qore object, it keeps this object alive
+    PyQoreObject* pyself = reinterpret_cast<PyQoreObject*>(self);
+    if (pyself->qobj_refs_self && pyself->strong && pyself->qobj && pyself->qobj->reference_count() == 1) {
+        Py_VISIT(self);
+    }
     return 0;
+}
+
+int PythonQoreClass::py_clear(PyObject* self) {
+    releaseQoreObject(reinterpret_cast<PyQoreObject*>(self));
+    return 0;
+}
+
+void PythonQoreClass::releaseQoreObject(PyQoreObject* self) {
+    QoreObject* obj = self->qobj;
+    if (!obj) {
+        return;
+    }
+    self->qobj = nullptr;
+    if (!self->strong) {
+        obj->tDeref();
+        return;
+    }
+    // releasing the reference can run the object's destructor, which is Qore code: it needs a thread registered with
+    // Qore, and runs without the GIL, as other Qore code called from Python, so that it cannot deadlock with a thread
+    // that holds a Qore lock and waits for the GIL; if the thread cannot be registered, the reference is not released
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.ok()) {
+        return;
+    }
+    ExceptionSink xsink;
+    {
+        QorePythonReleaseGilHelper prgh;
+        obj->deref(&xsink);
+    }
 }
 
 void PythonQoreClass::py_dealloc(PyQoreObject* self) {
     PyObject_GC_UnTrack(self);
     PyTypeObject* type = Py_TYPE(self);
-    if (self->qobj) {
-        self->qobj->tDeref();
-        self->qobj = nullptr;
-    }
+    releaseQoreObject(self);
     type->tp_free(self);
     // PyType_GenericAlloc gives every instance a reference to its heap type.
     // The custom deallocator must release that reference after freeing the instance.

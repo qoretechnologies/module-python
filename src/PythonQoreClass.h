@@ -31,6 +31,11 @@
 struct PyQoreObject {
     PyObject_HEAD
     QoreObject* qobj;
+    //! true if the object holds a strong reference to qobj, false for a weak reference (when Qore created qobj for a
+    //! Qore class that inherits the object's Python class)
+    bool strong;
+    //! true if qobj's private data holds a reference to this object (an instance of a Python subclass of a Qore class)
+    bool qobj_refs_self;
 };
 
 class PythonQoreClass {
@@ -104,6 +109,11 @@ private:
     DLLLOCAL static PyObject* py_new(PyTypeObject* type, PyObject* args, PyObject* kw);
     DLLLOCAL static void py_dealloc(PyQoreObject* self);
     DLLLOCAL static int py_traverse(PyObject* self, visitproc visit, void* arg);
+    DLLLOCAL static int py_clear(PyObject* self);
+
+    //! releases the reference to the Qore object; a strong reference is released without the GIL, as releasing it can
+    //! run the object's destructor
+    DLLLOCAL static void releaseQoreObject(PyQoreObject* self);
     DLLLOCAL static PyObject* py_repr(PyObject* obj);
     DLLLOCAL static void py_free(PyQoreObject* self);
     // get attribute

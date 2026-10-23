@@ -137,6 +137,23 @@ limit and resets the counter if the depth is lower, so the module's former reduc
 itself (`c_stack_soft_limit`).  The 3.11 - 3.13 parser has its own nesting limit (`MAXSTACK`), which the module cannot
 bound: parsing deeply nested code can overflow stacks below 512 KB.  Test: `smallStackRecursionTest()`.
 
+## Lifetime of Qore Objects Used from Python
+
+A `PyQoreObject` holds a strong reference to its `QoreObject` (`strong`), taken in `PythonQoreClass::wrap()` (Qore
+objects passed to or returned to Python) and in `newQoreObject()` (objects created from Python: the reference returned
+by the constructor is taken over).  Only when Qore creates the object of a Qore class that inherits the Python class is
+the reference weak (`py_init()` with the implicit Qore object), as Qore then manages the object.  `releaseQoreObject()`
+releases a strong reference in `tp_dealloc` and `tp_clear` with a thread registered with Qore
+(`QorePythonQoreEntryHelper`) and without the GIL, as it can run the object's destructor.  Objects are not saved in
+thread-local data (`_python_save` was removed); the save object callback is still called for objects created from
+Python, without the GIL.
+
+An instance of a Python subclass of a Qore class is referenced by its Qore object's private data
+(`QorePythonPrivateData`, `qobj_refs_self`), a cycle across both runtimes: `py_traverse()` reports that reference to
+Python's cycle collector only while the Python object holds the only reference to the Qore object
+(`reference_count() == 1`), so the collector releases both when nothing else references them, and Qore code that
+references the Qore object keeps the Python object alive.  Test: `qoreObjectLifetimeTest()`.
+
 ## Sub-Interpreter Management
 
 ### Creation Flow

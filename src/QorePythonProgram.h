@@ -586,7 +586,6 @@ protected:
     QoreReferenceCounter weak_refs;
 
     //! Saves Qore objects in thread-local data
-    DLLLOCAL int saveQoreObjectFromPythonDefault(const QoreValue& rv, ExceptionSink& xsink);
 
     DLLLOCAL int importQoreNamespaceToPython(PyObject* mod, const QoreNamespace& ns);
 

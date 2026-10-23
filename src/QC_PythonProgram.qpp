@@ -193,12 +193,9 @@ pypgm.setSaveObjectCallback(callback);
     @param save_object_callback the callback to save any %Qore objects created in Python code, must take an argument
     of type @ref object_type "object"
 
-    Due to the differences in garbage collection approaches between %Qore and Python, %Qore objects must be managed with
-    a deterministic life cycle; JaPythona objects have only weak references to %Qore objects due to the lack of
-    destructors in Python and the lack of determinism in the Python runtime for object lifecycle management.
-
-    The callback set here will be called any time a %Qore object is created from Python code; if no callback is set,
-    then the standard thread-local implementation is used where %Qore objects are saved in a thread-local hash.
+    %Python objects for %Qore objects hold strong references, so a %Qore object exists as long as %Qore or %Python
+    references it; the callback set here is called any time a %Qore object is created from %Python code (without the
+    %Python GIL), and a reference that it keeps keeps the object alive.
 
     @see @ref python_qore_object_lifecycle_managementguide for more information
 */
@@ -340,12 +337,9 @@ PythonProgram::setSaveObjectCallback(callback);
     @param save_object_callback the callback to save any %Qore objects created in Python code, must take an argument
     of type @ref object_type "object"
 
-    Due to the differences in garbage collection approaches between %Qore and Python, %Qore objects must be managed with
-    a deterministic life cycle; JaPythona objects have only weak references to %Qore objects due to the lack of
-    destructors in Python and the lack of determinism in the Python runtime for object lifecycle management.
-
-    The callback set here will be called any time a %Qore object is created from Python code; if no callback is set,
-    then the standard thread-local implementation is used where %Qore objects are saved in a thread-local hash.
+    %Python objects for %Qore objects hold strong references, so a %Qore object exists as long as %Qore or %Python
+    references it; the callback set here is called any time a %Qore object is created from %Python code (without the
+    %Python GIL), and a reference that it keeps keeps the object alive.
 
     @see @ref python_qore_object_lifecycle_managementguide for more information
 */

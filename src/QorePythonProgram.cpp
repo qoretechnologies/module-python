@@ -1904,61 +1904,21 @@ int QorePythonProgram::saveQoreObjectFromPython(const QoreValue& rv, ExceptionSi
     //printd(5, "QorePythonProgram::saveQoreObjectFromPython() this: %p val: %s soc: %p\n", this,
     //  rv.getFullTypeName(), *save_object_callback);
 
-    if (save_object_callback) {
-        ReferenceHolder<QoreListNode> args(new QoreListNode(autoTypeInfo), &xsink);
-        args->push(rv.refSelf(), &xsink);
-        ValueHolder result(save_object_callback->execValue(*args, &xsink), &xsink);
-        if (xsink) {
-            raisePythonException(xsink);
-            return -1;
-        }
+    if (!save_object_callback) {
         return 0;
     }
 
-    return saveQoreObjectFromPythonDefault(rv, xsink);
-}
-
-int QorePythonProgram::saveQoreObjectFromPythonDefault(const QoreValue& rv, ExceptionSink& xsink) {
-    QoreHashNode* data = qpgm->getThreadData();
-    assert(data);
-    std::string domain_name;
-    // get key name where to save the data if possible
-    QoreValue v = data->getKeyValue("_python_save");
-    if (v.getType() != NT_STRING) {
-        domain_name = "_python_save";
-    } else {
-        QoreStringValueHelper str(v);
-        domain_name = str->c_str();
+    // the callback is Qore code, which runs without the GIL, so that it cannot deadlock with a thread that holds a
+    // Qore lock and waits for the GIL; the arguments and the result are released without the GIL as well
+    {
+        QorePythonReleaseGilHelper prgh;
+        ReferenceHolder<QoreListNode> args(new QoreListNode(autoTypeInfo), &xsink);
+        args->push(rv.refSelf(), &xsink);
+        ValueHolder result(save_object_callback->execValue(*args, &xsink), &xsink);
     }
-
-    QoreValue kv = data->getKeyValue(domain_name.c_str());
-    // ignore operation if domain exists but is not a list
-    if (!kv || kv.getType() == NT_LIST) {
-        QoreListNode* list;
-        ReferenceHolder<QoreListNode> list_holder(&xsink);
-        if (!kv) {
-            // we need to assign list in data *after* we prepend the object to the list
-            // in order to manage object counts
-            list = new QoreListNode(autoTypeInfo);
-            list_holder = list;
-        } else {
-            list = kv.get<QoreListNode>();
-        }
-
-        // prepend to list to ensure FILO destruction order
-        list->splice(0, 0, rv, &xsink);
-        if (!xsink && list_holder) {
-             data->setKeyValue(domain_name, list_holder.release(), &xsink);
-        }
-        if (xsink) {
-            raisePythonException(xsink);
-            return -1;
-        }
-        //printd(5, "saveQoreObjectFromPythonDefault() domain: '%s' obj: %p %s\n", domain_name, rv.get<QoreObject>(),
-        //  rv.get<QoreObject>()->getClassName());
-    } else {
-        //printd(5, "saveQoreObjectFromPythonDefault() NOT SAVING domain: '%s' HAS KEY v: %s (kv: %s)\n", domain_name,
-        //  rv.getFullTypeName(), kv.getFullTypeName());
+    if (xsink) {
+        raisePythonException(xsink);
+        return -1;
     }
     return 0;
 }
