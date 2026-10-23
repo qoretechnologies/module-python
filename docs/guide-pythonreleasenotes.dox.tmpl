@@ -26,6 +26,11 @@
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
 
     <b>Bug Fixes:</b>
+    - subclasses of the %Python types converted to %Qore (ex: \c enum.IntEnum, \c collections.OrderedDict,
+      \c collections.defaultdict) are converted as their base types instead of being wrapped objects; named tuples are
+      hashes of their fields, \c set and \c frozenset values are lists and \c memoryview values are binaries; a
+      \c dict with keys that give the same %Qore hash key (ex: \c 1 and \c '1') raises an exception instead of losing
+      a value (<a href="https://github.com/qoretechnologies/qore/issues/5491">issue 5491</a>)
     - absolute date/time values keep their instant between %Qore and %Python: the UTC offset of an aware
       \c datetime.datetime west of UTC was read without its days (-05:00 became +19:00), UTC was read as the current
       time zone, and %Qore values in other time zones were naive \c datetime.datetime values of their wall-clock time;

@@ -48,14 +48,21 @@
     |\c datetime.date|\c date (absolute date/time values at midnight in the current time zone)
     |\c datetime.time|\c date (absolute date/time values on 1970-01-01)
     |\c datetime.timedelta|\c date (relative date/time values)
-    |\c dict|\c hash
+    |\c dict|\c hash (keys that are not strings are converted with \c repr())
     |\c list|\c list
     |\c str|\c string
     |\c tuple|\c list
+    |named tuple (ex: \c collections.namedtuple)|\c hash of its fields
+    |\c set, \c frozenset|\c list (in iteration order)
+    |\c memoryview|\c binary
     |\c function, \c method|\c code
 
-    All other %Python types are converted to a %Qore object using a dynamically-created class that wraps the %Python
-    type or class.
+    Subclasses of these types are converted as their base types (ex: \c enum.IntEnum is an \c int, a \c str enum is a
+    \c string, \c collections.OrderedDict and \c collections.defaultdict are hashes).  All other %Python types (ex:
+    \c complex, or objects supporting the buffer protocol other than \c memoryview, such as \c array.array) are
+    converted to a %Qore object using a dynamically-created class that wraps the %Python type or class.
+
+    A \c dict whose keys give the same %Qore hash key (ex: \c 1 and \c '1') raises a \c PYTHON-VALUE-ERROR exception.
 
     A naive \c datetime.datetime is in the current time zone; an aware one is in a time zone with its UTC offset (UTC
     for an offset of 0), and an offset with microseconds, which a %Qore time zone cannot have, raises a

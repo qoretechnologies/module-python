@@ -94,6 +94,7 @@ class PythonTest inherits Test {
         addTestCase("conversion of cyclic, shared and unrepresentable Python values", \unrepresentableValueTest());
         addTestCase("Qore number <-> Python int and decimal.Decimal", \numberConversionTest());
         addTestCase("date/time conversion: time zones, relative dates and times of day", \dateConversionTest());
+        addTestCase("conversion of subclasses, named tuples, sets, memoryviews and dict keys", \subclassConversionTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
@@ -2400,6 +2401,100 @@ def us_offset():
         assertEq(t[0], p.callFunction("echo", t[0]));
 
         assertThrows("PYTHON-DATETIME-ERROR", "microseconds", \p.callFunction(), "us_offset");
+    }
+
+    # subclasses of the converted types are converted as their base types (they were wrapped objects): ex: IntEnum,
+    # StrEnum, OrderedDict, defaultdict, Counter; a named tuple is a hash of its fields, a set or frozenset a list, and a
+    # memoryview a binary; dict keys that are not strings are converted with repr(), and a key that gives the same Qore
+    # key as another one raises an exception (one value replaced the other silently)
+    subclassConversionTest() {
+        PythonProgram p("
+import array, collections, datetime, enum
+
+class Color(enum.IntEnum):
+    RED = 1
+
+class Name(str, enum.Enum):
+    ADA = 'Ada'
+
+class MyInt(int):
+    pass
+
+class MyFloat(float):
+    pass
+
+class MyList(list):
+    pass
+
+class MyTuple(tuple):
+    pass
+
+class MyBytes(bytes):
+    pass
+
+class MyDateTime(datetime.datetime):
+    pass
+
+Point = collections.namedtuple('Point', ['x', 'y'])
+
+def values():
+    return {
+        'int_enum': Color.RED,
+        'str_enum': Name.ADA,
+        'int': MyInt(5),
+        'float': MyFloat(1.5),
+        'ordered': collections.OrderedDict([('b', 2), ('a', 1)]),
+        'default': collections.defaultdict(list, {'k': [1]}),
+        'counter': collections.Counter('aab'),
+        'list': MyList([1, 2]),
+        'tuple': MyTuple((1, 2)),
+        'named': Point(1, [2, 3]),
+        'bytes': MyBytes(b'ab'),
+        'memoryview': memoryview(b'cd'),
+        'datetime': MyDateTime(2020, 1, 1, tzinfo=datetime.timezone.utc),
+    }
+
+def sets():
+    return [{3, 1, 2}, frozenset(['a'])]
+
+def objects():
+    return [1j, array.array('b', [1, 2])]
+
+def keys():
+    return {1: 'a', None: 'b', (1, 2): 'c'}
+
+def colliding_keys():
+    return {1: 'int', '1': 'str'}
+", "subclasses.py");
+
+        hash<auto> v = p.callFunction("values");
+        assertEq(1, v.int_enum);
+        assertEq(NT_INT, v.int_enum.typeCode());
+        assertEq("Ada", v.str_enum);
+        assertEq(5, v.int);
+        assertEq(1.5, v.float);
+        assertEq({"b": 2, "a": 1}, v.ordered);
+        assertEq(("b", "a"), keys v.ordered, "the order of an OrderedDict");
+        assertEq({"k": (1,)}, v.default);
+        assertEq({"a": 2, "b": 1}, v.counter);
+        assertEq((1, 2), v.list);
+        assertEq((1, 2), v.tuple);
+        assertEq({"x": 1, "y": (2, 3)}, v.named);
+        assertEq(<6162>, v.bytes);
+        assertEq(<6364>, v.memoryview);
+        assertEq(2020-01-01T00:00:00Z, v.datetime);
+
+        list<auto> sets = p.callFunction("sets");
+        assertEq((1, 2, 3), sort(sets[0]));
+        assertEq(("a",), sets[1]);
+
+        # types without a Qore equivalent stay objects (a buffer other than a memoryview, ex: an array, is not converted
+        # to its bytes)
+        list<auto> objs = p.callFunction("objects");
+        assertEq((NT_OBJECT, NT_OBJECT), (map $1.typeCode(), objs));
+
+        assertEq({"1": "a", "None": "b", "(1, 2)": "c"}, p.callFunction("keys"));
+        assertThrows("PYTHON-VALUE-ERROR", "same Qore hash key", \p.callFunction(), "colliding_keys");
     }
 
     typeConversionTest() {

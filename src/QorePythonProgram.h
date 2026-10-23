@@ -639,6 +639,11 @@ protected:
     DLLLOCAL QoreValue getQoreIntegerFromLong(ExceptionSink* xsink, PyObject* val);
     //! Returns a Qore hash from a Python dict
     DLLLOCAL QoreHashNode* getQoreHashFromDict(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset);
+    //! Returns a Qore hash of the fields of a Python named tuple
+    DLLLOCAL QoreHashNode* getQoreHashFromNamedTuple(ExceptionSink* xsink, PyObject* val, PyObject* fields,
+            pyobj_set_t& rset);
+    //! Returns a Qore list of the elements of a Python iterable (ex: a set)
+    DLLLOCAL QoreListNode* getQoreListFromIterable(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset);
     //! Returns a Qore list from a Python list
     DLLLOCAL QoreListNode* getQoreListFromList(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset);
     //! Returns a Qore list from a Python tuple

@@ -2577,6 +2577,58 @@ QoreListNode* QorePythonProgram::getQoreListFromTuple(ExceptionSink* xsink, PyOb
     return rv.release();
 }
 
+QoreHashNode* QorePythonProgram::getQoreHashFromNamedTuple(ExceptionSink* xsink, PyObject* val, PyObject* fields,
+        pyobj_set_t& rset) {
+    assert(PyTuple_Check(val) && PyTuple_Check(fields) && PyTuple_Size(val) == PyTuple_Size(fields));
+    QorePythonConversionPathHelper path(rset, val);
+    if (path.checkCycle(xsink)) {
+        return nullptr;
+    }
+    ReferenceHolder<QoreHashNode> rv(new QoreHashNode(autoTypeInfo), xsink);
+    for (Py_ssize_t i = 0, e = PyTuple_Size(val); i < e; ++i) {
+        const char* field = PyUnicode_AsUTF8(PyTuple_GET_ITEM(fields, i));
+        if (!field) {
+            qore_python_conversion_error(this, xsink);
+            return nullptr;
+        }
+        ValueHolder qval(getQoreValue(xsink, PyTuple_GET_ITEM(val, i), rset), xsink);
+        if (*xsink) {
+            return nullptr;
+        }
+        rv->setKeyValue(field, qval.release(), xsink);
+    }
+    return rv.release();
+}
+
+QoreListNode* QorePythonProgram::getQoreListFromIterable(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset) {
+    QorePythonConversionPathHelper path(rset, val);
+    if (path.checkCycle(xsink)) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder iter(PyObject_GetIter(val));
+    if (!iter) {
+        qore_python_conversion_error(this, xsink);
+        return nullptr;
+    }
+    ReferenceHolder<QoreListNode> rv(new QoreListNode(autoTypeInfo), xsink);
+    while (true) {
+        QorePythonReferenceHolder item(PyIter_Next(*iter));
+        if (!item) {
+            if (PyErr_Occurred()) {
+                qore_python_conversion_error(this, xsink);
+                return nullptr;
+            }
+            break;
+        }
+        ValueHolder qval(getQoreValue(xsink, *item, rset), xsink);
+        if (*xsink) {
+            return nullptr;
+        }
+        rv->push(qval.release(), xsink);
+    }
+    return rv.release();
+}
+
 QoreHashNode* QorePythonProgram::getQoreHashFromDict(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset) {
     assert(PyDict_Check(val));
     QorePythonConversionPathHelper path(rset, val);
@@ -2600,6 +2652,17 @@ QoreHashNode* QorePythonProgram::getQoreHashFromDict(ExceptionSink* xsink, PyObj
         // ex: a key with lone surrogates, which cannot be encoded in UTF-8
         if (!keystr) {
             qore_python_conversion_error(this, xsink);
+            return nullptr;
+        }
+
+        // a key that is not a string is converted with repr(), which can give the same string as another key (ex: 1
+        // and '1'); one value would replace the other (string keys are unique, so an existing key is a collision)
+        if (rv->existsKey(keystr)) {
+            if (xsink) {
+                xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert a Python dict to a Qore hash: the key "
+                    "'%s' (of type '%s') gives the same Qore hash key as another key of the dict", keystr,
+                    Py_TYPE(key)->tp_name);
+            }
             return nullptr;
         }
 
@@ -2961,6 +3024,77 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
 
     if (type == &PyDict_Type) {
         return getQoreHashFromDict(xsink, val, rset);
+    }
+
+    // subclasses of the types above (ex: IntEnum, StrEnum, OrderedDict, defaultdict) are converted as their base
+    // types; a named tuple is a hash of its fields, so that its fields are accessed in Qore as with the Python object
+    if (PyLong_Check(val)) {
+        return getQoreIntegerFromLong(xsink, val);
+    }
+    if (PyFloat_Check(val)) {
+        double d = PyFloat_AsDouble(val);
+        if (d == -1.0 && PyErr_Occurred()) {
+            qore_python_conversion_error(this, xsink);
+            return QoreValue();
+        }
+        return QoreValue(d);
+    }
+    if (PyUnicode_Check(val)) {
+        Py_ssize_t size;
+        const char* str = PyUnicode_AsUTF8AndSize(val, &size);
+        if (!str) {
+            qore_python_conversion_error(this, xsink);
+            return QoreValue();
+        }
+        return new QoreStringNode(str, size, QCS_UTF8);
+    }
+    if (PyDict_Check(val)) {
+        return getQoreHashFromDict(xsink, val, rset);
+    }
+    if (PyList_Check(val)) {
+        return getQoreListFromList(xsink, val, rset);
+    }
+    if (PyTuple_Check(val)) {
+        QorePythonReferenceHolder fields(PyObject_GetAttrString(val, "_fields"));
+        if (fields && PyTuple_Check(*fields) && PyTuple_Size(*fields) == PyTuple_Size(val)) {
+            return getQoreHashFromNamedTuple(xsink, val, *fields, rset);
+        }
+        PyErr_Clear();
+        return getQoreListFromTuple(xsink, val, rset);
+    }
+    if (PyBytes_Check(val)) {
+        return getQoreBinaryFromBytes(val);
+    }
+    if (PyByteArray_Check(val)) {
+        return getQoreBinaryFromByteArray(val);
+    }
+    if (have_datetime_api) {
+        // datetime.datetime is a subclass of datetime.date
+        if (PyDateTime_Check(val)) {
+            return getQoreDateTimeFromDateTime(xsink, val);
+        }
+        if (PyDate_Check(val)) {
+            return getQoreDateTimeFromDate(val);
+        }
+        if (PyTime_Check(val)) {
+            return getQoreDateTimeFromTime(xsink, val);
+        }
+        if (PyDelta_Check(val)) {
+            return getQoreDateTimeFromDelta(val);
+        }
+    }
+    // set and frozenset: a list in iteration order
+    if (PyAnySet_Check(val)) {
+        return getQoreListFromIterable(xsink, val, rset);
+    }
+    // a memoryview is a binary of its bytes (other objects supporting the buffer protocol, ex: arrays, stay objects)
+    if (PyMemoryView_Check(val)) {
+        QorePythonReferenceHolder bytes(PyBytes_FromObject(val));
+        if (!bytes) {
+            qore_python_conversion_error(this, xsink);
+            return QoreValue();
+        }
+        return getQoreBinaryFromBytes(*bytes);
     }
 
     if (PyFunction_Check(val)) {
