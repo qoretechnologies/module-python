@@ -125,12 +125,13 @@ PyObject* qore_callable_new(PyTypeObject* type, PyObject* args, PyObject* kw) {
 
 void qore_callable_dealloc(PyQoreCallable* self) {
     if (self->callable) {
-        // releasing the callable can run Qore code (destructors), which needs a thread registered with Qore; if the
-        // thread cannot be registered, the callable is not released
+        // releasing the callable can run Qore code (destructors), which needs a thread registered with Qore and runs
+        // without the GIL; if the thread cannot be registered, the callable is not released
         QorePythonQoreEntryHelper qeh;
         if (qeh.ok()) {
             ExceptionSink xsink;
-            self->callable->deref(&xsink);
+            ValueHolder callable(self->callable, &xsink);
+            qore_python_release(callable);
         }
         self->callable = nullptr;
     }
@@ -174,12 +175,16 @@ PyObject* qore_callable_call(PyQoreCallable* self, PyObject* args, PyObject* kwa
 
                     rv = self->callable->execValue(*qargs, &xsink);
                 }
+                QorePythonReferenceHolder py_rv;
                 if (!xsink) {
-                    QorePythonReferenceHolder py_rv(qore_python_pgm->getPythonValue(*rv, &xsink));
-                    if (!xsink) {
-                        assert(py_rv);
-                        return py_rv.release();
-                    }
+                    py_rv = qore_python_pgm->getPythonValue(*rv, &xsink);
+                }
+                // the arguments and the result of the call are released without the GIL if this can run Qore code
+                qore_python_release(rv);
+                qore_python_release(qargs);
+                if (!xsink) {
+                    assert(py_rv);
+                    return py_rv.release();
                 }
             }
         }

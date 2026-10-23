@@ -55,6 +55,31 @@ class PythonLifecycleTracked {
     }
 }
 
+#! its destructor waits for a lock; used to check that Qore code released by Python runs without the GIL
+class PythonGilTestLocker {
+    private {
+        Mutex m;
+        Queue in_destructor;
+        Queue result;
+    }
+
+    constructor(Mutex m, Queue in_destructor, Queue result) {
+        self.m = m;
+        self.in_destructor = in_destructor;
+        self.result = result;
+    }
+
+    destructor() {
+        in_destructor.push(True);
+        # the thread that holds the lock calls Python before releasing it, which needs the GIL
+        int rc = m.lock(10s);
+        if (!rc) {
+            m.unlock();
+        }
+        result.push(rc);
+    }
+}
+
 class PythonTest inherits Test {
     public {
         const ExprTests = (
@@ -119,6 +144,7 @@ class PythonTest inherits Test {
             \subclassConversionTest());
         addTestCase("special Qore method names and the builtins namespace", \specialNameTest());
         addTestCase("lifetime of Qore objects used from Python", \qoreObjectLifetimeTest());
+        addTestCase("Qore code released by Python runs without the GIL", \gilReleaseTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
@@ -2747,6 +2773,48 @@ def make_sub():
             locked.get();
             p.callFunction("make_and_drop");
         }
+    }
+
+    # releasing the last reference to a Qore value from Python (here a closure, whose captured object has a
+    # destructor) runs Qore code, which now runs without the GIL: the destructor waits for a lock held by a thread
+    # that calls Python meanwhile; previously the destructor ran with the GIL held, and both threads waited forever
+    gilReleaseTest() {
+        if (Python::FreeThreading) {
+            testSkip("there is no GIL with free-threading (PEP 703)");
+        }
+        PythonProgram p("
+kept = []
+
+def keep(c):
+    kept.append(c)
+
+def drop():
+    kept.clear()
+
+def noop():
+    return 1
+", "gil-release.py");
+
+        Mutex m();
+        Queue locked();
+        Queue in_destructor();
+        Queue result();
+        {
+            PythonGilTestLocker o(m, in_destructor, result);
+            code c = auto sub () { return o; };
+            p.callFunction("keep", c);
+        }
+        # Python holds the last reference to the closure, which holds the last reference to the object
+        background sub () {
+            m.lock();
+            on_exit m.unlock();
+            locked.push(True);
+            in_destructor.get();
+            p.callFunction("noop");
+        }();
+        locked.get();
+        p.callFunction("drop");
+        assertEq(0, result.get(), "the destructor got the lock");
     }
 
     typeConversionTest() {

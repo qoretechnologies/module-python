@@ -4693,12 +4693,16 @@ PyObject* QorePythonProgram::callQoreFunction(PyObject* self, PyObject* args) {
             QorePythonForkProtocolHelper fph(fork_tstate);
             rv = fc->func.evalFunction(nullptr, *qargs, fc->py_pgm->getQoreProgram(), &xsink);
         }
+        QorePythonReferenceHolder py_rv;
         if (!xsink) {
-            QorePythonReferenceHolder py_rv(fc->py_pgm->getPythonValue(*rv, &xsink));
-            if (!xsink) {
-                assert(py_rv);
-                return py_rv.release();
-            }
+            py_rv = fc->py_pgm->getPythonValue(*rv, &xsink);
+        }
+        // the arguments and the result of the call are released without the GIL if this can run Qore code
+        qore_python_release(rv);
+        qore_python_release(qargs);
+        if (!xsink) {
+            assert(py_rv);
+            return py_rv.release();
         }
     }
 

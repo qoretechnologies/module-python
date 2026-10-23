@@ -752,6 +752,20 @@ protected:
     PyGILState_STATE old_state;
 };
 
+//! returns true if releasing a reference to the value can run Qore code (a destructor)
+/** This is the case for an object, a closure or a call reference (whose captured values can be objects) whose last
+    reference this is, or a list or hash whose last reference this is that contains such a value; strings, numbers,
+    dates and binaries, and values that have other references, are released without running Qore code.
+*/
+DLLLOCAL bool qore_python_release_runs_qore_code(const QoreValue& v);
+
+//! releases the value held while the GIL is held: without the GIL if this can run Qore code, which runs without the
+//! GIL so that it cannot deadlock with a thread that holds a Qore lock and waits for the GIL
+DLLLOCAL void qore_python_release(ValueHolder& v);
+
+//! releases the list held while the GIL is held: without the GIL if this can run Qore code
+DLLLOCAL void qore_python_release(ReferenceHolder<QoreListNode>& l);
+
 // Base type for Qore objects in Python
 DLLLOCAL extern PyTypeObject PythonQoreObjectBase_Type;
 

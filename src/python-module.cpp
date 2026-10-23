@@ -1651,3 +1651,60 @@ void QorePythonGilHelper::set(PyThreadState* other_state) {
     _qore_PyGILState_SetThisThreadState(other_state);
 #endif
 }
+
+bool qore_python_release_runs_qore_code(const QoreValue& v) {
+    if (!v.hasNode()) {
+        return false;
+    }
+    const AbstractQoreNode* n = v.getInternalNode();
+    // releasing a reference that is not the last one only decrements the reference count
+    if (n->reference_count() != 1) {
+        return false;
+    }
+    switch (n->getType()) {
+        case NT_STRING:
+        case NT_NUMBER:
+        case NT_DATE:
+        case NT_BINARY:
+        case NT_NULL:
+            return false;
+
+        case NT_LIST: {
+            ConstListIterator i(static_cast<const QoreListNode*>(n));
+            while (i.next()) {
+                if (qore_python_release_runs_qore_code(i.getValue())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        case NT_HASH: {
+            ConstHashIterator i(static_cast<const QoreHashNode*>(n));
+            while (i.next()) {
+                if (qore_python_release_runs_qore_code(i.get())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        default:
+            // objects, closures, call references and any other value
+            return true;
+    }
+}
+
+void qore_python_release(ValueHolder& v) {
+    if (qore_python_release_runs_qore_code(*v)) {
+        QorePythonReleaseGilHelper prgh;
+        v = QoreValue();
+    }
+}
+
+void qore_python_release(ReferenceHolder<QoreListNode>& l) {
+    if (l && qore_python_release_runs_qore_code(*l)) {
+        QorePythonReleaseGilHelper prgh;
+        l = nullptr;
+    }
+}

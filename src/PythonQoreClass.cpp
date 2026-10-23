@@ -550,12 +550,16 @@ PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* 
 
                         rv = obj->evalMethod(*m, *qargs, &xsink);
                     }
+                    QorePythonReferenceHolder py_rv;
                     if (!xsink) {
-                        QorePythonReferenceHolder py_rv(qore_python_pgm->getPythonValue(*rv, &xsink));
-                        if (!xsink) {
-                            assert(py_rv);
-                            return py_rv.release();
-                        }
+                        py_rv = qore_python_pgm->getPythonValue(*rv, &xsink);
+                    }
+                    // the arguments and the result of the call are released without the GIL if this can run Qore code
+                    qore_python_release(rv);
+                    qore_python_release(qargs);
+                    if (!xsink) {
+                        assert(py_rv);
+                        return py_rv.release();
                     }
                 }
             }
@@ -630,12 +634,16 @@ PyObject* PythonQoreClass::exec_qore_static_method(const QoreMethod& m, PyObject
 
                         rv = QoreObject::evalStaticMethod(m, m.getClass(), *qargs, &xsink);
                     }
+                    QorePythonReferenceHolder py_rv;
                     if (!xsink) {
-                        QorePythonReferenceHolder py_rv(qore_python_pgm->getPythonValue(*rv, &xsink));
-                        if (!xsink) {
-                            assert(py_rv);
-                            return py_rv.release();
-                        }
+                        py_rv = qore_python_pgm->getPythonValue(*rv, &xsink);
+                    }
+                    // the arguments and the result of the call are released without the GIL if this can run Qore code
+                    qore_python_release(rv);
+                    qore_python_release(qargs);
+                    if (!xsink) {
+                        assert(py_rv);
+                        return py_rv.release();
                     }
                 }
             }
@@ -729,6 +737,8 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
                             self, qcls->getName(), *qargs, qargs ? (int)qargs->size() : 0, *qobj, qobj->getClassName());
                         created_obj = qobj.release();
                     }
+                    // the arguments are released without the GIL, as this can run Qore code
+                    qargs = nullptr;
                 }
                 // GIL is now held again, safe to call newQoreObject which calls Py_INCREF
                 if (created_obj) {
@@ -809,11 +819,14 @@ PyObject* PythonQoreClass::py_getattro(PyObject* self, PyObject* attr) {
             v = obj->evalMember(member, &xsink);
         }
         printd(5, "PythonQoreClass::py_getattro() obj %p %s.%s = %s\n", obj, qcls->getName(), member, v->getFullTypeName());
+        QorePythonReferenceHolder rv;
         if (!xsink) {
-            QorePythonReferenceHolder rv(qore_python_pgm->getPythonValue(*v, &xsink));
-            if (!xsink) {
-                return rv.release();
-            }
+            rv = qore_python_pgm->getPythonValue(*v, &xsink);
+        }
+        // the value is released without the GIL if this can run Qore code
+        qore_python_release(v);
+        if (!xsink) {
+            return rv.release();
         }
     }
     qore_python_pgm->raisePythonException(xsink);

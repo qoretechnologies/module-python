@@ -154,6 +154,15 @@ Python's cycle collector only while the Python object holds the only reference t
 (`reference_count() == 1`), so the collector releases both when nothing else references them, and Qore code that
 references the Qore object keeps the Python object alive.  Test: `qoreObjectLifetimeTest()`.
 
+Qore code must not run with the GIL held: a Qore thread holding a Qore lock and waiting for the GIL would deadlock with
+it, and Qore's deadlock detection cannot see the GIL.  Besides calls from Python to Qore, which release the GIL, Qore
+code runs when Python releases Qore values (destructors): `qore_python_release()` (`python-module.cpp`) releases the
+arguments and results of calls from Python to Qore, member values read from Python and the callable of a
+`PyQoreCallable` without the GIL when `qore_python_release_runs_qore_code()` finds that the release can run Qore code
+(an object, closure or call reference whose last reference it is, possibly in a list or hash whose last reference it
+is); other values are released with the GIL, which avoids releasing and acquiring the GIL in every call.
+`PythonQoreClass::releaseQoreObject()` and the save object callback always release the GIL.  Test: `gilReleaseTest()`.
+
 ## Sub-Interpreter Management
 
 ### Creation Flow
