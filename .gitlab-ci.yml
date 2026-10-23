@@ -1,19 +1,62 @@
 stages:
   - test
+  - report
+
+# GitHub statuses: each job reports its own result in the "${REPO_NAME}/<job>" context, and the result of the pipeline
+# is reported once in the "${REPO_NAME}" context, which the branch protection of the GitHub repository requires: it is
+# set to pending before the jobs run (.pre stage) and to success or failure when all of them have ended (report
+# stage), so that the job that ends last cannot overwrite the result of another; when a failed job is retried and
+# passes, the on_success job of the report stage runs and sets it to success
+.github-status:
+  script:
+    - |
+        # usage: github_status <state> <context> <target URL>
+        github_status() {
+            curl -sS --fail-with-body --retry 3 \
+                "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
+                -X POST --oauth2-bearer "${GITHUB_ACCESS_TOKEN}" -H "Content-Type: application/json" \
+                -d "{\"state\": \"$1\", \"context\": \"$2\", \"description\": \"Gitlab CI\", \"target_url\": \"$3\"}"
+        }
 
 default:
   tags:
     - k8s
     - amd64
   before_script:
-    - |
-        curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
-        -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
-        -d "{\"state\": \"pending\", \"context\": \"${REPO_NAME}\", \"description\": \"Gitlab CI\", \"target_url\": \"${CI_JOB_URL}\"}"
+    - !reference [.github-status, script]
+    # the job runs and reports its result even if the pending state cannot be set
+    - github_status pending "${REPO_NAME}/${CI_JOB_NAME}" "${CI_JOB_URL}" || echo "cannot set the GitHub status" >&2
     - set +e
 
 variables:
   REPO_NAME: module-python
+
+.github-pipeline-status:
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
+  before_script:
+    - !reference [.github-status, script]
+
+github-status-pending:
+  extends: .github-pipeline-status
+  stage: .pre
+  # the jobs run and report their own results even if the pending state cannot be set
+  allow_failure: true
+  script:
+    - github_status pending "${REPO_NAME}" "${CI_PIPELINE_URL}"
+
+github-status-success:
+  extends: .github-pipeline-status
+  stage: report
+  when: on_success
+  script:
+    - github_status success "${REPO_NAME}" "${CI_PIPELINE_URL}"
+
+github-status-failure:
+  extends: .github-pipeline-status
+  stage: report
+  when: on_failure
+  script:
+    - github_status failure "${REPO_NAME}" "${CI_PIPELINE_URL}"
 
 .test-ubuntu:
   stage: test
@@ -21,14 +64,10 @@ variables:
   script:
     - |
         if test/docker_test/test-ubuntu.sh; then
-          curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
-            -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
-            -d "{\"state\": \"success\", \"context\": \"${REPO_NAME}\", \"description\": \"Gitlab CI\", \"target_url\": \"${CI_JOB_URL}\"}"
+          github_status success "${REPO_NAME}/${CI_JOB_NAME}" "${CI_JOB_URL}"
           exit 0
         else
-          curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
-            -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
-            -d "{\"state\": \"failure\", \"context\": \"${REPO_NAME}\", \"description\": \"Gitlab CI\", \"target_url\": \"${CI_JOB_URL}\"}"
+          github_status failure "${REPO_NAME}/${CI_JOB_NAME}" "${CI_JOB_URL}"
           exit 1
         fi
 
@@ -36,7 +75,14 @@ test-ubuntu:
   extends: .test-ubuntu
 
 # Python versions that the images do not provide: test/docker_test/test-ubuntu.sh builds CPython from the python.org
-# source release (version and SHA-256 of Python-<version>.tar.xz) before building and testing the module
+# source release (version and SHA-256 of Python-<version>.tar.xz) before building and testing the module; 3.11 is the
+# minimum supported version
+test-ubuntu-python3.11:
+  extends: .test-ubuntu
+  variables:
+    PYTHON_SRC_VERSION: "3.11.17"
+    PYTHON_SRC_SHA256: "bfb74ad39efae27cda510f134ab408e00f9992c56851cfc0b1cdb5646da11599"
+
 test-ubuntu-python3.15:
   extends: .test-ubuntu
   variables:
@@ -62,13 +108,9 @@ test-alpine:
   script:
     - |
         if test/docker_test/test-alpine.sh; then
-          curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
-            -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
-            -d "{\"state\": \"success\", \"context\": \"${REPO_NAME}\", \"description\": \"Gitlab CI\", \"target_url\": \"${CI_JOB_URL}\"}"
+          github_status success "${REPO_NAME}/${CI_JOB_NAME}" "${CI_JOB_URL}"
           exit 0
         else
-          curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
-            -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
-            -d "{\"state\": \"failure\", \"context\": \"${REPO_NAME}\", \"description\": \"Gitlab CI\", \"target_url\": \"${CI_JOB_URL}\"}"
+          github_status failure "${REPO_NAME}/${CI_JOB_NAME}" "${CI_JOB_URL}"
           exit 1
         fi
