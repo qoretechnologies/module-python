@@ -171,11 +171,13 @@ def start(ready, release, result):
             # Python 3.14 makes the thread exit when it takes the GIL again
             return;
         }
-        # the thread continues in the interpreter that was left
+        # the thread continues in the interpreter that was left; the result FIFO is opened while the thread, waiting
+        # to be released, holds it open: once released, the thread writes its result, closes the FIFO and ends, and an
+        # open() of a FIFO that no process holds open for writing would wait forever, with the result discarded
+        ReadOnlyFile result_file(result);
         File release_file();
         release_file.open2(release, O_WRONLY);
         release_file.write(<78>);
-        ReadOnlyFile result_file(result);
         string msg;
         while (msg.size() < "RuntimeError".size() && (*binary data = result_file.readBinary(64))) {
             msg += data.toString();
