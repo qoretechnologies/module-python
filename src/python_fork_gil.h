@@ -36,11 +36,6 @@ extern "C" {
 */
 int qore_python_fork_child_gil_lost(void);
 
-/* Clears the thread state bound to the calling thread for the GIL state API (PyGILState_GetThisThreadState()), as
-   CPython does when it unbinds a state; it does not change the state itself (its bound_gilstate flag).
-*/
-void qore_python_gilstate_tss_clear(void);
-
 #ifdef DEBUG
 /* Test hooks (debug builds only): a thread of the module holds the mutex of the GIL, as a thread waiting for the GIL
    does from time to time, until qore_python_test_release_gil_mutex() is called.  Returns 0 once the mutex is held,

@@ -36,7 +36,6 @@
 #include "QoreMetaPathFinder.h"
 
 #include "PythonCallableCallReferenceNode.h"
-#include "python_fork_gil.h"
 #include "PythonQoreCallable.h"
 #include "ModuleNamespace.h"
 #include "QorePythonStackLocationHelper.h"
@@ -954,6 +953,11 @@ void QorePythonProgram::pythonThreadCleanup(void*) {
     }
     //printd(5, "QorePythonProgram::pythonThreadCleanup() done\n");
     py_thr_lck.unlock();
+
+#ifndef Py_GIL_DISABLED
+    // the idle state is deleted with the GIL, which is not taken while py_thr_lck is held
+    qore_python_delete_idle_thread_state();
+#endif
 }
 
 bool QorePythonProgram::haveGil() {
@@ -1362,13 +1366,9 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
                 interp = PyInterpreterState_Next(interp);
             }
             if (!tss_interp_valid || tss_tstate->interp == nullptr) {
-                // TSS points to a thread state with a deleted/invalid interpreter, which can be freed: the binding
-                // is cleared without touching the state (its flag)
-#ifdef QORE_PYTHON_HAVE_INTERNAL_C_HEADERS
-                qore_python_gilstate_tss_clear();
-#else
-                qore_py_set_bound_gilstate(tss_tstate, 0);
-#endif
+                // TSS points to a thread state with a deleted/invalid interpreter, which can be freed: it is not
+                // touched (its flag).  A thread that does not hold the GIL has its idle state in the main interpreter
+                // bound (see qore_python_release_context()), so this is not expected.
                 // CRITICAL: Also clear TSS. PyThreadState_New() only sets TSS if it's currently NULL.
                 // If we don't clear TSS, PyThreadState_New() won't update it, and when we activate
                 // our new thread state, TSS won't match.

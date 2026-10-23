@@ -53,37 +53,58 @@ message(STATUS "Found Python3 includes: ${Python3_INCLUDE_DIRS}")
 # Python 3.13+ requires internal includes for proper thread state management
 # Python 3.12 and earlier use bundled internals
 include(CheckCXXSourceCompiles)
+include(CheckCSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES ${Python3_INCLUDE_DIRS})
 # Use bundled internal definitions for all Python versions
 # Our src/python*_internals.h files provide the necessary thread state management
 message(STATUS "Python ${Python3_VERSION} - using bundled internals")
 
 # The state of the GIL in the child of fork() is read by a C file compiled with CPython's internal headers (C headers,
-# installed with the Python headers); without them, a child created while another thread held the GIL waits forever
-# on its first use of Python instead of raising PYTHON-FORK-ERROR
-include(CheckCSourceCompiles)
-check_c_source_compiles("
-#define Py_BUILD_CORE 1
-#include <Python.h>
-#if PY_VERSION_HEX >= 0x030C0000
-#include \"internal/pycore_interp.h\"
-#else
-#include \"internal/pycore_runtime.h\"
-#endif
-int main(void) {
-#if defined(Py_GIL_DISABLED)
-    return 0;
-#elif PY_VERSION_HEX >= 0x030C0000
-    return sizeof(((PyInterpreterState*)0)->ceval.gil->switch_mutex) ? 0 : 1;
-#else
-    return sizeof(((struct _ceval_runtime_state*)0)->gil.switch_mutex) ? 0 : 1;
-#endif
-}" QORE_PYTHON_HAVE_INTERNAL_C_HEADERS)
+# installed with the Python headers), which give the layout of the GIL of the Python library.  The file itself is
+# compiled here, with and without the test hooks of debug builds, so that a Python version without the headers, or
+# whose internal structures changed, is built without it instead of failing: a child created while another thread
+# held the GIL then waits forever on its first use of Python instead of raising PYTHON-FORK-ERROR
+set(_qore_python_fork_gil_check_dir ${CMAKE_CURRENT_BINARY_DIR}/fork_gil_check)
+set(_qore_python_fork_gil_try_type ${CMAKE_TRY_COMPILE_TARGET_TYPE})
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+try_compile(QORE_PYTHON_HAVE_INTERNAL_C_HEADERS ${_qore_python_fork_gil_check_dir}/release
+    SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/python_fork_gil.c
+    CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${Python3_INCLUDE_DIRS};${CMAKE_CURRENT_SOURCE_DIR}/src"
+    OUTPUT_VARIABLE _qore_python_fork_gil_output)
+if (QORE_PYTHON_HAVE_INTERNAL_C_HEADERS)
+    try_compile(QORE_PYTHON_HAVE_INTERNAL_C_HEADERS ${_qore_python_fork_gil_check_dir}/debug
+        SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/python_fork_gil.c
+        CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${Python3_INCLUDE_DIRS};${CMAKE_CURRENT_SOURCE_DIR}/src"
+        COMPILE_DEFINITIONS -DDEBUG
+        OUTPUT_VARIABLE _qore_python_fork_gil_output)
+endif()
+set(CMAKE_TRY_COMPILE_TARGET_TYPE ${_qore_python_fork_gil_try_type})
 if (QORE_PYTHON_HAVE_INTERNAL_C_HEADERS)
     message(STATUS "Python internal headers found: a fork() child that cannot use Python raises PYTHON-FORK-ERROR")
 else()
-    message(WARNING "Python internal headers (internal/pycore_*.h) not found: a child process created with fork() "
+    message(WARNING "src/python_fork_gil.c does not compile with the internal headers (internal/pycore_*.h) of "
+        "Python ${Python3_VERSION} (missing, or with other internal structures): a child process created with fork() "
         "while another thread held the GIL waits forever on its first use of Python")
+endif()
+
+# Python 3.12 and later keep in each thread state whether it is bound to its thread for the GIL state API
+# (PyThreadState::_status.bound_gilstate, a CPython-specific member); the module clears it before it deletes a state
+# of another thread, so that CPython does not clear the binding of the deleting thread instead
+if (${Python3_VERSION_MINOR} GREATER_EQUAL 12)
+    set(CMAKE_REQUIRED_INCLUDES ${Python3_INCLUDE_DIRS})
+    check_c_source_compiles("
+#include <Python.h>
+int main(void) {
+    PyThreadState tstate;
+    tstate._status.bound_gilstate = 0;
+    return tstate._status.bound_gilstate;
+}" QORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE)
+    if (QORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE)
+        add_definitions(-DQORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE=1)
+    else()
+        message(WARNING "Python ${Python3_VERSION} has no PyThreadState::_status.bound_gilstate member: the binding of "
+            "a thread to its GIL state can be cleared by another thread when it deletes the thread's state")
+    endif()
 endif()
 
 # Check for C++17 (required for Python 3.13+ and inline thread_local).
@@ -118,8 +139,6 @@ set(CPP_SRC
 if (QORE_PYTHON_HAVE_INTERNAL_C_HEADERS)
     set(CPP_SRC ${CPP_SRC} src/python_fork_gil.c)
     add_definitions(-DQORE_PYTHON_HAVE_FORK_GIL_CHECK=1)
-    # the internal state of CPython (src/python_fork_gil.c) is also used to unbind thread states from threads
-    add_definitions(-DQORE_PYTHON_HAVE_INTERNAL_C_HEADERS=1)
 endif()
 
 qore_wrap_qpp_value(QPP_SOURCES METALIST QPP_META_SRC ${QPP_SRC})

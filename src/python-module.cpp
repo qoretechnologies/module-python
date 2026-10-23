@@ -1382,33 +1382,73 @@ static bool _qore_has_gil(PyThreadState* state0, PyThreadState* state1) {
 }
 #endif
 
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030C0000
+namespace {
+// the idle thread state of this thread: a state of this thread in the main interpreter, which only this thread uses,
+// attached before the thread releases the GIL (see qore_python_release_context()); created on first use, and deleted
+// when the thread ends (see qore_python_delete_idle_thread_state())
+thread_local PyThreadState* python_idle_tstate = nullptr;
+}
+#endif
+
 #ifndef Py_GIL_DISABLED
 void qore_python_release_context() {
 #if PY_VERSION_HEX >= 0x030C0000
-#ifdef QORE_PYTHON_HAVE_INTERNAL_C_HEADERS
-    // Detaching does not clear CPython's binding of the state to the thread for the GIL state API (its auto-TSS),
-    // and the interpreter of the state can then be destroyed by another thread, which cannot clear this thread's
-    // binding: the state is unbound here, with the GIL held, as CPython unbinds a state, so that a thread that does
-    // not hold the GIL keeps no binding to a state that it is not using; attaching a state binds it again.
-    // Previously the main thread state was bound instead, in every thread that released the GIL here: threads share
-    // that state, and its bound_gilstate flag was then cleared by threads that did not hold the GIL.
+    // Detaching does not clear CPython's binding of the state to the thread for the GIL state API (its auto-TSS):
+    // a state of another interpreter left bound to a thread that does not hold the GIL dangles when another thread
+    // destroys the interpreter, which cannot clear this thread's binding, and a state that other threads use (the
+    // main thread state) must not be bound to the thread either, since its bound_gilstate flag is then changed by
+    // other threads.  The idle state of the thread, in the main interpreter, which ends only when Python is
+    // finalized, is attached instead before the GIL is released: CPython moves the binding to it, with the GIL held.
+    // This uses no internal CPython API, whose binding moved in Python 3.15 from _PyRuntime.autoTSSkey to a hidden
+    // thread-local variable.  Previously the shared main thread state was bound to every thread that released the
+    // GIL here, and its flag was cleared by threads that did not hold the GIL.
     PyThreadState* tstate = PyThreadState_Get();
-    if (PyGILState_GetThisThreadState() == tstate) {
-        qore_py_set_bound_gilstate(tstate, 0);
-        qore_python_gilstate_tss_clear();
+    if (tstate == mainThreadState || qore_python_get_interpreter(tstate) != PyInterpreterState_Main()) {
+        if (!python_idle_tstate) {
+            python_idle_tstate = PyThreadState_New(PyInterpreterState_Main());
+        }
+        // without memory for it, the state stays bound to the thread
+        if (python_idle_tstate) {
+            PyThreadState_Swap(python_idle_tstate);
+        }
     }
-#else
-    // without CPython's internal headers, the binding cannot be cleared: the main state is bound instead, so that no
-    // detached thread keeps a binding to a state of an interpreter that another thread can destroy
-    if (PyGILState_GetThisThreadState() != mainThreadState) {
-        qore_py_set_bound_gilstate(mainThreadState, 0);
-    }
-    PyThreadState_Swap(mainThreadState);
-#endif
 #endif
     PyEval_SaveThread();
     _qore_PyGILState_SetThisThreadState(nullptr);
     _qore_gil_held = false;
+}
+
+void qore_python_delete_idle_thread_state() {
+#if PY_VERSION_HEX >= 0x030C0000
+    PyThreadState* tstate = python_idle_tstate;
+    if (!tstate) {
+        return;
+    }
+    python_idle_tstate = nullptr;
+    // after Python is finalized, or in a child of fork() that cannot use Python, the state is left as it is
+    if (python_shutdown || python_fork_lost || !Py_IsInitialized()) {
+        return;
+    }
+#if PY_VERSION_HEX >= 0x030D0000
+    PyThreadState* current = PyThreadState_GetUnchecked();
+#else
+    PyThreadState* current = _PyThreadState_UncheckedGet();
+#endif
+    if (current) {
+        // the thread holds the GIL with another state: a thread created by Python is deregistered from Qore while
+        // its own state is cleared when it ends; the idle state, which has not run code, is deleted while that state
+        // stays attached (deleting it unbinds it from the thread if it is bound)
+        assert(current != tstate);
+        PyThreadState_Clear(tstate);
+        PyThreadState_Delete(tstate);
+        return;
+    }
+    PyEval_RestoreThread(tstate);
+    PyThreadState_Clear(tstate);
+    // unbinds the state from the thread and releases the GIL
+    PyThreadState_DeleteCurrent();
+#endif
 }
 #endif
 

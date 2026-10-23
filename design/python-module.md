@@ -110,13 +110,13 @@ When an interpreter is deleted:
 
 ### The Solution (Python 3.13+)
 
-Since the module unbinds the states it releases (see "Ownership during interpreter finalization"), a thread's TSS
-does not point to a state of another interpreter while the thread does not hold the GIL.  As a safeguard, before
-creating a new thread state, `setContext()` checks if TSS points to a stale one:
+Since the module binds the idle state of the thread to it when it releases the GIL (see "Ownership during interpreter
+finalization"), a thread's TSS does not point to a state of another interpreter while the thread does not hold the
+GIL.  As a safeguard, before creating a new thread state, `setContext()` checks if TSS points to a stale one:
 1. Get TSS thread state via `PyGILState_GetThisThreadState()`
 2. Check if its interpreter still exists (iterate `PyInterpreterState_Head()` list)
-3. If interpreter is invalid, the thread state is stale (and can be freed) - clear the thread's binding
-   (`qore_python_gilstate_tss_clear()`) without touching the state
+3. If interpreter is invalid, the thread state is stale (and can be freed): it is not touched, and the thread's
+   tracking is reset
 4. This allows `PyThreadState_New()` to properly bind the new thread state
 
 ### Python 3.12 Differences
@@ -168,22 +168,27 @@ a state whose thread is not a non-daemon `threading.Thread` (a daemon thread, a 
 code instead of being ended.  A call to Qore from such a thread afterwards raises `RuntimeError` (the program is no
 longer valid); the interpreter's memory is never released.
 
-When the module releases the GIL (`qore_python_release_context()`, Python 3.12 and later), it unbinds the state it
-releases from the thread's auto-TSS (`PyGILState_GetThisThreadState()`), with the GIL held, as CPython unbinds a
-state: it clears the state's `_status.bound_gilstate` flag and the thread's binding (`qore_python_gilstate_tss_clear()`
-in src/python_fork_gil.c, compiled with CPython's internal headers).  A thread that does not hold the GIL therefore
-keeps no binding to a state that it is not using, so a different thread can destroy a subinterpreter without leaving
-a dangling auto-TSS pointer in it, and attaching a state binds it again (CPython clears the flag of a state bound
-before, with the GIL held).  The binding is also cleared when the module releases the GIL after initializing Python.
+When the module releases the GIL (`qore_python_release_context()`, Python 3.12 and later) with a state of another
+interpreter, or with the main thread state, it first attaches the thread's own idle state (`python_idle_tstate`, a
+state in the main interpreter that only the thread uses, created on first use), so that CPython moves the thread's
+auto-TSS binding (`PyGILState_GetThisThreadState()`) to it, with the GIL held.  A thread that does not hold the GIL
+therefore keeps no binding to a state of an interpreter that another thread can destroy (which cannot clear the
+thread's binding), nor to a state that other threads use, and attaching a state binds it again (CPython clears the
+flag of the state bound before, with the GIL held).  The main interpreter ends only when Python is finalized.  The
+idle state is deleted when the thread ends (`qore_python_delete_idle_thread_state()`, from the module's thread
+cleanup, which also runs when a thread created by Python is deregistered from Qore while Python clears its own
+state: the idle state is then deleted while that state stays attached).  Only public CPython API is used: Python 3.12
+to 3.14 keep the binding in `_PyRuntime.autoTSSkey`, which Python 3.15 replaced with a hidden thread-local variable
+(`_Py_tss_gilstate` in Python/pystate.c), which no header declares and libpython does not export.
 
 **Invariant:** the `bound_gilstate` flag of a state that other threads use (the main thread state, which the
 `QorePythonGilHelper` of interpreter creation and destruction uses on any thread, and the states of other
 interpreters) is only changed with the GIL held.  Previously the main thread state was bound to every thread that
 released the GIL instead, and `setContext()` and `QorePythonGilHelper` cleared the flags of the states bound to the
 thread before acquiring the GIL, so the flag of the main thread state was written by threads that did not hold the
-GIL (a data race reported by ThreadSanitizer).  Without the internal headers, the main thread state is still bound
-instead.  Free-threaded context helpers instead save and restore the actual attached state, including a detached
-(`nullptr`) state.
+GIL (a data race reported by ThreadSanitizer).  The module reads and writes the flag (a CPython-specific member of
+`PyThreadState`) only if CMake finds it (`QORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE`).  Free-threaded context helpers
+instead save and restore the actual attached state, including a detached (`nullptr`) state.
 
 Qore objects and call references can outlive a Python interpreter. Their persistent
 Python references register with the owning `QorePythonProgram`, retaining a weak
@@ -345,7 +350,10 @@ The GIL interplay, measured on Linux with Python 3.14 (GIL build):
   `_test_release_gil_mutex()` hold the mutex in a thread for the test of this case.
   That file is C, compiled with CPython's internal headers (C headers, installed with the Python headers), which
   give the layout of the GIL of every version (the main interpreter's `ceval.gil` in 3.12+, `_PyRuntime.ceval.gil`
-  before); CMake compiles it only if the headers are found (`QORE_PYTHON_HAVE_FORK_GIL_CHECK`).  If the GIL is lost,
+  before); CMake compiles it only if it compiles with the headers of the Python library, with and without the test
+  hooks of debug builds (`try_compile()` of the file itself, `QORE_PYTHON_HAVE_FORK_GIL_CHECK`), so that a Python
+  version without the headers, or whose internal structures changed, is built without it and a warning.  If the GIL
+  is lost,
   the handler sets `python_fork_lost` and `python_shutdown`: the module then uses Python in no way, as after Python
   has been shut down, so nothing waits for the GIL:
   - `QorePythonHelper` (every call into Python with an `ExceptionSink`) and `createInterpreter()` raise

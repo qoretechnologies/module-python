@@ -303,7 +303,9 @@ inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_lim
 
 #endif // PY_VERSION_HEX >= 0x030D0000
 
-#if PY_VERSION_HEX >= 0x030C0000
+// whether the state is bound to its thread for the GIL state API (Python 3.12 and later; checked by CMake, see
+// QORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE)
+#ifdef QORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE
 DLLLOCAL static inline int qore_py_get_bound_gilstate(PyThreadState* tstate) {
     return tstate->_status.bound_gilstate;
 }
@@ -357,8 +359,12 @@ inline PyInterpreterState* _PyGILState_GetInterpreterStateUnsafe() {
     This way we don't need to use the deprecated GIL acquire and release APIs
 */
 #ifndef Py_GIL_DISABLED
-//! Detach after restoring the long-lived main-interpreter auto-TSS binding.
+//! Releases the GIL; the thread's own idle state in the main interpreter is bound to the thread meanwhile
 DLLLOCAL void qore_python_release_context();
+
+//! deletes the idle thread state of the thread (see qore_python_release_context()); called when the thread ends,
+//! without the GIL
+DLLLOCAL void qore_python_delete_idle_thread_state();
 #endif
 
 class QorePythonGilHelper {
