@@ -626,6 +626,10 @@ protected:
     DLLLOCAL QoreValue getQoreValue(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset);
     //! Returns a Qore value for the given Python value
     DLLLOCAL QoreValue getQoreValue(ExceptionSink* xsink, QorePythonReferenceHolder& val, pyobj_set_t& rset);
+    //! Returns a Python int (integral values) or decimal.Decimal for the given Qore number
+    DLLLOCAL PyObject* getPythonNumber(ExceptionSink* xsink, const QoreNumberNode* n);
+    //! Returns a Qore number for the given decimal.Decimal
+    DLLLOCAL QoreNumberNode* getQoreNumberFromDecimal(ExceptionSink* xsink, PyObject* val);
     //! Returns a Qore integer, or a number outside the int64 range, for the given Python int
     DLLLOCAL QoreValue getQoreIntegerFromLong(ExceptionSink* xsink, PyObject* val);
     //! Returns a Qore hash from a Python dict

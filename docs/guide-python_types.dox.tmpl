@@ -11,16 +11,24 @@
     |\c bool|\c bool
     |\c date|\c datetime.datetime (absolute date/time values) or \c datetime.delta (relative date/time values)
     |\c float|\c float
+    |\c number|\c int (an exact integral value outside the 64-bit signed integer range) or \c decimal.Decimal
     |\c hash|\c dict
     |\c int|\c int
     |\c list|\c list
     |\c string|\c str
     |\c code (closure or call reference)|\c callable
 
+    A %Qore \c number outside the 64-bit signed integer range with an integral value that it holds exactly (as it holds
+    the %Python \c int values that it is converted from) is a %Python \c int; all other numbers, including NaN and
+    infinity, are \c decimal.Decimal values, so that both types round-trip.  A number converted from a \c float holds a
+    binary approximation, and its \c decimal.Decimal has the shortest decimal digits that give the same value.
+
+    A value of any other %Qore type (ex: a reference) raises a \c PYTHON-VALUE-ERROR exception.
+
     @note \c datetime.datetime supports years 1 - 9999 only; converting an absolute %Qore date/time value with a
-    year outside this range raises an exception, as the value has no %Python representation.  When such a value is
-    a %Qore class constant being imported into %Python, the constant is skipped and the rest of the class is
-    imported normally.
+    year outside this range raises an exception, as the value has no %Python representation.  When a value that cannot
+    be converted is a %Qore constant being imported into %Python (a class or namespace constant), the constant is
+    skipped and the rest of the class or namespace is imported normally.
 
     @section python_python_to_qore Type Conversions From Python to Qore
 
@@ -28,6 +36,7 @@
     |\c bool|\c bool
     |\c int|\c int, or \c number outside the 64-bit signed integer range
     |\c float|\c float
+    |\c decimal.Decimal|\c number
     |\c bytes|\c binary
     |\c bytearray|\c binary
     |\c datetime.datetime|\c date (absolute date/time values)

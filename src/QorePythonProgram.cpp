@@ -2133,15 +2133,19 @@ int QorePythonProgram::importQoreConstantToPython(PyObject* mod, const QoreExter
 
     ExceptionSink xsink;
     ValueHolder qoreval(constant.getReferencedValue(), &xsink);
+    QorePythonReferenceHolder val;
     if (!xsink) {
-        QorePythonReferenceHolder val(getPythonValue(*qoreval, &xsink));
-        if (!xsink) {
-            if (!PyObject_SetAttrString(mod, constant.getName(), *val)) {
-                return 0;
-            }
-        }
+        val = getPythonValue(*qoreval, &xsink);
     }
-    raisePythonException(xsink);
+    // a constant that cannot be read or converted to Python is skipped, as with class constants, so that the rest of
+    // the namespace is imported
+    if (xsink) {
+        xsink.clear();
+        return 0;
+    }
+    if (!PyObject_SetAttrString(mod, constant.getName(), *val)) {
+        return 0;
+    }
     return -1;
 }
 
@@ -2708,6 +2712,24 @@ ResolvedCallReferenceNode* QorePythonProgram::getQoreCallRefFromMethod(Exception
     return new PythonCallableCallReferenceNode(this, m->im_func, PyType_Check(m->im_self) ? nullptr : m->im_self);
 }
 
+//! returns the number of significant bits of a non-negative Python int (its bit length without the trailing zero bits:
+//! n.bit_length() - (n & -n).bit_length() + 1; 0 for 0), or -1 with a Python exception
+static long long qore_python_significant_bits(PyObject* n) {
+    QorePythonReferenceHolder neg(PyNumber_Negative(n));
+    QorePythonReferenceHolder lowest(neg ? PyNumber_And(n, *neg) : nullptr);
+    QorePythonReferenceHolder bits(lowest ? PyObject_CallMethod(n, "bit_length", nullptr) : nullptr);
+    QorePythonReferenceHolder lowest_bits(bits ? PyObject_CallMethod(*lowest, "bit_length", nullptr) : nullptr);
+    if (!lowest_bits) {
+        return -1;
+    }
+    long long b = PyLong_AsLongLong(*bits);
+    long long lb = PyLong_AsLongLong(*lowest_bits);
+    if (PyErr_Occurred()) {
+        return -1;
+    }
+    return b ? b - lb + 1 : 0;
+}
+
 // the number of decimal digits converted at once for a Python int outside the int64 range: Python refuses to convert an
 // int with more digits than sys.get_int_max_str_digits() (4300 by default, at least 640) to a decimal string
 static constexpr int QORE_PYTHON_INT_PART_DIGITS = 600;
@@ -2728,12 +2750,8 @@ QoreValue QorePythonProgram::getQoreIntegerFromLong(ExceptionSink* xsink, PyObje
     // bit length without the trailing zero bits: (n & -n).bit_length() - 1) must not exceed the precision of a Qore
     // number, which has a maximum
     QorePythonReferenceHolder rest(PyNumber_Absolute(val));
-    QorePythonReferenceHolder neg(rest ? PyNumber_Negative(*rest) : nullptr);
-    QorePythonReferenceHolder lowest(neg ? PyNumber_And(*rest, *neg) : nullptr);
-    QorePythonReferenceHolder bits(rest ? PyObject_CallMethod(*rest, "bit_length", nullptr) : nullptr);
-    QorePythonReferenceHolder lowest_bits(lowest ? PyObject_CallMethod(*lowest, "bit_length", nullptr) : nullptr);
-    long long sig_bits = bits && lowest_bits ? PyLong_AsLongLong(*bits) - PyLong_AsLongLong(*lowest_bits) + 1 : -1;
-    if (sig_bits < 0 || PyErr_Occurred()) {
+    long long sig_bits = rest ? qore_python_significant_bits(*rest) : -1;
+    if (sig_bits < 0) {
         qore_python_conversion_error(this, xsink);
         return QoreValue();
     }
@@ -2906,6 +2924,23 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
 
     if (PyMethod_Check(val)) {
         return getQoreCallRefFromMethod(xsink, val);
+    }
+
+    // decimal.Decimal (and subclasses) -> number; the module is not imported here: when it is not loaded, the value
+    // cannot be a Decimal
+    {
+        QorePythonReferenceHolder decimal_name(PyUnicode_FromString("decimal"));
+        QorePythonReferenceHolder decimal_mod(decimal_name ? PyImport_GetModule(*decimal_name) : nullptr);
+        QorePythonReferenceHolder decimal_type(decimal_mod ? PyObject_GetAttrString(*decimal_mod, "Decimal")
+            : nullptr);
+        int is_decimal = decimal_type ? PyObject_IsInstance(val, *decimal_type) : 0;
+        if (is_decimal < 0 || (!decimal_type && PyErr_Occurred())) {
+            qore_python_conversion_error(this, xsink);
+            return QoreValue();
+        }
+        if (is_decimal) {
+            return getQoreNumberFromDecimal(xsink, val);
+        }
     }
 
     QoreClass* cls = getCreateQorePythonClass(xsink, type);
@@ -3189,6 +3224,9 @@ PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* 
         case NT_FLOAT:
             return PyFloat_FromDouble(val.getAsFloat());
 
+        case NT_NUMBER:
+            return getPythonNumber(xsink, val.get<const QoreNumberNode>());
+
         case NT_STRING: {
             QoreStringNodeValueHelper str(val);
             return getPythonString(xsink, *str);
@@ -3237,9 +3275,74 @@ PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* 
         }
     }
 
-    // ignore types that cannot be converted to a Python value and return None
-    Py_INCREF(Py_None);
-    return Py_None;
+    // a type that cannot be converted to a Python value; getPythonValue() raises the exception
+    return nullptr;
+}
+
+PyObject* QorePythonProgram::getPythonNumber(ExceptionSink* xsink, const QoreNumberNode* n) {
+    // the shortest decimal representation that gives the same value at the number's precision; special values are
+    // spelled NaN, INF and -INF, which decimal.Decimal accepts
+    QoreString str;
+    if (n->toStringRoundTrip(str, false, xsink)) {
+        return nullptr;
+    }
+    // an integral value outside the int64 range is a Python int if the number holds it exactly, as it holds the Python
+    // ints outside the int64 range that it was made from (Python ints in the range are Qore integers, and other numbers
+    // are Decimals, so that both round-trip with their types): the integer given by the digits then needs no more
+    // significant bits than the number's precision, and as the digits give the number's value at its precision, they
+    // give it exactly; otherwise (ex: a number made from a float) the digits are only the shortest decimal
+    // representation of a binary value, and the value is a Decimal
+    if (!strpbrk(str.c_str(), ".eENI")) {
+        QorePythonReferenceHolder ival(PyLong_FromString(str.c_str(), nullptr, 10));
+        if (!ival) {
+            return nullptr;
+        }
+        int overflow;
+        PyLong_AsLongLongAndOverflow(*ival, &overflow);
+        if (overflow) {
+            QorePythonReferenceHolder abs_val(PyNumber_Absolute(*ival));
+            long long sig_bits = abs_val ? qore_python_significant_bits(*abs_val) : -1;
+            if (sig_bits < 0) {
+                return nullptr;
+            }
+            if (sig_bits <= n->getPrec()) {
+                return ival.release();
+            }
+        }
+    }
+    // the decimal.Decimal is made from the same representation, in scientific notation when the plain one is long
+    // (numbers with big or small exponents)
+    if (str.size() > 50) {
+        str.clear();
+        if (n->toStringRoundTrip(str, true, xsink)) {
+            return nullptr;
+        }
+    }
+    QorePythonReferenceHolder decimal_mod(PyImport_ImportModule("decimal"));
+    QorePythonReferenceHolder decimal_type(decimal_mod ? PyObject_GetAttrString(*decimal_mod, "Decimal") : nullptr);
+    if (!decimal_type) {
+        return nullptr;
+    }
+    return PyObject_CallFunction(*decimal_type, "s", str.c_str());
+}
+
+QoreNumberNode* QorePythonProgram::getQoreNumberFromDecimal(ExceptionSink* xsink, PyObject* val) {
+    QorePythonReferenceHolder is_nan(PyObject_CallMethod(val, "is_nan", nullptr));
+    if (!is_nan) {
+        qore_python_conversion_error(this, xsink);
+        return nullptr;
+    }
+    // a signaling NaN ("sNaN") is a NaN in Qore
+    if (*is_nan == Py_True) {
+        return new QoreNumberNode("nan");
+    }
+    QorePythonReferenceHolder str(PyObject_Str(val));
+    const char* cstr = str ? PyUnicode_AsUTF8(*str) : nullptr;
+    if (!cstr) {
+        qore_python_conversion_error(this, xsink);
+        return nullptr;
+    }
+    return new QoreNumberNode(cstr);
 }
 
 QoreValue QorePythonProgram::callFunction(ExceptionSink* xsink, const QoreString& func_name, const QoreListNode* args,

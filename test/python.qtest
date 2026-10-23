@@ -92,6 +92,7 @@ class PythonTest inherits Test {
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
         addTestCase("type conversion test", \typeConversionTest());
         addTestCase("conversion of cyclic, shared and unrepresentable Python values", \unrepresentableValueTest());
+        addTestCase("Qore number <-> Python int and decimal.Decimal", \numberConversionTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
@@ -2234,6 +2235,68 @@ def pow2(n):
         assertEq(p.callFunction("pow2", 8999) * 2, p.callFunction("pow2", 9000));
         # more significant bits than a Qore number can hold
         assertThrows("PYTHON-VALUE-ERROR", "significant bits", \p.callFunction(), ("big", 5000));
+    }
+
+    # a Qore number is a Python int when it is an exact integral value outside the int64 range (a Qore number holds
+    # the Python ints outside the int64 range) and a decimal.Decimal otherwise, and a decimal.Decimal is a Qore number,
+    # so that both round-trip with their types; previously every Qore number was None in
+    # Python, so Python ints outside the int64 range did not survive a round trip.  A Qore value that cannot be
+    # converted raises PYTHON-VALUE-ERROR instead of becoming None.
+    numberConversionTest() {
+        PythonProgram p("
+import decimal
+
+def typ(x):
+    return type(x).__name__ + ': ' + repr(x)
+
+def decimals():
+    D = decimal.Decimal
+    return [D('1.5'), D('-0.000123'), D('1.5E+3'), D('Infinity'), D('-Infinity'), D('NaN'), D('sNaN')]
+
+class MyDecimal(decimal.Decimal):
+    pass
+
+def my_decimal():
+    return MyDecimal('2.25')
+
+def big():
+    return [2**70, -2**70 - 1]
+
+def is_big(l):
+    return l == [2**70, -2**70 - 1] and all(type(v) is int for v in l)
+
+def echo(x):
+    return x
+", "number.py");
+
+        assertEq("Decimal: Decimal('1.5')", p.callFunction("typ", 1.5n));
+        assertEq("Decimal: Decimal('0.1')", p.callFunction("typ", 0.1n));
+        assertEq("Decimal: Decimal('100')", p.callFunction("typ", 100n));
+        # the number has the precision to hold the integral value exactly
+        assertEq("int: -125" + strmul("0", 98), p.callFunction("typ", -1.25e100n));
+        # a number made from a float holds an approximation: its digits are not the exact value
+        assertEq("Decimal: Decimal('1.0000000000000001E+300')", p.callFunction("typ", number(1e300)));
+        assertEq("Decimal: Decimal('NaN')", p.callFunction("typ", @nan@n));
+        assertEq("Decimal: Decimal('Infinity')", p.callFunction("typ", @inf@n));
+        assertEq("Decimal: Decimal('-Infinity')", p.callFunction("typ", -@inf@n));
+
+        list<auto> d = p.callFunction("decimals");
+        assertEq((NT_NUMBER, NT_NUMBER, NT_NUMBER, NT_NUMBER, NT_NUMBER, NT_NUMBER, NT_NUMBER), (map $1.typeCode(), d));
+        assertEq((1.5n, -0.000123n, 1500n, @inf@n, -@inf@n), d[0..4]);
+        assertTrue(d[5].nanp(), "Decimal('NaN')");
+        assertTrue(d[6].nanp(), "Decimal('sNaN')");
+        assertEq(2.25n, p.callFunction("my_decimal"));
+
+        # round trips
+        assertTrue(p.callFunction("is_big", p.callFunction("big")), "Python ints outside the int64 range");
+        assertEq((1.5n, -0.000123n, 1500n), p.callFunction("echo", d[0..2]), "Decimal round trip");
+        foreach number n in ((1.5n, 0.1n, -1.25e100n, 123456789012345678901234567890n)) {
+            assertEq(n, p.callFunction("echo", n), sprintf("Qore number %y round trip", n));
+        }
+
+        # a Qore value that has no Python representation
+        int i = 1;
+        assertThrows("PYTHON-VALUE-ERROR", "reference", \p.callFunction(), ("typ", \i));
     }
 
     typeConversionTest() {

@@ -26,6 +26,12 @@
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
 
     <b>Bug Fixes:</b>
+    - %Qore \c number values were converted to \c None in %Python, so %Python \c int values outside the 64-bit range
+      did not survive a round trip: a number is now a %Python \c int (an exact integral value outside the 64-bit
+      range) or a \c decimal.Decimal, and a \c decimal.Decimal is a %Qore \c number.  A %Qore value of a type that
+      cannot be converted to %Python raises a \c PYTHON-VALUE-ERROR exception instead of becoming \c None, and a
+      namespace constant that cannot be converted is skipped when a namespace is imported into %Python, as class
+      constants are (<a href="https://github.com/qoretechnologies/qore/issues/5489">issue 5489</a>)
     - %Python values that a %Qore value cannot represent raise an exception instead of crashing the process: a
       \c list or \c tuple that contains itself, a string or \c dict key with lone surrogates, and an \c int with more
       than 4300 digits (or more significant bits than a %Qore \c number can hold); a \c dict referenced more than
