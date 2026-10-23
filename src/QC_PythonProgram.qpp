@@ -33,9 +33,18 @@ const PythonVersion = str(PY_VERSION);
 ///@}
 
 //! Program for embedding and executing Python code
-/**
+/** Each object is a separate %Python interpreter (a %Python subinterpreter) that runs the %Python code given to it.
+
+    @par Restrictions
+    %Python code is not subject to the restrictions of %Qore Programs or to their sandbox: it can use the filesystem,
+    start processes and use the network.  The class is therefore in the
+    @ref Qore::PO_NO_UNCONTROLLED_APIS "UNCONTROLLED_API" and @ref Qore::PO_NO_EMBEDDED_LOGIC "EMBEDDED_LOGIC"
+    functional domains: a %Program restricted with @ref Qore::PO_NO_UNCONTROLLED_APIS "PO_NO_UNCONTROLLED_APIS"
+    (included in @ref Qore::PO_NO_EXTERNAL_ACCESS "PO_NO_EXTERNAL_ACCESS", @ref Qore::PO_NO_IO "PO_NO_IO" and
+    @ref Qore::PO_LOCKDOWN "PO_LOCKDOWN") or with @ref Qore::PO_NO_EMBEDDED_LOGIC "PO_NO_EMBEDDED_LOGIC" cannot use
+    it; see @ref python_restrictions
 */
-qclass PythonProgram [arg=QorePythonProgramData* pp; ns=Python; dom=EMBEDDED_LOGIC];
+qclass PythonProgram [arg=QorePythonProgramData* pp; ns=Python; dom=EMBEDDED_LOGIC,UNCONTROLLED_API];
 
 //! Creates the object and parses and runs the given source code
 /** @param source_code the Python source to parse and compile

@@ -95,6 +95,7 @@ class PythonTest inherits Test {
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
         addTestCase("Python threads run under the sandbox of the interpreter's Program", \sandboxPythonThreadTest());
+        addTestCase("restricted Programs cannot run Python code", \restrictedProgramTest());
         addTestCase("os.environ changes are serialized with Qore", \environmentTest());
         addTestCase("an interpreter copies the environment under Qore's lock", \interpreterEnvironmentCopyTest());
         addTestCase("fork() while another thread holds a lock of the module", \forkHandlersTest());
@@ -269,6 +270,88 @@ def call_waiting(c, running, done):
             return done.get();
         };
         assertEq("pushed by a Python thread", p.callFunction("call_waiting", c, running, done));
+    }
+
+    # Python code is not subject to Qore's restrictions (it can use the filesystem, start processes and use the
+    # network), so every way to reach Python is an uncontrolled API: a Program restricted with PO_NO_UNCONTROLLED_APIS
+    # (included in PO_NO_EXTERNAL_ACCESS, PO_NO_IO and PO_LOCKDOWN) can neither create Python interpreters nor issue
+    # python module commands, and a Program restricted with PO_NO_EMBEDDED_LOGIC can neither create interpreters nor
+    # parse Python code with a module command.  Previously the PythonProgram class was only in the EMBEDDED_LOGIC
+    # domain and the module commands did not check the parse options, so restricted Programs could run any Python code.
+    restrictedProgramTest() {
+        TmpDir tmp("python-restricted-");
+        string marker = tmp.path + DirSep + "marker";
+        # Python code that shows that it ran by creating the marker file
+        string py_code = sprintf("open(%y, 'w').close()", marker);
+
+        # the restrictions that block both the PythonProgram class and all module commands
+        hash<string, int> uncontrolled = {
+            "PO_NO_UNCONTROLLED_APIS": PO_NO_UNCONTROLLED_APIS,
+            "PO_NO_EXTERNAL_ACCESS": PO_NO_EXTERNAL_ACCESS,
+            "PO_LOCKDOWN": PO_LOCKDOWN,
+        };
+        # the PythonProgram class, its static methods and creating it at runtime, with the expected errors
+        hash<string, list<string>> class_code = {
+            "constructor": (sprintf("PythonProgram pp(%y, 'restricted.py');", py_code), "ILLEGAL-CLASS-INSTANTIATION"),
+            "static method": (sprintf("PythonProgram::evalStatement(%y);", py_code), "INVALID-METHOD"),
+            "create_object()": (sprintf("create_object('PythonProgram', %y, 'restricted.py');", py_code),
+                "CREATE-OBJECT-ERROR"),
+        };
+        foreach hash<auto> r in ((uncontrolled + {"PO_NO_EMBEDDED_LOGIC": PO_NO_EMBEDDED_LOGIC}).pairIterator()) {
+            foreach hash<auto> c in (class_code.pairIterator()) {
+                Program pgm(r.value | PO_NEW_STYLE);
+                code parse_run = sub () {
+                    pgm.parse(c.value[0], "restricted");
+                    pgm.run();
+                };
+                assertThrows(c.value[1], "PythonProgram", parse_run, NOTHING, sprintf("%s: %s", r.key, c.key));
+                assertFalse(is_file(marker), sprintf("%s: %s: the Python code did not run", r.key, c.key));
+            }
+        }
+
+        # every module command, issued at parse time and at runtime
+        list<string> cmds = (
+            "parse restricted.py " + py_code,
+            "import os",
+            "import-ns Qore qore_ns",
+            "alias os.path ospath",
+            "export-class object",
+            "export-func print",
+            "add-module-path " + tmp.path,
+        );
+        foreach hash<auto> r in (uncontrolled.pairIterator()) {
+            foreach string cmd in (cmds) {
+                {
+                    Program pgm(r.value | PO_NEW_STYLE);
+                    assertThrows("PYTHON-PARSE-COMMAND-ERROR", "PO_NO_UNCONTROLLED_APIS", \pgm.parse(),
+                        ("%module-cmd(python) " + cmd + "\n", "restricted"), sprintf("%s: parse: %s", r.key, cmd));
+                }
+                {
+                    Program pgm(r.value | PO_NEW_STYLE);
+                    assertThrows("PYTHON-PARSE-COMMAND-ERROR", "PO_NO_UNCONTROLLED_APIS", \pgm.issueModuleCmd(),
+                        ("python", cmd), sprintf("%s: issueModuleCmd(): %s", r.key, cmd));
+                }
+                assertFalse(is_file(marker), sprintf("%s: %s: the Python code did not run", r.key, cmd));
+            }
+        }
+
+        # PO_NO_EMBEDDED_LOGIC blocks parsing Python code; the other commands do not parse code
+        {
+            Program pgm(PO_NO_EMBEDDED_LOGIC | PO_NEW_STYLE);
+            assertThrows("PYTHON-PARSE-COMMAND-ERROR", "PO_NO_EMBEDDED_LOGIC", \pgm.issueModuleCmd(),
+                ("python", "parse restricted.py " + py_code));
+            assertFalse(is_file(marker), "PO_NO_EMBEDDED_LOGIC: parse: the Python code did not run");
+            pgm.issueModuleCmd("python", "import os");
+            pgm.parse("string sub sep() { return os::sep; }", "restricted");
+            assertEq(DirSep, pgm.callFunction("sep"), "PO_NO_EMBEDDED_LOGIC: import is allowed");
+        }
+
+        # Python code is not subject to the other restrictions (ex: PO_NO_FILESYSTEM): the same command runs it
+        {
+            Program pgm(PO_NO_FILESYSTEM | PO_NEW_STYLE);
+            pgm.issueModuleCmd("python", "parse restricted.py " + py_code);
+            assertTrue(is_file(marker), "an unrestricted module command runs the Python code");
+        }
     }
 
     # the code of the interpreter of a sandboxed Program is governed by its sandbox also on the threads that Python

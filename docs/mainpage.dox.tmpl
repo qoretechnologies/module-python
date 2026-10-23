@@ -23,6 +23,28 @@
     |!Class|!Description
     |@ref Python::PythonProgram "PythonProgram"|Allows %Python code to be embedded and executed in %Qore
 
+    @section python_restrictions Restrictions and Sandboxing
+
+    %Python code is not subject to the restrictions of %Qore @ref Qore::Program "Program" objects (parse options such
+    as @ref Qore::PO_NO_FILESYSTEM "PO_NO_FILESYSTEM" or @ref Qore::PO_NO_NETWORK "PO_NO_NETWORK") or to their
+    sandbox: it can use the filesystem, start processes and use the network through %Python's own library.  Every way
+    to reach %Python from %Qore is therefore an uncontrolled API:
+    - the @ref Python::PythonProgram "PythonProgram" class, the %Python classes, methods and functions that the module
+      imports into %Qore, and the \c python module commands (\c %%module-cmd(python) and
+      @ref Qore::Program::issueModuleCmd() "Program::issueModuleCmd()") cannot be used in a %Program restricted with
+      @ref Qore::PO_NO_UNCONTROLLED_APIS "PO_NO_UNCONTROLLED_APIS", which is included in
+      @ref Qore::PO_NO_EXTERNAL_ACCESS "PO_NO_EXTERNAL_ACCESS", @ref Qore::PO_NO_IO "PO_NO_IO" and
+      @ref Qore::PO_LOCKDOWN "PO_LOCKDOWN"
+    - the @ref Python::PythonProgram "PythonProgram" class and the \c parse module command, which parse %Python code at
+      runtime, cannot be used in a %Program restricted with @ref Qore::PO_NO_EMBEDDED_LOGIC "PO_NO_EMBEDDED_LOGIC"
+
+    These restrictions also apply to a %Program that inherits the module from its parent %Program without loading it.
+    To keep code from running %Python, restrict its %Program with
+    @ref Qore::PO_NO_UNCONTROLLED_APIS "PO_NO_UNCONTROLLED_APIS".
+
+    %Qore APIs called from %Python remain subject to the restrictions and the sandbox of the %Program whose %Python
+    code calls them, also on threads created by %Python (see @ref python_created_threads).
+
     @section pythondocumentation Documentation
 
     - @anchor python_examples @subpage python_examplesguide

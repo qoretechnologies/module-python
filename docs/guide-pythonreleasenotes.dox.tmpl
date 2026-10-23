@@ -5,6 +5,17 @@
     @tableofcontents
 
     @section python_1_3 python Module Version 1.3
+    <b>Security:</b>
+    - %Python code can no longer be run from %Qore Programs restricted with
+      @ref Qore::PO_NO_UNCONTROLLED_APIS "PO_NO_UNCONTROLLED_APIS" (included in
+      @ref Qore::PO_NO_EXTERNAL_ACCESS "PO_NO_EXTERNAL_ACCESS", @ref Qore::PO_NO_IO "PO_NO_IO" and
+      @ref Qore::PO_LOCKDOWN "PO_LOCKDOWN"): the @ref Python::PythonProgram "PythonProgram" class is now in the
+      \c UNCONTROLLED_API functional domain as well as in \c EMBEDDED_LOGIC, and the \c python module commands are
+      rejected in such Programs (and \c parse also with @ref Qore::PO_NO_EMBEDDED_LOGIC "PO_NO_EMBEDDED_LOGIC"), also
+      when the %Program inherits the module from its parent.  Previously such Programs could run any %Python code,
+      which is not subject to %Qore's restrictions (<a href="https://github.com/qoretechnologies/qore/issues/5506">issue
+      5506</a>); see @ref python_restrictions
+
     <b>New Features and Enhancements:</b>
     - Added support for Python 3.12, 3.13, 3.14, 3.15, and 3.16 (tested with the first alpha release of 3.16)
     - Added support for the free-threading mode (PEP 703) of Python 3.14 and later

@@ -35,6 +35,23 @@ deprecated API that the module uses is still reported where the module uses it. 
 [CPython issue 160436](https://github.com/python/cpython/issues/160436); the suppression can be limited to the Python
 versions without the fix once it is released.
 
+## Restrictions (Functional Domains)
+
+Python code is not subject to the restrictions or the sandbox of Qore Programs, so every way to reach Python from Qore
+is an uncontrolled API (`QDOM_UNCONTROLLED_API`, blocked by `PO_NO_UNCONTROLLED_APIS`, which `PO_NO_EXTERNAL_ACCESS`,
+`PO_NO_IO` and `PO_LOCKDOWN` include), as with the jni module:
+- the Python classes, methods and functions imported into Qore (`QorePythonClass`, `QorePythonProgram::importModule()`
+  and the class import code) are created in `QDOM_UNCONTROLLED_API`
+- `PythonProgram` is in `EMBEDDED_LOGIC,UNCONTROLLED_API` (`src/QC_PythonProgram.qpp`): the constructor, the static
+  methods and `create_object()` are rejected by Qore in Programs with either restriction
+- `python_module_parse_cmd()` rejects every module command with `PO_NO_UNCONTROLLED_APIS`, and `parse` also with
+  `PO_NO_EMBEDDED_LOGIC`.  This check is the module's own: a child Program inherits the module's feature from its
+  parent, so Qore's `PO_NO_MODULES` check in `QoreModuleManager::loadModuleIntern()` does not apply to the commands of
+  a module the Program already has, and Qore cannot know what a module command does
+
+Qore APIs called from Python are checked against the restrictions and the sandbox of the Program whose Python code calls
+them (see "Threads Created by Python").  Test: `restrictedProgramTest()` in `test/python.qtest`.
+
 ## GIL (Global Interpreter Lock) Management
 
 ### Thread State Tracking

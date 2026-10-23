@@ -1150,6 +1150,22 @@ static void python_module_parse_cmd(const QoreString& cmd, ExceptionSink* xsink)
         return;
     }
 
+    QoreProgram* pgm = getProgram();
+    // Python code is not subject to Qore's restrictions, so every command, which gives access to Python, is an
+    // uncontrolled API, like the Python classes and functions that the module imports, and "parse" also parses code at
+    // runtime; the restrictions of the Program are checked here, as a Program that inherits the module from its parent
+    // can issue commands without loading the module
+    if (pgm->getParseOptions() & PO_NO_UNCONTROLLED_APIS) {
+        xsink->raiseException("PYTHON-PARSE-COMMAND-ERROR", "python module command '%s' is not allowed in a Program "
+            "restricted with PO_NO_UNCONTROLLED_APIS", str.c_str());
+        return;
+    }
+    if (str == "parse" && (pgm->getParseOptions() & PO_NO_EMBEDDED_LOGIC)) {
+        xsink->raiseException("PYTHON-PARSE-COMMAND-ERROR", "python module command 'parse' is not allowed in a "
+            "Program restricted with PO_NO_EMBEDDED_LOGIC");
+        return;
+    }
+
     if (i->second.requires_arg) {
         if (arg.empty()) {
             xsink->raiseException("PYTHON-PARSE-COMMAND-ERROR", "missing argument / command name in parse command: '%s'", cmd.c_str());
@@ -1162,7 +1178,6 @@ static void python_module_parse_cmd(const QoreString& cmd, ExceptionSink* xsink)
         }
     }
 
-    QoreProgram* pgm = getProgram();
     QorePythonProgram* pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
     //printd(5, "parse-cmd '%s' pypgm: %p pythonns: %p\n", arg.c_str(), pypgm, pypgm->getPythonNamespace());
     if (!pypgm) {
