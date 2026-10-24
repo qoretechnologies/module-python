@@ -181,6 +181,19 @@ Thread states are cached in `py_thr_map` (per-PythonProgram, per-thread):
 - Thread states are reused across `setContext()/releaseContext()` cycles
 - When a thread exits, its thread states are cleaned up
 
+## Qore Classes for Python Classes
+
+`setupQorePythonClass()` creates a `QorePythonClass` for a Python type.  A Python base class is added as a virtual base
+class: it shares the Python object, and Qore maps the private data of a virtual base class to the subclass's private
+data (`addVirtualPrivateData()`), which the methods of the Python base class use.  A Qore base class (the base is the
+Python type of a Qore class, `PyQoreObjectType_Check()`) is not virtual: Qore runs the constructor, destructor and copy
+method of a base class only if it is not virtual (the constructor is run explicitly by `PythonQoreClass::py_init()`).
+Qore makes the ancestors of a virtual base class virtual (`BCSMList::addBaseClassesToSubclass()`), so a Qore class
+reached through Python base classes is added first as a direct non-virtual base class (`BCSMList::add()` keeps the
+first entry of a class), and `addPythonTypeAttributes()` adds the methods of the Python base classes before the Qore
+class to the subclass in method resolution order, so that they take precedence over the Qore class's methods, which
+the direct base class would otherwise put first.  Test: `subclassDestructorTest()`.
+
 ## Thread State Cache
 
 `py_thr_map` caches the thread state of each interpreter for each Qore thread ID (`q_gettid()`), and Qore gives the ID

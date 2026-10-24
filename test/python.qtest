@@ -53,6 +53,11 @@ class PythonLifecycleTracked {
     string get() {
         return "qore:" + name;
     }
+
+    #! calls get() through Qore, which calls the override of a Python subclass
+    string describe() {
+        return "describe:" + get();
+    }
 }
 
 #! its destructor waits for a lock; used to check that Qore code released by Python runs without the GIL
@@ -145,6 +150,7 @@ class PythonTest inherits Test {
         addTestCase("special Qore method names and the builtins namespace", \specialNameTest());
         addTestCase("lifetime of Qore objects used from Python", \qoreObjectLifetimeTest());
         addTestCase("Qore code released by Python runs without the GIL", \gilReleaseTest());
+        addTestCase("the destructors of Qore classes run for Python subclasses", \subclassDestructorTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
@@ -2815,6 +2821,78 @@ def noop():
         locked.get();
         p.callFunction("drop");
         assertEq(0, result.get(), "the destructor got the lock");
+    }
+
+    # the destructor of a Qore class runs for the objects of its Python subclasses, also through other Python classes:
+    # the Qore class was a virtual base class of the Qore class of the Python subclass, and Qore does not run the
+    # destructor of a virtual base class (nor of the ancestors of one, so a Qore class reached through Python base
+    # classes is now a direct, non-virtual base class, and the methods of the Python base classes are added to the
+    # subclass so that they take precedence over its methods, as in Python's method resolution order)
+    subclassDestructorTest() {
+        PythonProgram p("
+import gc
+from qore.__root__ import PythonLifecycleTracked
+from qore.__root__.Qore.Thread import Counter
+
+class Sub(PythonLifecycleTracked):
+    def get(self):
+        return 'sub:' + self.name
+
+class Sub2(Sub):
+    def other(self):
+        return 'other'
+
+class Sub3(Sub2):
+    def get(self):
+        return 'sub3:' + self.name
+
+class MyCounter(Counter):
+    pass
+
+class MyCounter2(MyCounter):
+    pass
+
+def make(cls, name):
+    return globals()[cls](name)
+
+def make_counter():
+    c = MyCounter2(2)
+    c.dec()
+    return c
+
+def collect():
+    gc.collect()
+", "subclass-destructor.py");
+
+        hash<string, string> expected = {
+            "Sub": "sub:",
+            "Sub2": "sub:",
+            "Sub3": "sub3:",
+        };
+        foreach hash<auto> c in (expected.pairIterator()) {
+            int destroyed = PythonLifecycleTracked::destroyed;
+            object o = p.callFunction("make", c.key, c.key);
+            assertEq(c.value + c.key, o.get(), c.key + ": the method of the Python class nearest in the MRO");
+            assertEq("describe:" + c.value + c.key, o.describe(), c.key + ": Qore code calls the Python override");
+            assertEq(c.key, o.name, c.key + ": Qore member");
+            delete o;
+            assertEq(destroyed + 1, PythonLifecycleTracked::destroyed, c.key + ": the Qore destructor ran");
+
+            # released by Python's cycle collector
+            {
+                object o2 = p.callFunction("make", c.key, c.key + "-gc");
+            }
+            p.callFunction("collect");
+            assertEq(destroyed + 2, PythonLifecycleTracked::destroyed, c.key + ": the Qore destructor ran (gc)");
+        }
+        assertEq("other", p.callFunction("make", "Sub3", "x").other(), "a method of a Python base class");
+
+        # a Python subclass of a builtin Qore class, through another Python class
+        object counter = p.callFunction("make_counter");
+        assertEq(1, counter.getCount());
+        counter.dec();
+        assertEq(0, counter.getCount());
+        delete counter;
     }
 
     typeConversionTest() {

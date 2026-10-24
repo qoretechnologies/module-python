@@ -354,6 +354,11 @@ public:
     DLLLOCAL QorePythonClass* setupQorePythonClass(ExceptionSink* xsink, QoreNamespace* ns, PyTypeObject* type,
             std::unique_ptr<QorePythonClass>& cls, strset_t& nsset, int flags = 0);
 
+    //! Adds the methods and members of the dict of the given Python type to the Qore class
+    /** @param names the names already added, which are skipped (names defined by subclasses); updated
+    */
+    DLLLOCAL void addPythonTypeAttributes(PyTypeObject* type, QorePythonClass* cls, strset_t& names);
+
     //! Creates ot retrieves a QoreClass for the given Python type
     DLLLOCAL QoreClass* getCreateQorePythonClass(ExceptionSink* xsink, PyTypeObject* type, int flags = 0);
 

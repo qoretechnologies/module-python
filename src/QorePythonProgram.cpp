@@ -4052,6 +4052,32 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
         new PythonQoreClass(this, type, *cls.get());
     }
 
+    // the Python types between the type and its nearest Qore base class (the Python type of a Qore class), if any
+    std::vector<PyTypeObject*> python_bases;
+    PyTypeObject* qore_base = nullptr;
+    for (PyTypeObject* t = type->tp_base; t; t = t->tp_base) {
+        if (PyQoreObjectType_Check(t)) {
+            qore_base = t;
+            break;
+        }
+        python_bases.push_back(t);
+    }
+
+    // a Python base class shares the Python object and is a virtual base class; a Qore base class (the base is the
+    // Python type of a Qore class) is not: Qore runs the constructor, destructor and copy method of a base class only
+    // if it is not virtual, and the destructor of a Qore class must run for the objects of its Python subclasses (its
+    // constructor is run by PythonQoreClass::py_init()).  As Qore makes the ancestors of a virtual base class virtual,
+    // a Qore class reached through Python base classes is added first as a non-virtual base class, and the methods of
+    // the Python base classes are added to this class, so that they take precedence over the Qore class's methods
+    if (qore_base && !python_bases.empty()) {
+        QoreClass* qore_bclass = getCreateQorePythonClassIntern(xsink, qore_base, nsset);
+        if (!qore_bclass) {
+            assert(*xsink);
+            return nullptr;
+        }
+        cls->addBaseClass(qore_bclass, false);
+    }
+
     // add single base class
     if (type->tp_base) {
         QoreClass* bclass = getCreateQorePythonClassIntern(xsink, type->tp_base, nsset);
@@ -4062,7 +4088,7 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
 
         printd(5, "QorePythonProgram::setupQorePythonClass() %s (id: %d) parent: %s (bclass: %p id: %d)\n",
             type->tp_name, cls->getID(), type->tp_base->tp_name, bclass, bclass->getID());
-        cls->addBaseClass(bclass, true);
+        cls->addBaseClass(bclass, !PyQoreObjectType_Check(type->tp_base));
     }
 
     cls->addBuiltinVirtualBaseClass(QC_PYTHONBASEOBJECT);
@@ -4072,7 +4098,19 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
     printd(5, "QorePythonProgram::setupQorePythonClass() %s methods: %p\n", type->tp_name,
         type->tp_methods);
 
-    // process dict
+    // process the dict of the type, and of the Python base classes before a Qore base class, in method resolution order
+    strset_t names;
+    addPythonTypeAttributes(type, cls.get(), names);
+    if (qore_base) {
+        for (PyTypeObject* t : python_bases) {
+            addPythonTypeAttributes(t, cls.get(), names);
+        }
+    }
+
+    return cls.release();
+}
+
+void QorePythonProgram::addPythonTypeAttributes(PyTypeObject* type, QorePythonClass* cls, strset_t& names) {
     if (type->tp_dict) {
         PyObject* key, * value;
         Py_ssize_t pos = 0;
@@ -4082,6 +4120,10 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
             const char* keystr = PyUnicode_AsUTF8(key);
             if (!keystr) {
                 PyErr_Clear();
+                continue;
+            }
+            // a name defined by a subclass, which comes first in the method resolution order, is not added again
+            if (!names.insert(keystr).second) {
                 continue;
             }
             // the names of special Qore methods (ex: constructor, copy, methodGate) are imported with a '_' prefix
@@ -4173,7 +4215,6 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
         }
     }
 
-    return cls.release();
 }
 
 QoreValue QorePythonProgram::execPythonStaticCFunctionMethod(const QoreMethod& meth, PyObject* func,
