@@ -248,6 +248,8 @@ class PythonTest inherits Test {
         addTestCase("Qore code released by Python runs without the GIL", \gilReleaseTest());
         addTestCase("the destructors of Qore classes run for Python subclasses", \subclassDestructorTest());
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
+        addTestCase("an interrupt stops running Python code", \runningInterruptTest());
+        addTestCase("deleting a program interrupts the Python code that other threads run", \busyDeleteTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
         addTestCase("Python threads run under the sandbox of the interpreter's Program", \sandboxPythonThreadTest());
@@ -4063,6 +4065,89 @@ def get_unicode():
             assertEq(s, pp.callFunction("pass_unicode", s));
             assertEq(s, pp.callFunction("get_unicode"));
         }
+    }
+
+    # SandboxManager::requestInterrupt() stops Python code that runs (a pure Python loop, and a loop that calls Qore)
+    # with PROGRAM-INTERRUPTED; the interrupt is not raised in Python code that the thread runs after it
+    runningInterruptTest() {
+        if (Python::FreeThreading) {
+            testSkip("Background threads with Python not supported with free-threading (PEP 703)");
+        }
+        Program p(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        p.loadModule("python");
+        p.parse("
+our PythonProgram pp('
+def loop(q):
+    q.push(\"in python\")
+    n = 0
+    while True:
+        n += 1
+def qore_loop(q):
+    q.push(\"in python\")
+    while True:
+        q.size()
+def simple():
+    return 42
+', 'interrupt.py');
+
+string sub run_loop(string func, Queue started) {
+    try {
+        pp.callFunction(func, started);
+        return 'returned';
+    } catch (hash<ExceptionInfo> ex) {
+        return ex.err;
+    }
+}
+
+int sub simple() {
+    return pp.callFunction('simple');
+}
+", "interrupt");
+        # creates the PythonProgram
+        p.run();
+        SandboxManager sm();
+        p.setSandboxManager(sm);
+
+        foreach string func in (("loop", "qore_loop")) {
+            Queue started();
+            Queue done();
+            background done.push(p.callFunction("run_loop", func, started));
+            assertEq("in python", started.get(), func);
+            sm.requestInterrupt();
+            assertEq("PROGRAM-INTERRUPTED", done.get(), func);
+            sm.clearInterrupt();
+        }
+        # the interrupt is not raised later
+        assertEq(42, p.callFunction("simple"));
+    }
+
+    # deleting a PythonProgram while another thread runs its Python code interrupts the code, so that the deletion does
+    # not wait forever; the thread gets PYTHON-INTERPRETER-DELETED
+    busyDeleteTest() {
+        if (Python::FreeThreading) {
+            testSkip("Background threads with Python not supported with free-threading (PEP 703)");
+        }
+        PythonProgram pp("
+def loop(q):
+    q.push('in python')
+    n = 0
+    while True:
+        n += 1
+", "busy.py");
+        Queue started();
+        Queue done();
+        background sub () {
+            try {
+                pp.callFunction("loop", started);
+                done.push("returned");
+            } catch (hash<ExceptionInfo> ex) {
+                done.push(ex.err + ": " + ex.desc);
+            }
+        }();
+        assertEq("in python", started.get());
+        delete pp;
+        assertEq("PYTHON-INTERPRETER-DELETED: the Python program was deleted while the thread ran its Python code",
+            done.get());
     }
 
     sandboxInterruptTest() {

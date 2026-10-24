@@ -20,9 +20,11 @@
     - Added support for Python 3.12, 3.13, 3.14, 3.15, and 3.16 (tested with the first alpha release of 3.16)
     - Added support for the free-threading mode (PEP 703) of Python 3.14 and later
     - The minimum supported %Python version is now 3.11
-    - Added support for interruptible I/O for graceful termination of sandboxed programs; interrupt checks are
-      performed before acquiring the Python GIL when a sandbox manager is active
-      (<a href="https://github.com/qoretechnologies/qore/issues/5116">issue 5116</a>)
+    - @ref Qore::SandboxManager::requestInterrupt() "SandboxManager::requestInterrupt()" interrupts the %Python code
+      of sandboxed programs: it is checked before acquiring the Python GIL
+      (<a href="https://github.com/qoretechnologies/qore/issues/5116">issue 5116</a>), and %Python code that runs is
+      interrupted with \c PROGRAM-INTERRUPTED (see @ref python_interrupts;
+      <a href="https://github.com/qoretechnologies/qore/issues/5502">issue 5502</a>)
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
     - Added @ref Python::PythonProgram::getAttribute() "PythonProgram::getAttribute()" and
       @ref Python::PythonProgram::setAttribute() "PythonProgram::setAttribute()" to read and set the global variables
@@ -33,6 +35,11 @@
       @ref python_keyword_arguments; <a href="https://github.com/qoretechnologies/qore/issues/5498">issue 5498</a>)
 
     <b>Bug Fixes:</b>
+    - \c import \c qoreloader no longer blocks the signals of the %Python process and of the processes that it
+      starts (ex: \c Popen.terminate() was ignored and \c SIGINT never arrived): %Qore is initialized without its
+      signal handling when %Python is the host; deleting a @ref Python::PythonProgram "PythonProgram" while another
+      thread runs its %Python code interrupts the code instead of waiting forever
+      (<a href="https://github.com/qoretechnologies/qore/issues/5502">issue 5502</a>)
     - @ref Python::PythonProgram::callFunction() "PythonProgram::callFunction()" calls any callable global or builtin
       (ex: a class, a \c functools.partial object, \c len), and
       @ref Python::PythonProgram::callMethod() "PythonProgram::callMethod()" any callable attribute of the class (only

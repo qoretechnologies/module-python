@@ -696,6 +696,31 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
     }
 
     if (interpreter) {
+        // the Python code that other Qore threads run in the interpreter is interrupted (KeyboardInterrupt, raised as
+        // PYTHON-INTERPRETER-DELETED in Qore), so that they leave it; a thread blocked in a call (ex: time.sleep())
+        // leaves it when the call returns
+        std::vector<unsigned long> thread_ids;
+        {
+            AutoLocker al(py_thr_lck);
+            checkForkIntern();
+            if (pgm_thr_cnt) {
+                unsigned long self_id = PyThread_get_thread_ident();
+                py_thr_map_t::iterator i = py_thr_map.find(this);
+                if (i != py_thr_map.end()) {
+                    for (auto& ti : i->second) {
+                        if (ti.second.state && ti.second.state->thread_id != self_id) {
+                            thread_ids.push_back(ti.second.state->thread_id);
+                        }
+                    }
+                }
+            }
+        }
+        if (!thread_ids.empty()) {
+            QorePythonHelper qph(this);
+            for (unsigned long id : thread_ids) {
+                PyThreadState_SetAsyncExc(id, PyExc_KeyboardInterrupt);
+            }
+        }
         {
             AutoLocker al(py_thr_lck);
             checkForkIntern();
@@ -4135,6 +4160,21 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
     if (!ex) {
         //printd(5, "QorePythonProgram::checkPythonException() no error\n");
         return 0;
+    }
+
+    // the KeyboardInterrupt that an interrupt of the Program raised in the Python code is the Qore interrupt
+    // (PROGRAM-INTERRUPTED); the one that the deletion of the program raised is PYTHON-INTERPRETER-DELETED
+    if (PyErr_GivenExceptionMatches(ex, PyExc_KeyboardInterrupt)) {
+        if (qore_check_cancel(xsink, "running Python code")) {
+            PyErr_Clear();
+            return -1;
+        }
+        if (destroyed) {
+            PyErr_Clear();
+            xsink->raiseException("PYTHON-INTERPRETER-DELETED", "the Python program was deleted while the thread "
+                "ran its Python code");
+            return -1;
+        }
     }
 
     QorePythonReferenceHolder ex_type, ex_value, traceback;

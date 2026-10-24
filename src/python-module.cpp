@@ -1347,15 +1347,80 @@ QorePythonHelper::QorePythonHelper(const QorePythonProgram* pypgm, ExceptionSink
             // The interpreter has been deleted - raise an exception
             xsink->raiseException("PYTHON-INTERPRETER-DELETED",
                 "cannot execute Python callable: the Python interpreter has been deleted");
+        } else if (old_state.valid) {
+            registerInterrupt();
         }
     }
 }
 
 QorePythonHelper::~QorePythonHelper() {
+    deactivateInterrupt();
     new_pypgm->releaseContext(old_state);
     q_swap_thread_local_data(python_u_tld_key, (void*)old_pgm);
     assert(current == this);
     current = prev;
+    deregisterInterrupt();
+}
+
+void QorePythonHelper::registerInterrupt() {
+    // the first helper of the program in the thread registers the callback: an inner one would clear the interrupt
+    // raised for the outer one
+    for (const QorePythonHelper* h = prev; h; h = h->prev) {
+        if (h->new_pypgm == new_pypgm && h->interrupt) {
+            return;
+        }
+    }
+    std::unique_ptr<QoreSandboxManagerHelper> smh(new QoreSandboxManagerHelper(QoreSandboxManagerHelper::All));
+    if (!*smh) {
+        return;
+    }
+    interrupt = std::make_shared<InterruptState>();
+    interrupt->thread_id = PyThread_get_thread_ident();
+    interrupt->pypgm = new_pypgm;
+    std::shared_ptr<InterruptState> state = interrupt;
+    // the callback is called on the thread that requests the interrupt, possibly after it was removed
+    (*smh)->registerCancelCallback(interrupt.get(), [state]() -> bool {
+        std::lock_guard<std::mutex> al(state->lck);
+        if (!state->active.load()) {
+            return false;
+        }
+        // the interpreter's context on the calling thread; the program exists while the callback is registered
+        QorePythonHelper qph(state->pypgm);
+        if (!qph.isValid() || !state->active.load()) {
+            return false;
+        }
+        // KeyboardInterrupt is a BaseException: except Exception does not catch it; checkPythonException() raises the
+        // Qore interrupt for it
+        bool rv = PyThreadState_SetAsyncExc(state->thread_id, PyExc_KeyboardInterrupt) > 0;
+        if (rv) {
+            state->raised.store(true);
+        }
+        return rv;
+    });
+    interrupt_smh = std::move(smh);
+}
+
+void QorePythonHelper::deactivateInterrupt() {
+    if (!interrupt) {
+        return;
+    }
+    // with the GIL held, so the callback cannot raise the interrupt after this
+    interrupt->active.store(false);
+    // an interrupt that was not delivered must not be raised in other Python code that the thread runs later
+    if (interrupt->raised.load()) {
+        PyThreadState_SetAsyncExc(interrupt->thread_id, nullptr);
+    }
+}
+
+void QorePythonHelper::deregisterInterrupt() {
+    if (!interrupt) {
+        return;
+    }
+    // without the GIL: waits for a callback that is running, which can be waiting for the GIL
+    {
+        std::lock_guard<std::mutex> al(interrupt->lck);
+    }
+    (*interrupt_smh)->unregisterCancelCallback(interrupt.get());
 }
 
 bool QorePythonHelper::isValid() const {

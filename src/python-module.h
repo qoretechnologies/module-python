@@ -56,6 +56,8 @@
 #include <qore/QoreSandboxManager.h>
 
 #include <memory>
+#include <mutex>
+#include <atomic>
 #include <optional>
 
 //! the name of the module
@@ -501,6 +503,36 @@ protected:
     const QorePythonProgram* new_pypgm;
     //! the helper created before this one in this thread
     const QorePythonHelper* prev;
+
+    //! the state of the interrupt of the Python code that the thread runs, shared with the cancel callback
+    struct InterruptState {
+        //! held by the cancel callback while it runs; the helper waits for it before it is destroyed
+        std::mutex lck;
+        //! true while the thread can run Python code of the helper (set and cleared with the GIL held)
+        std::atomic<bool> active{true};
+        //! true if the callback raised the interrupt in the thread
+        std::atomic<bool> raised{false};
+        //! the Python thread ID of the thread
+        unsigned long thread_id;
+        //! the program whose interpreter the thread runs in
+        const QorePythonProgram* pypgm;
+    };
+    //! set if the Program has a sandbox manager, so that SandboxManager::requestInterrupt() interrupts the Python
+    //! code (see registerInterrupt())
+    std::shared_ptr<InterruptState> interrupt;
+    //! the sandbox manager that the cancel callback is registered with
+    std::unique_ptr<QoreSandboxManagerHelper> interrupt_smh;
+
+    //! registers a cancel callback with the sandbox manager of the current Program, if any, which raises
+    //! KeyboardInterrupt in the thread (PyThreadState_SetAsyncExc()); only for the first helper of the program in the
+    //! thread
+    DLLLOCAL void registerInterrupt();
+
+    //! clears an undelivered interrupt (with the GIL held) before the context is released
+    DLLLOCAL void deactivateInterrupt();
+
+    //! waits for a running cancel callback and removes it (without the GIL)
+    DLLLOCAL void deregisterInterrupt();
 
     DLLLOCAL static thread_local const QorePythonHelper* current;
 };

@@ -73,6 +73,23 @@ p.callFunction("join", t);
     With a free-threaded %Python build (PEP 703), daemon threads are disabled in the interpreters of the module:
     starting one raises a %Python \c RuntimeError.
 
+    @section python_interrupts Interrupts, Deletion and Signals
+
+    @ref Qore::SandboxManager::requestInterrupt() "SandboxManager::requestInterrupt()" on the sandbox manager of a
+    %Program interrupts the %Python code that its threads run: \c KeyboardInterrupt is raised in the %Python code
+    (it is a \c BaseException, so \c except \c Exception does not catch it), and the call from %Qore raises
+    \c PROGRAM-INTERRUPTED.  Deleting a @ref Python::PythonProgram "PythonProgram" while other threads run its
+    %Python code interrupts the code in the same way, and the calls raise \c PYTHON-INTERPRETER-DELETED; the deletion
+    waits until the threads have left the interpreter.
+
+    @note %Python code that is blocked in a call (ex: \c time.sleep() or a blocking read) is interrupted when the call
+    returns; the interrupt and the deletion wait for it.
+
+    When %Qore is the host, it handles signals in its own signal thread and blocks them in all other threads, so the
+    processes that %Python code starts inherit the blocked signals.  When %Python is the host (\c import
+    \c qoreloader), %Qore is initialized without its signal handling: %Python handles the signals of the process
+    (ex: \c KeyboardInterrupt for \c SIGINT), and %Qore APIs that handle signals are not available.
+
     @section python_fork Processes Created with fork()
 
     The %Python interpreters of the module are %Python subinterpreters, in which %Python does not support \c fork():

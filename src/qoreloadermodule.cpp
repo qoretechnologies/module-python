@@ -553,7 +553,9 @@ static int slot_qoreloader_exec(PyObject *m) {
         // initialize qore library if necessary
         if (!q_libqore_initalized()) {
             printd(5, "PyInit_qoreloader() initializing Qore library\n");
-            qore_init(QL_MIT);
+            // Python is the host: it owns the process's signal handling, so Qore must not block the signals (which
+            // the process's threads and child processes inherit) or handle them in its own thread
+            qore_init(QL_MIT, nullptr, false, QLO_DISABLE_SIGNAL_HANDLING);
             qore_needs_shutdown = true;
             printd(5, "PyInit_qoreloader() Qore library initialized\n");
 

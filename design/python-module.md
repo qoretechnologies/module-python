@@ -191,6 +191,21 @@ Qore exception in its arguments, and a Qore exception was then guessed from a `R
 `QorePythonStackLocationHelper` adds the Python frames to the Qore call stack of Qore code called from Python (Qore
 methods, callables and functions), starting with the innermost frame (`sys._getframe(0)`).
 
+## Interrupts, Deletion and Signals
+
+`QorePythonHelper` (with an `ExceptionSink`, the entry of Qore calls into Python) registers a cancel callback with the
+sandbox manager of the current Program, if any, for the first helper of the program in the thread; the callback takes
+the state's mutex, attaches to the interpreter (a `QorePythonHelper` on the requesting thread) and, if the helper is
+still active, raises `KeyboardInterrupt` in the thread with `PyThreadState_SetAsyncExc()`.  The helper's destructor
+clears `active` and an undelivered async exception with the GIL held, releases the context, and only then takes the
+mutex (waiting for a running callback, which needs the GIL) and removes the callback.  `checkPythonException()` raises
+`PROGRAM-INTERRUPTED` for `KeyboardInterrupt` when `qore_check_cancel()` reports the interrupt, and
+`PYTHON-INTERPRETER-DELETED` when the program is being deleted: `deleteIntern()` raises `KeyboardInterrupt` in the
+threads of the program's thread map (other than its own) before waiting for them.
+
+`slot_qoreloader_exec()` initializes Qore with `QLO_DISABLE_SIGNAL_HANDLING`, as Python owns the signals of a process
+that it hosts.
+
 ## Python Iterators
 
 The Qore class of a Python type with `__next__` (and without attributes named `next`, `getValue` or `valid`) has
