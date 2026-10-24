@@ -43,6 +43,8 @@ QorePythonClass::QorePythonClass(QorePythonProgram* pypgm, const char* name, con
         autoTypeInfo, gateParamTypeInfo);
 
     addMember(PYOBJ_KEY, Internal, autoTypeInfo);
+    // assignments to the members of the object and their removal and deletion are Python attribute writes
+    setMemberWriteGate(memberWriteGate);
 
     setPublicMemberFlag();
 }
@@ -120,6 +122,55 @@ QoreValue QorePythonClass::memberGate(const QoreMethod& meth, void* m, QoreObjec
 
     const QorePythonClass* cls = static_cast<const QorePythonClass*>(meth.getClass());
     return cls->getPythonMember(pypgm, mname->c_str(), pd, xsink);
+}
+
+// static function
+QoreValue QorePythonClass::memberWriteGate(QoreObject* self, AbstractPrivateData* data, const char* member,
+        QoreValue value, QoreMemberWriteOp operation, ExceptionSink* xsink) {
+    QorePythonPrivateData* pd = static_cast<QorePythonPrivateData*>(data);
+    QorePythonProgram* pypgm = pd->getOwner();
+    if (!pypgm) {
+        xsink->raiseException("PYTHON-OBJECT-ERROR", "cannot write member '%s': the object has no Python object",
+            member);
+        return QoreValue();
+    }
+    QorePythonHelper qph(pypgm, xsink);
+    if (*xsink || pypgm->checkValid(xsink)) {
+        return QoreValue();
+    }
+    PyObject* pyobj = pd->get();
+    assert(pyobj);
+
+    if (operation == QoreMemberWriteOp::Assign) {
+        QorePythonReferenceHolder pyval(pypgm->getPythonValue(value, xsink));
+        if (*xsink) {
+            return QoreValue();
+        }
+        if (PyObject_SetAttrString(pyobj, member, *pyval) < 0) {
+            pypgm->checkPythonException(xsink);
+        }
+        return QoreValue();
+    }
+
+    // removal and deletion return the previous value; a missing attribute has no value, as a missing member
+    QorePythonReferenceHolder old_value(PyObject_GetAttrString(pyobj, member));
+    if (!old_value) {
+        if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            pypgm->checkPythonException(xsink);
+        } else {
+            PyErr_Clear();
+        }
+        return QoreValue();
+    }
+    ValueHolder rv(pypgm->getQoreValue(xsink, old_value), xsink);
+    if (*xsink) {
+        return QoreValue();
+    }
+    if (PyObject_DelAttrString(pyobj, member) < 0) {
+        pypgm->checkPythonException(xsink);
+        return QoreValue();
+    }
+    return rv.release();
 }
 
 QoreValue QorePythonClass::callPythonMethod(ExceptionSink* xsink, QorePythonProgram* pypgm, const char* mname,

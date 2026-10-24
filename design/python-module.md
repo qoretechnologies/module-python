@@ -288,6 +288,14 @@ first entry of a class), and `addPythonTypeAttributes()` adds the methods of the
 class to the subclass in method resolution order, so that they take precedence over the Qore class's methods, which
 the direct base class would otherwise put first.  Test: `subclassDestructorTest()`.
 
+Members that the class does not declare are Python attributes: `memberGate()` reads them, and the member write gate
+(`QoreClass::setMemberWriteGate()`, Qore 3.0) `memberWriteGate()` sets them with `PyObject_SetAttr()` and removes them
+with `PyObject_DelAttr()` (`remove` and `delete` get the previous value, NOTHING if the object has no such
+attribute), so properties, `__slots__` and `__setattr__()`/`__delattr__()` apply.  Qore calls the gate without its
+locks; a compound or nested assignment (`+=`, `obj.h.key = v`) reads the attribute through `memberGate()`, changes a
+copy and writes it back, which is not atomic.  Qore subclasses inherit both gates, with the private data of the
+registering class.  Test: `attributeWriteTest()`.
+
 ## Thread State Cache
 
 `py_thr_map` caches the thread state of each interpreter for each Qore thread ID (`q_gettid()`), and Qore gives the ID

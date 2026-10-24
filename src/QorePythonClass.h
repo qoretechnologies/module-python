@@ -95,6 +95,13 @@ public:
     DLLLOCAL static QoreValue memberGate(const QoreMethod& meth, void* m, QoreObject* self, QorePythonPrivateData* pd,
         const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink);
 
+    //! Assigns, removes or deletes a Python attribute of the object for a member that the class does not declare
+    /** @return NOTHING for an assignment, or the previous value of the attribute for removal and deletion (NOTHING if
+        the object does not have it)
+    */
+    DLLLOCAL static QoreValue memberWriteGate(QoreObject* self, AbstractPrivateData* data, const char* member,
+        QoreValue value, QoreMemberWriteOp operation, ExceptionSink* xsink);
+
     DLLLOCAL static QoreValue methodGate(const QoreMethod& meth, void* m, QoreObject* self, QorePythonPrivateData* pd,
         const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink);
 

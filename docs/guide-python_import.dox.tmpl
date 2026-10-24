@@ -46,7 +46,29 @@ p.issueModuleCmd("python", "import math");
     that defines them.  All the base classes of a %Python class are parent classes of its %Qore class, in the order of
     their declaration.
 
-    The attributes of a %Python object are read as members of the %Qore object (ex: \c obj.attr).  Other methods of
+    The attributes of a %Python object are read and set as members of the %Qore object (ex: \c obj.attr): assigning
+    a member sets the attribute, and \c remove and \c delete delete it (\c remove returns its previous value), as
+    in %Python, so properties, \c __slots__ and \c __setattr__() apply; this also applies to %Qore subclasses of
+    %Python classes.  An assignment that changes the value of the attribute (ex: <tt>obj.count += 1</tt>,
+    <tt>obj.h.key = value</tt>) reads the attribute, changes a %Qore copy of it and assigns the result: a changed
+    \c dict or \c list is a new %Python object, and the sequence is not atomic.
+
+    @par Example:
+    @code{.py}
+PythonProgram p("class Account:
+    def __init__(self):
+        self.balance = 0
+    def report(self):
+        return f'{self.owner}: {self.balance}'
+", "account.py");
+object account = p.callFunction("Account");
+account.balance += 100;
+account.owner = "sales";
+# "sales: 100"
+printf("%s\n", account.report());
+    @endcode
+
+    Other methods of
     the object are called as %Python gets them from the object (with \c getattr()): callable attributes of the
     object (ex: a \c lambda or a \c functools.partial object stored in the object) and methods added to its class
     after its %Qore class was created are called with all the arguments; calling an attribute that is not callable
@@ -109,8 +131,6 @@ printf("%s\n", pgm.callFunction("render"));
     %Qore object was deleted raises an \c OBJECT-ALREADY-DELETED exception.  Before %Python 3.15, a %Python class whose
     objects cannot have an attribute slot (ex: a subclass of \c tuple) cannot be inherited by a %Qore class that
     overrides its methods.
-    The attributes of the %Python object cannot be read or set as members of the %Qore object of a %Qore subclass
-    yet (see <a href="https://github.com/qoretechnologies/qore/issues/5511">issue 5511</a>).
 
     @par Example:
     @code{.py}

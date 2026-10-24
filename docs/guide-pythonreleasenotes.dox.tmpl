@@ -66,7 +66,10 @@
       from exported classes); callable attributes of %Python objects (ex: a \c lambda stored in the object) can be
       called as methods; methods that are not methods of the %Qore class (ex: added to the %Python class later) get
       their first argument, which was dropped; all the base classes of a %Python class are parent classes of its
-      %Qore class (only the first was) (see @ref python_classes_in_qore;
+      %Qore class (only the first was); assigning, removing and deleting members of the %Qore objects of %Python
+      objects, also of %Qore subclasses of %Python classes, sets and deletes the %Python attributes (assignments
+      changed only the %Qore object), and the attributes of the %Python objects of %Qore subclasses are members
+      (requires %Qore 3.0) (see @ref python_classes_in_qore;
       <a href="https://github.com/qoretechnologies/qore/issues/5499">issue 5499</a>)
     - %Python code calls the %Qore overrides of the methods of a %Python class that a %Qore class inherits (ex:
       \c self.hook() in a method of the %Python class called the %Python method), also from \c __init__(), and the

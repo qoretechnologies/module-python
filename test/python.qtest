@@ -230,6 +230,7 @@ class PythonTest inherits Test {
         addTestCase("named argument calls", \namedArgumentTest());
         addTestCase("keyword arguments between Qore and Python", \keywordArgumentTest());
         addTestCase("class methods, callable attributes and base classes of Python classes", \pythonClassTest());
+        addTestCase("assigning, removing and deleting the attributes of Python objects", \attributeWriteTest());
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
         addTestCase("identity, attributes and weak references of Qore objects in Python", \qoreObjectProtocolTest());
         addTestCase("static members, enums and hashdecls of Qore in Python", \qoreDeclarationTest());
@@ -2855,6 +2856,174 @@ string sub made_name() { return Sub::make().name(); }
         assertEq("Sub", pgm.callFunction("made_name"));
     }
 
+    # assigning a member of the Qore object of a Python object sets the Python attribute; removing or deleting the
+    # member deletes it
+    attributeWriteTest() {
+        PythonProgram p("
+class A:
+    def __init__(self):
+        self.v = 1
+        self.d = {'a': 1}
+        self.l = [1, 2]
+        self._p = 0
+    def attrs(self):
+        return sorted(k for k in vars(self) if k != '_p')
+    def has(self, name):
+        return hasattr(self, name)
+    def peek(self, name):
+        return getattr(self, name)
+    @property
+    def prop(self):
+        return self._p
+    @prop.setter
+    def prop(self, value):
+        if value < 0:
+            raise ValueError('negative value')
+        self._p = value * 2
+    @prop.deleter
+    def prop(self):
+        self._p = -1
+    @property
+    def ro(self):
+        return 'read-only'
+
+class S:
+    __slots__ = ('a', 'b')
+    def __init__(self):
+        self.a = 1
+    def has(self, name):
+        return hasattr(self, name)
+
+class Frozen:
+    def __setattr__(self, name, value):
+        raise TypeError('frozen: ' + name)
+    def __delattr__(self, name):
+        raise TypeError('frozen: ' + name)
+
+class Counter:
+    def __init__(self):
+        self.n = 0
+        self.writes = 0
+    def __setattr__(self, name, value):
+        if name == 'n':
+            object.__setattr__(self, 'writes', getattr(self, 'writes', 0) + 1)
+        object.__setattr__(self, name, value)
+
+def get(name):
+    return globals()[name]()
+", "attrs.py");
+
+        object a = p.callFunction("get", "A");
+        # a new attribute and a changed attribute
+        a.w = "new";
+        a.v = 10;
+        assertEq("new", a.peek("w"));
+        assertEq(10, a.peek("v"));
+        assertEq(("d", "l", "v", "w"), a.attrs());
+        # values are converted to Python values
+        a.h = {"x": (1, 2)};
+        assertEq({"x": (1, 2)}, a.peek("h"));
+        assertEq({"x": (1, 2)}, a.h);
+        # compound assignments read the attribute and write the result
+        a.v += 5;
+        assertEq(15, a.peek("v"));
+        a.v *= 2;
+        assertEq(30, a.v);
+        a.w += "er";
+        assertEq("newer", a.peek("w"));
+        # changing a container writes it back
+        a.d.b = 2;
+        assertEq({"a": 1, "b": 2}, a.peek("d"));
+        a.l += 3;
+        assertEq((1, 2, 3), a.peek("l"));
+        push a.l, 4;
+        assertEq((1, 2, 3, 4), a.peek("l"));
+        # through a reference to the member
+        {
+            reference<auto> r = \a.v;
+            r = 7;
+        }
+        assertEq(7, a.peek("v"));
+        # a dynamic member name
+        string name = "dyn";
+        a{name} = True;
+        assertTrue(a.peek("dyn"));
+
+        # remove returns the previous value and deletes the attribute
+        assertEq("newer", remove a.w);
+        assertFalse(a.has("w"));
+        # removing a missing attribute returns no value
+        assertEq(NOTHING, remove a.nosuch);
+        delete a.dyn;
+        assertFalse(a.has("dyn"));
+        assertEq(("d", "h", "l", "v"), a.attrs());
+
+        # data descriptors are used as in Python
+        a.prop = 4;
+        assertEq(8, a.prop);
+        assertEq(8, a.peek("_p"));
+        assertThrows("builtins.ValueError", "negative value", sub () { a.prop = -1; });
+        assertEq(8, a.prop);
+        assertEq(8, remove a.prop);
+        assertEq(-1, a.peek("_p"));
+        assertThrows("builtins.AttributeError", "ro", sub () { a.ro = 1; });
+        assertEq("read-only", a.ro);
+
+        # __slots__
+        object s = p.callFunction("get", "S");
+        s.b = 2;
+        assertEq(2, s.b);
+        assertTrue(s.has("b"));
+        assertEq(1, remove s.a);
+        assertFalse(s.has("a"));
+        assertThrows("builtins.AttributeError", "c", sub () { s.c = 3; });
+
+        # __setattr__() and __delattr__() are called
+        object f = p.callFunction("get", "Frozen");
+        assertThrows("builtins.TypeError", "frozen: x", sub () { f.x = 1; });
+        object c = p.callFunction("get", "Counter");
+        c.n += 1;
+        c.n = 5;
+        assertEq(5, c.n);
+        assertEq(2, c.writes);
+
+        # an object of a Python class exported to a Program and of a Qore subclass
+        Program pgm(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        pgm.issueModuleCmd("python", "parse attr_test.py #
+class Base:
+    def __init__(self):
+        self.tag = 'base'
+    def show(self):
+        return [self.tag, getattr(self, 'extra', None)]
+");
+        pgm.issueModuleCmd("python", "export-class Base");
+        pgm.parse("
+class Q inherits Base {
+    list<auto> update() {
+        self.tag = 'updated';
+        self.extra = 1;
+        self.extra += 1;
+        return show();
+    }
+}
+list<auto> sub base() {
+    Base b();
+    b.tag = 'set';
+    b.extra = 2;
+    return b.show();
+}
+object sub new_q() { return new Q(); }
+", "attr_test");
+        assertEq(("set", 2), pgm.callFunction("base"));
+        object q = pgm.callFunction("new_q");
+        assertEq("base", q.tag);
+        assertEq(("updated", 2), q.update());
+        q.extra = "from outside";
+        assertEq(("updated", "from outside"), q.show());
+        assertEq("from outside", remove q.extra);
+        assertEq(("updated", NOTHING), q.show());
+    }
+
     # the Python object of a Qore object whose class inherits a Python class is an object of a generated subclass
     # whose methods that the Qore class overrides call the Qore methods, so that Python code calls the Qore overrides
     qoreOverrideTest() {
@@ -2944,10 +3113,8 @@ object sub new_t() { return new T(); }
         # Python code calls the Qore overrides, with arguments and results converted
         assertEq("run:qore-hook:50", q.run(5));
         # also from __init__()
-        # (Python attributes are read with a Python method: the member gate is not inherited by Qore subclasses; see
-        # qoretechnologies/qore#5511)
-        assertEq("qore-hook", q.get("init_hook"));
-        assertEq("base", q.get("tag"));
+        assertEq("qore-hook", q.init_hook);
+        assertEq("base", q.tag);
         # a Qore exception raised by an override passes through the Python code
         assertThrows("QORE-ERR", "from qore", \q.fail());
         # methods with special names in Qore (copy() is _copy() in Qore)
