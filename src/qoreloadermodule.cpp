@@ -202,7 +202,7 @@ int qpy_register_fork_handlers() {
     qpy_proxy_lock_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_qore_object_proxies",
         qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock, &qpy_proxy_lock);
     if (!qpy_lock_fork_reg || !qpy_global_lock_fork_reg || !qpy_subclass_type_lock_fork_reg
-        || !qpy_proxy_lock_fork_reg) {
+        || !qpy_proxy_lock_fork_reg || QorePythonDeclHandle::registerForkHandler()) {
         qpy_unregister_fork_handlers();
         return -1;
     }
@@ -210,6 +210,7 @@ int qpy_register_fork_handlers() {
 }
 
 void qpy_unregister_fork_handlers() {
+    QorePythonDeclHandle::unregisterForkHandler();
     qore_unregister_fork_handler(qpy_proxy_lock_fork_reg);
     qpy_proxy_lock_fork_reg = nullptr;
     qore_unregister_fork_handler(qpy_subclass_type_lock_fork_reg);

@@ -764,7 +764,7 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                     types.swap(hashdecl_type_map);
                 }
                 for (auto& i : types) {
-                    Py_DECREF(i.second);
+                    Py_DECREF(i.second.type);
                 }
             }
             {
@@ -774,7 +774,7 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                     types.swap(enum_type_map);
                 }
                 for (auto& i : types) {
-                    Py_DECREF(i.second);
+                    Py_DECREF(i.second.type);
                 }
             }
 
@@ -786,10 +786,16 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
             for (auto& i : py_cls_map) {
                 i.second->clearMethods();
             }
+            for (auto& i : stale_py_cls_vec) {
+                i->clearMethods();
+            }
 
             // Release references in both embedded and Python-hosted processes.
             for (auto& i : py_cls_map) {
                 i.second->release();
+            }
+            for (auto& i : stale_py_cls_vec) {
+                i->release();
             }
 
             valid = false;
@@ -934,6 +940,10 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
             delete i.second;
         }
         py_cls_map.clear();
+        for (auto& i : stale_py_cls_vec) {
+            delete i;
+        }
+        stale_py_cls_vec.clear();
     }
 
     if (save_object_callback) {
@@ -1889,8 +1899,15 @@ PythonQoreClass* QorePythonProgram::findCreatePythonClass(const QoreClass& cls, 
 
     py_cls_map_t::iterator i = py_cls_map.lower_bound(&cls);
     if (i != py_cls_map.end() && i->first == &cls) {
-        printd(5, "QorePythonProgram::findCreatePythonClass() returning existing %s.%s\n", mod_name, cls.getName());
-        return i->second;
+        if (i->second->isValid()) {
+            printd(5, "QorePythonProgram::findCreatePythonClass() returning existing %s.%s\n", mod_name,
+                cls.getName());
+            return i->second;
+        }
+        // the class at this address was freed with its Program; the Python class stays usable for its existing
+        // objects and types, which raise an exception when they use the class
+        stale_py_cls_vec.push_back(i->second);
+        i = py_cls_map.erase(i);
     }
 
     std::unique_ptr<PythonQoreClass> py_cls(new PythonQoreClass(this, mod_name, cls, i));
@@ -2350,11 +2367,20 @@ int QorePythonProgram::importQoreEnumToPython(PyObject* mod, const QoreEnumDecl&
 }
 
 PyObject* QorePythonProgram::getEnumType(ExceptionSink* xsink, const QoreEnumDecl* ed) {
+    // a stale type and its handle are released after the lock, as the handle's destructor takes another lock
+    QorePythonReferenceHolder stale;
+    std::shared_ptr<QorePythonDeclHandle> stale_handle;
     {
         AutoLocker al(qpy_subclass_type_lock);
         enum_type_map_t::iterator i = enum_type_map.find(ed);
         if (i != enum_type_map.end()) {
-            return i->second;
+            if (i->second.handle->isValid()) {
+                return i->second.type;
+            }
+            // the enum at this address was freed with its Program
+            stale = i->second.type;
+            stale_handle = std::move(i->second.handle);
+            enum_type_map.erase(i);
         }
     }
 
@@ -2388,7 +2414,9 @@ PyObject* QorePythonProgram::getEnumType(ExceptionSink* xsink, const QoreEnumDec
     QorePythonReferenceHolder args(Py_BuildValue("(sO)", ed->getName(), *members));
     QorePythonReferenceHolder kwargs(Py_BuildValue("{s:s}", "module", "qore.__root__"));
     QorePythonReferenceHolder cls(enum_cls && args && kwargs ? PyObject_Call(*enum_cls, *args, *kwargs) : nullptr);
-    QorePythonReferenceHolder capsule(cls ? PyCapsule_New((void*)ed, nullptr, nullptr) : nullptr);
+    std::shared_ptr<QorePythonDeclHandle> handle = QorePythonDeclHandle::create(ed, ed->getProgram(),
+        QorePythonDeclHandle::ENUM, ed->getName());
+    QorePythonReferenceHolder capsule(cls ? QorePythonDeclHandle::newCapsule(handle) : nullptr);
     if (!capsule || PyObject_SetAttrString(*cls, QORE_PYTHON_ENUM_ATTR, *capsule) < 0) {
         checkPythonException(xsink);
         return nullptr;
@@ -2396,11 +2424,12 @@ PyObject* QorePythonProgram::getEnumType(ExceptionSink* xsink, const QoreEnumDec
 
     AutoLocker al(qpy_subclass_type_lock);
     // another thread can have created the class meanwhile; the map keeps the first one
-    std::pair<enum_type_map_t::iterator, bool> rv = enum_type_map.insert(enum_type_map_t::value_type(ed, *cls));
+    std::pair<enum_type_map_t::iterator, bool> rv = enum_type_map.insert(enum_type_map_t::value_type(ed,
+        decl_type_t{*cls, handle}));
     if (rv.second) {
         cls.release();
     }
-    return rv.first->second;
+    return rv.first->second.type;
 }
 
 static PyMethodDef qore_hashdecl_init_def = {"__init__", reinterpret_cast<PyCFunction>(
@@ -2411,15 +2440,26 @@ static PyMethodDef qore_hashdecl_init_def = {"__init__", reinterpret_cast<PyCFun
 static constexpr const char* QORE_PYTHON_HASHDECL_ATTR = "_qore_hashdecl_";
 
 PyObject* QorePythonProgram::getHashDeclType(ExceptionSink* xsink, const TypedHashDecl* hd) {
+    // a stale type and its handle are released after the lock, as the handle's destructor takes another lock
+    QorePythonReferenceHolder stale;
+    std::shared_ptr<QorePythonDeclHandle> stale_handle;
     {
         AutoLocker al(qpy_subclass_type_lock);
         hashdecl_type_map_t::iterator i = hashdecl_type_map.find(hd);
         if (i != hashdecl_type_map.end()) {
-            return i->second;
+            if (i->second.handle->isValid()) {
+                return i->second.type;
+            }
+            // the hashdecl at this address was freed with its Program
+            stale = i->second.type;
+            stale_handle = std::move(i->second.handle);
+            hashdecl_type_map.erase(i);
         }
     }
 
-    QorePythonReferenceHolder capsule(PyCapsule_New((void*)hd, nullptr, nullptr));
+    std::shared_ptr<QorePythonDeclHandle> handle = QorePythonDeclHandle::create(hd, hd->getProgram(),
+        QorePythonDeclHandle::HASHDECL, hd->getName());
+    QorePythonReferenceHolder capsule(QorePythonDeclHandle::newCapsule(handle));
     QorePythonReferenceHolder func(capsule ? PyCFunction_NewEx(&qore_hashdecl_init_def, *capsule, nullptr)
         : nullptr);
     // an instance method: the object is passed as the first argument
@@ -2448,19 +2488,19 @@ PyObject* QorePythonProgram::getHashDeclType(ExceptionSink* xsink, const TypedHa
     AutoLocker al(qpy_subclass_type_lock);
     // another thread can have created the type meanwhile; the map keeps the first one
     std::pair<hashdecl_type_map_t::iterator, bool> rv = hashdecl_type_map.insert(
-        hashdecl_type_map_t::value_type(hd, *type));
+        hashdecl_type_map_t::value_type(hd, decl_type_t{*type, handle}));
     if (rv.second) {
         type.release();
     }
-    return rv.first->second;
+    return rv.first->second.type;
 }
 
 PyObject* QorePythonProgram::hashDeclInit(PyObject* capsule, PyObject* args, PyObject* kwargs) {
-    const TypedHashDecl* hd = static_cast<const TypedHashDecl*>(PyCapsule_GetPointer(capsule, nullptr));
-    assert(hd);
+    QorePythonDeclHandle* handle = QorePythonDeclHandle::getCapsuleHandle(capsule);
+    assert(handle);
     assert(PyTuple_Check(args));
     if (!PyTuple_GET_SIZE(args) || !PyDict_Check(PyTuple_GET_ITEM(args, 0))) {
-        PyErr_Format(PyExc_TypeError, "%s.__init__() must be called with a dict", hd->getName());
+        PyErr_Format(PyExc_TypeError, "%s.__init__() must be called with a dict", handle->getName().c_str());
         return nullptr;
     }
     PyObject* self = PyTuple_GET_ITEM(args, 0);
@@ -2476,6 +2516,13 @@ PyObject* QorePythonProgram::hashDeclInit(PyObject* capsule, PyObject* args, PyO
         // the default values of the keys; their initializers are Qore code, which runs without the GIL
         ValueHolder defaults(&xsink);
         {
+            // the hashdecl is not freed while its default values are made
+            QorePythonDeclUse use(handle);
+            if (!use) {
+                handle->raiseDeleted();
+                return nullptr;
+            }
+            const TypedHashDecl* hd = static_cast<const TypedHashDecl*>(handle->getDecl());
             QorePythonReleaseGilHelper prgh;
             defaults = new QoreHashNode(hd, &xsink);
         }
@@ -3459,13 +3506,23 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
         PyObject* type_dict = type->tp_dict;
         // returns a borrowed reference
         PyObject* capsule = type_dict ? PyDict_GetItemString(type_dict, QORE_PYTHON_ENUM_ATTR) : nullptr;
-        if (capsule && PyCapsule_CheckExact(capsule)) {
-            const QoreEnumDecl* ed = static_cast<const QoreEnumDecl*>(PyCapsule_GetPointer(capsule, nullptr));
+        QorePythonDeclHandle* handle = QorePythonDeclHandle::getCapsuleHandle(capsule);
+        if (handle) {
             QorePythonReferenceHolder name(PyObject_GetAttrString(val, "name"));
             const char* namestr = name && PyUnicode_Check(*name) ? PyUnicode_AsUTF8(*name) : nullptr;
-            const QoreEnumMember* member = namestr ? ed->findMember(namestr) : nullptr;
-            if (member) {
-                return QoreValue::makeEnum(member);
+            if (namestr) {
+                // the enum is not freed while its member is found
+                QorePythonDeclUse use(handle);
+                if (!use) {
+                    handle->raiseDeleted();
+                    qore_python_conversion_error(this, xsink);
+                    return QoreValue();
+                }
+                const QoreEnumMember* member = static_cast<const QoreEnumDecl*>(handle->getDecl())
+                    ->findMember(namestr);
+                if (member) {
+                    return QoreValue::makeEnum(member);
+                }
             }
             PyErr_Clear();
         }
@@ -3497,16 +3554,25 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
         // an object of the dict subclass of a hashdecl is a hash of the hashdecl
         QorePythonReferenceHolder capsule(PyObject_GetAttrString(reinterpret_cast<PyObject*>(type),
             QORE_PYTHON_HASHDECL_ATTR));
-        if (!capsule || !PyCapsule_CheckExact(*capsule)) {
+        QorePythonDeclHandle* handle = QorePythonDeclHandle::getCapsuleHandle(*capsule);
+        if (!handle) {
             PyErr_Clear();
             return getQoreHashFromDict(xsink, val, rset);
         }
-        const TypedHashDecl* hd = static_cast<const TypedHashDecl*>(PyCapsule_GetPointer(*capsule, nullptr));
         ValueHolder h(getQoreHashFromDict(xsink, val, rset), xsink);
         if (!h) {
             return QoreValue();
         }
-        QoreValue rv = hd->doRuntimeCast(h->get<const QoreHashNode>(), xsink);
+        // the hashdecl is not freed while the hash is converted to it
+        QorePythonDeclUse use(handle);
+        if (!use) {
+            handle->raiseDeleted();
+            qore_python_conversion_error(this, xsink);
+            qore_python_release(h);
+            return QoreValue();
+        }
+        QoreValue rv = static_cast<const TypedHashDecl*>(handle->getDecl())->doRuntimeCast(
+            h->get<const QoreHashNode>(), xsink);
         qore_python_release(h);
         return rv;
     }
@@ -3834,7 +3900,13 @@ PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* 
     // a value of a Qore enum is the member of the enum's Python enum class
     if (val.isEnum()) {
         const QoreEnumMember* member = val.getEnumMember();
-        PyObject* cls = getEnumType(xsink, member->getEnumDecl());
+        const QoreEnumDecl* ed = member->getEnumDecl();
+        // an enum without a Program outside the system namespace has outlived the Program that declared it, so it
+        // has no Python enum class, which would outlive it: the value is its member's value
+        if (!ed->getProgram() && !ed->isSystem()) {
+            return getPythonValueIntern(member->getValue(), xsink);
+        }
+        PyObject* cls = getEnumType(xsink, ed);
         if (!cls) {
             return nullptr;
         }
@@ -3889,7 +3961,9 @@ PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* 
                 dict = getPythonDict(xsink, h);
             }
             const TypedHashDecl* hd = h->getHashDecl();
-            if (!dict || !hd) {
+            // a hashdecl without a Program outside the system namespace has outlived the Program that declared it, so
+            // it has no Python type, which would outlive it: the hash is a dict
+            if (!dict || !hd || (!hd->getProgram() && !hd->isSystem())) {
                 return dict.release();
             }
             // a hash of a hashdecl is an object of the hashdecl's dict subclass
@@ -3939,7 +4013,15 @@ PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* 
             // A foreign interpreter's Python object must remain behind its Qore
             // proxy. Passing the raw object lets the receiving interpreter's GC
             // traverse and corrupt the owner's object graph during finalization.
-            PythonQoreClass* py_cls = findCreatePythonClass(*o->getClass(), "qore");
+            const QoreClass* cls = o->getClass();
+            // a class without a Program outside the system namespace has outlived the Program that declared it, so
+            // it has no Python class, which would outlive it
+            if (!cls->getProgram() && !cls->isSystem()) {
+                xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert an object of class '%s' to Python: the "
+                    "Qore Program that declared the class has been deleted", cls->getName());
+                return nullptr;
+            }
+            PythonQoreClass* py_cls = findCreatePythonClass(*cls, "qore");
             return py_cls->wrap(o);
         }
     }
@@ -4609,7 +4691,9 @@ QoreClass* QorePythonProgram::getCreateQorePythonClass(ExceptionSink* xsink, PyT
     }
 
     strset_t nsset;
-    return getCreateQorePythonClassIntern(xsink, type, nsset, nullptr, flags);
+    // the Qore classes of Python types made for Qore classes are not freed while the class is created
+    QorePythonDeclUseList uses;
+    return getCreateQorePythonClassIntern(xsink, type, nsset, uses, nullptr, flags);
 }
 
 QoreNamespace* QorePythonProgram::getNamespaceForObject(PyObject* obj) {
@@ -4664,12 +4748,22 @@ QoreNamespace* QorePythonProgram::getNamespaceForObject(PyObject* obj) {
 }
 
 QoreClass* QorePythonProgram::getCreateQorePythonClassIntern(ExceptionSink* xsink, PyTypeObject* type,
-        strset_t& nsset, const char* cname, int flags) {
+        strset_t& nsset, QorePythonDeclUseList& uses, const char* cname, int flags) {
     //printd(5, "QorePythonProgram::getCreateQorePythonClassIntern() class: '%s'\n", type->tp_name);
     // see if the Python type already represents a Qore class
     if (PyQoreObjectType_Check(type)) {
         //printd(5, "QorePythonProgram::getCreateQorePythonClassIntern() class: '%s' is Qore\n", type->tp_name);
-        return const_cast<QoreClass*>(PythonQoreClass::getQoreClass(type));
+        QorePythonDeclHandle* handle = PythonQoreClass::getQoreClass(type);
+        if (handle) {
+            std::unique_ptr<QorePythonDeclUse> use(new QorePythonDeclUse(handle));
+            if (*use) {
+                uses.push_back(std::move(use));
+                return const_cast<QoreClass*>(static_cast<const QoreClass*>(handle->getDecl()));
+            }
+            handle->raiseDeleted();
+        }
+        checkPythonException(xsink);
+        return nullptr;
     }
     //printd(5, "QorePythonProgram::getCreateQorePythonClassIntern() creating Qore class for Python class: '%s' \n",
     //  type->tp_name);
@@ -4775,6 +4869,9 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
         python_bases.push_back(t);
     }
 
+    // the Qore classes of the Python types of Qore classes are not freed while they are added as base classes
+    QorePythonDeclUseList uses;
+
     // a Python base class shares the Python object and is a virtual base class; a Qore base class (the base is the
     // Python type of a Qore class) is not: Qore runs the constructor, destructor and copy method of a base class only
     // if it is not virtual, and the destructor of a Qore class must run for the objects of its Python subclasses (its
@@ -4782,7 +4879,7 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
     // a Qore class reached through Python base classes is added first as a non-virtual base class, and the methods of
     // the Python base classes are added to this class, so that they take precedence over the Qore class's methods
     if (qore_base && !python_bases.empty()) {
-        QoreClass* qore_bclass = getCreateQorePythonClassIntern(xsink, qore_base, nsset);
+        QoreClass* qore_bclass = getCreateQorePythonClassIntern(xsink, qore_base, nsset, uses);
         if (!qore_bclass) {
             assert(*xsink);
             return nullptr;
@@ -4796,7 +4893,7 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
     Py_ssize_t base_count = bases && PyTuple_Check(bases) ? PyTuple_GET_SIZE(bases) : 0;
     for (Py_ssize_t i = 0; i < base_count; ++i) {
         PyTypeObject* base = reinterpret_cast<PyTypeObject*>(PyTuple_GET_ITEM(bases, i));
-        QoreClass* bclass = getCreateQorePythonClassIntern(xsink, base, nsset);
+        QoreClass* bclass = getCreateQorePythonClassIntern(xsink, base, nsset, uses);
         if (!bclass) {
             assert(*xsink);
             return nullptr;
@@ -5780,7 +5877,8 @@ int QorePythonProgram::importSymbol(ExceptionSink* xsink, PyObject* value, const
         //printd(5, "QorePythonProgram::importSymbol() class sym: '%s' -> '%s' (%p)\n", symbol,
         //  reinterpret_cast<PyTypeObject*>(value)->tp_name, value);
         strset_t nsset;
-        getCreateQorePythonClassIntern(xsink, reinterpret_cast<PyTypeObject*>(value), nsset);
+        QorePythonDeclUseList uses;
+        getCreateQorePythonClassIntern(xsink, reinterpret_cast<PyTypeObject*>(value), nsset, uses);
         if (*xsink) {
             return -1;
         }

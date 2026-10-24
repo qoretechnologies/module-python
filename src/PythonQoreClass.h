@@ -24,7 +24,9 @@
 #define _QORE_PYTHON_PYTHONQORECLASS_H
 
 #include "python-module.h"
+#include "QorePythonDeclHandle.h"
 
+#include <string>
 #include <vector>
 
 // qore object type
@@ -80,7 +82,17 @@ public:
     */
     DLLLOCAL static PyObject* findProxy(QoreObject* obj);
 
-    DLLLOCAL static const QoreClass* getQoreClass(PyTypeObject* type);
+    //! returns the handle of the Qore class of a Python type made for a Qore class
+    /** @return the handle, valid as long as the type is, or nullptr with a Python exception set
+
+        The class can only be used while a QorePythonDeclUse of the handle is held
+    */
+    DLLLOCAL static QorePythonDeclHandle* getQoreClass(PyTypeObject* type);
+
+    //! returns false if the Program of the Qore class has been deleted
+    DLLLOCAL bool isValid() const {
+        return !handle || handle->isValid();
+    }
 
     //! __dir__(): the Python attributes and the public members of the Qore object
     DLLLOCAL static PyObject* py_dir(PyObject* unused, PyObject* self);
@@ -92,6 +104,8 @@ private:
     typedef std::vector<PyMethodDef> py_meth_vec_t;
     py_meth_vec_t py_normal_meth_vec;
     py_meth_vec_t py_static_meth_vec;
+    //! the names of the methods added to the type, removed by clearMethods()
+    std::vector<std::string> meth_names;
     typedef std::vector<QoreString> strvec_t;
     strvec_t strvec;
     typedef std::vector<QorePythonReferenceHolder> py_obj_vec_t;
@@ -102,14 +116,17 @@ private:
 
     PyTypeObject* py_type;
 
+    //! the handle of the Qore class; nullptr for a Python type extended in Qore
+    std::shared_ptr<QorePythonDeclHandle> handle;
+
     DLLLOCAL void populateClass(QorePythonProgram* pypgm, const QoreClass& qcls, clsset_t& cls_set,
         cstrset_t& meth_set, bool skip_first = true);
 
     DLLLOCAL static int newQoreObject(ExceptionSink& xsink, PyQoreObject* pyself, QoreObject* qobj,
         const QoreClass* qcls, QorePythonProgram* qore_python_pgm);
 
-    // finds the Qore class for the Python type
-    DLLLOCAL static const QoreClass* findQoreClass(PyObject* self);
+    //! finds the handle of the Qore class for the Python type of the object (see getQoreClass())
+    DLLLOCAL static QorePythonDeclHandle* findQoreClass(PyObject* self);
 
     // class methods
     DLLLOCAL static PyObject* exec_qore_method(PyObject* method_capsule, PyObject* args);

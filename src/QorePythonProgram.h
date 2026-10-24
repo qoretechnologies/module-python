@@ -37,6 +37,7 @@
 
 #include "QorePythonClass.h"
 #include "QorePythonPrivateData.h"
+#include "QorePythonDeclHandle.h"
 
 #include <pythonrun.h>
 
@@ -610,15 +611,28 @@ protected:
     typedef std::map<std::pair<qore_classid_t, PyTypeObject*>, PyObject*> subclass_type_map_t;
     subclass_type_map_t subclass_type_map;
 
+    //! the Python type of a Qore declaration
+    struct decl_type_t {
+        //! the type; a reference
+        PyObject* type;
+        //! the handle of the declaration; an entry whose handle is invalid is replaced, as the declaration was freed
+        //! and its address can belong to another declaration
+        std::shared_ptr<QorePythonDeclHandle> handle;
+    };
+
     //! the Python types of hashdecls (dict subclasses): hashdecl -> type; holds references (released in
     //! deleteIntern()); guarded by qpy_subclass_type_lock
-    typedef std::map<const TypedHashDecl*, PyObject*> hashdecl_type_map_t;
+    typedef std::map<const TypedHashDecl*, decl_type_t> hashdecl_type_map_t;
     hashdecl_type_map_t hashdecl_type_map;
 
     //! the Python enum classes of Qore enums: enum -> class; holds references (released in deleteIntern()); guarded by
     //! qpy_subclass_type_lock
-    typedef std::map<const QoreEnumDecl*, PyObject*> enum_type_map_t;
+    typedef std::map<const QoreEnumDecl*, decl_type_t> enum_type_map_t;
     enum_type_map_t enum_type_map;
+
+    //! the Python classes of Qore classes replaced in py_cls_map because the Program of their Qore class was deleted;
+    //! released with the classes in py_cls_map
+    std::vector<PythonQoreClass*> stale_py_cls_vec;
 
     //! maps python functions to Qore functions
     typedef std::map<PyObject*, QoreExternalFunction*> flmap_t;
@@ -723,8 +737,12 @@ protected:
 
     DLLLOCAL QoreNamespace* getNamespaceForObject(PyObject* type);
 
+    //! returns the Qore class of a Python type, creating it if necessary
+    /** @param uses the uses of the Qore classes of the Python types made for Qore classes that are returned or used as
+        base classes; held by the caller until it has used the class
+    */
     DLLLOCAL QoreClass* getCreateQorePythonClassIntern(ExceptionSink* xsink, PyTypeObject* type, strset_t& nsset,
-            const char* cls_name = nullptr, int flags = 0);
+            QorePythonDeclUseList& uses, const char* cls_name = nullptr, int flags = 0);
 
     DLLLOCAL QorePythonClass* addClassToNamespaceIntern(ExceptionSink* xsink, QoreNamespace* ns, PyTypeObject* type,
             const char* cname, clmap_t::iterator i, strset_t& nsset, int flags = 0);

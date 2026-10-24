@@ -826,16 +826,18 @@ DLLLOCAL void init_python_functions(QoreNamespace& ns);
 // called before a Program's data is cleared: the Python program created for the Program (its external data) is
 // deleted while the Program is still valid, so that the Qore objects that its Python objects hold (ex: objects of
 // Python subclasses of the Program's classes) are released, and their destructors run, in a valid Program; the
-// external data is deleted later, when the Program can no longer run code
+// external data is deleted later, when the Program can no longer run code;
+// the Python types of the Program's declarations (classes, hashdecls and enums), which Python programs can hold, are
+// invalidated afterwards, before the declarations are freed (see QorePythonDeclHandle)
 static void python_program_cleanup(QoreProgram* pgm) {
     QorePythonProgram* pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
-    if (!pypgm || pypgm->getQoreProgram() != pgm) {
-        return;
+    if (pypgm && pypgm->getQoreProgram() == pgm) {
+        // the callback cannot report errors: they are printed as unhandled exceptions, as when the external data is
+        // deleted
+        ExceptionSink xsink;
+        pypgm->destructor(&xsink);
     }
-    // the callback cannot report errors: they are printed as unhandled exceptions, as when the external data is
-    // deleted
-    ExceptionSink xsink;
-    pypgm->destructor(&xsink);
+    QorePythonDeclHandle::invalidate(pgm);
 }
 
 static QoreStringNode* python_module_init_intern(bool repeat) {

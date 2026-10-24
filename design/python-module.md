@@ -265,12 +265,43 @@ dict) adds the public members; `weakreflist` is the `__weaklistoffset__` member.
 
 Static members are `qoreloader.QoreStaticMember` descriptors (a per-interpreter class created from Python source in
 `slot_qoreloader_exec()`, held in the module state) whose getter and setter are `PyCFunction`s with the
-`QoreExternalStaticMember` in a capsule.  Enums are `IntEnum`/`StrEnum`/`Enum` classes and hashdecls `dict` subclasses
-(`getEnumType()`, `getHashDeclType()`, cached per program under `qpy_subclass_type_lock`, released in
-`deleteIntern()`); the classes hold the Qore declaration in a capsule attribute (`_qore_enum_`, `_qore_hashdecl_`),
-which `getQoreValue()` uses to convert members to `QoreValue::makeEnum()` values and objects to
-`TypedHashDecl::doRuntimeCast()` hashes; `getPythonValueIntern()` converts `QoreValue::isEnum()` values and hashes with
-`getHashDecl()` to them.  The namespace that Qore creates for an enum's members is not imported (the enum class is).
+`QoreExternalStaticMember` and the handle of its class in a capsule.  Enums are `IntEnum`/`StrEnum`/`Enum` classes
+and hashdecls `dict` subclasses (`getEnumType()`, `getHashDeclType()`, cached per program under
+`qpy_subclass_type_lock`, released in `deleteIntern()`); the classes hold the handle of the Qore declaration in a
+capsule attribute (`_qore_enum_`, `_qore_hashdecl_`), which `getQoreValue()` uses to convert members to
+`QoreValue::makeEnum()` values and objects to `TypedHashDecl::doRuntimeCast()` hashes; `getPythonValueIntern()`
+converts `QoreValue::isEnum()` values and hashes with `getHashDecl()` to them.  The namespace that Qore creates for an
+enum's members is not imported (the enum class is).
+
+## Lifetime of Qore Declarations Used from Python
+
+The Python types of Qore classes, hashdecls and enums can outlive the Program that declared them (ex: a type kept in a
+Python variable after a child Program is deleted), so they do not hold the declarations themselves but a
+`QorePythonDeclHandle` (`QorePythonDeclHandle.h`), following Qore's declaration lifetime protocol
+(`design/declaration-lifetime-api.md` in Qore, qoretechnologies/qore#5517):
+
+- a handle holds the declaration and its owner, `getProgram()` of the declaration when the handle is created (the
+  class of a method or static member); handles with an owner are registered by owner in a global registry (a leaf
+  lock; the registry holds weak pointers, and handles remove themselves when they are destroyed)
+- the capsules of the class type (`__$QCLS__`), of method functions (`method_capsule_t`), of static member
+  descriptors (`static_member_capsule_t`), of hashdecl types and enum classes hold the handle
+- a declaration is only used while a `QorePythonDeclUse` of its handle is held: a use fails once the handle is invalid,
+  and the operation raises `RuntimeError` ("the Qore Program that declared it has been deleted"); a use is held while
+  the Qore code that uses the declaration runs (a constructor or method call, the default values of a hashdecl)
+- the Program cleanup callback (`python_program_cleanup()`), after deleting the Program's own Python program, calls
+  `QorePythonDeclHandle::invalidate()`: the Program's handles are removed from the registry, marked invalid, and the
+  callback waits for their current uses in other threads to end, without the GIL, as a use can wait for the GIL; this
+  happens before Qore frees the Program's declarations
+- the caches keyed by declaration (`hashdecl_type_map`, `enum_type_map`, `py_cls_map`) check the handle of an entry:
+  an entry whose handle is invalid is replaced, as its declaration was freed and its address can belong to another
+  declaration.  A replaced `PythonQoreClass` is kept (`stale_py_cls_vec`) and released with the others, as its Python
+  type can still be used
+- a declaration without an owner in the static system namespace (`isSystem()`) is never invalidated; one without an
+  owner outside it has outlived its Program (it is held by a value) and gets no Python type, which would outlive it:
+  `getPythonValueIntern()` converts its hashes to `dict`s and the values of its enums to their values, and raises
+  `PYTHON-VALUE-ERROR` for the objects of its classes
+- the Qore classes of Python types made for Qore classes, used as base classes of the Qore classes created for Python
+  subclasses, are used (`QorePythonDeclUseList`) while the base classes are added
 
 ## Qore Classes Inheriting Python Classes
 
@@ -726,6 +757,8 @@ When running valgrind:
 - `QorePythonProgram.cpp`: Main interpreter/thread state management
 - `python-module.cpp`: `QorePythonGilHelper` and `QorePythonReleaseGilHelper` classes
 - `QC_PythonProgram.qpp`: Qore API for PythonProgram class
+- `QorePythonDeclHandle.h/.cpp`: handles of the Qore declarations held by Python types (see "Lifetime of Qore
+  Declarations Used from Python")
 
 ## Version History
 

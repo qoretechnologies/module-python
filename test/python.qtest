@@ -243,6 +243,7 @@ class PythonTest inherits Test {
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
+        addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
         addTestCase("identity, attributes and weak references of Qore objects in Python", \qoreObjectProtocolTest());
         addTestCase("the Python objects of Qore objects in weak reference callbacks and initialized again",
             \qoreProxyLifetimeTest());
@@ -3237,6 +3238,139 @@ printf(\"done\\n\");
         assertEq("destructor ran\ndone\n", output);
     }
 
+    # the Python types of the classes, hashdecls and enums of a Program can outlive it: they raise a RuntimeError when
+    # they are used after the Program has been deleted, and the declarations of a new Program get new types
+    declarationLifetimeTest() {
+        PythonProgram pp("
+saved = {}
+def save_hash(h):
+    saved['hash'] = h
+    saved['hash_type'] = type(h)
+def save_enum(e):
+    saved['enum'] = e
+def save_class(o):
+    t = type(o)
+    saved['obj_type'] = t
+    saved['meth'] = t.get
+def make_hash():
+    return saved['hash_type'](a=2)
+def get_hash():
+    return saved['hash']
+def get_enum():
+    return saved['enum']
+def construct():
+    return saved['obj_type']().get()
+def call_method():
+    return saved['meth'](None)
+def static_method():
+    return saved['obj_type'].smeth()
+def get_static():
+    return saved['obj_type'].smem
+def set_static(v):
+    # the descriptor sets the member; assigning to the attribute of the class would replace it
+    saved['obj_type'].__dict__['smem'].__set__(None, v)
+def subclass():
+    class Sub(saved['obj_type']):
+        pass
+    return Sub()
+", "decl_lifetime.py");
+
+        string child_src = "class ChildClass {
+    public {
+        static int smem = 5;
+    }
+    int get() {
+        return 1;
+    }
+    static int smeth() {
+        return 3;
+    }
+}
+enum ChildEnum {
+    A = 1,
+    B = 2,
+}
+hashdecl ChildHash {
+    int a = 0;
+    int b = 4;
+}
+hash<ChildHash> sub get_hash() {
+    return <ChildHash>{\"a\": 1};
+}
+ChildEnum sub get_enum() {
+    return ChildEnum::B;
+}
+bool sub is_b(ChildEnum e) {
+    return e == ChildEnum::B;
+}
+ChildClass sub get_object() {
+    return new ChildClass();
+}
+";
+
+        # the types of a Program's declarations are made and used while it is valid
+        code check_child = sub () {
+            Program child(PO_NEW_STYLE);
+            child.parse(child_src, "child");
+            pp.callFunction("save_hash", child.callFunction("get_hash"));
+            pp.callFunction("save_enum", child.callFunction("get_enum"));
+            pp.callFunction("save_class", child.callFunction("get_object"));
+
+            hash<auto> h = pp.callFunction("make_hash");
+            assertEq("hash<ChildHash>", h.fullType());
+            assertEq({"a": 2, "b": 4}, h);
+            h = pp.callFunction("get_hash");
+            assertEq("hash<ChildHash>", h.fullType());
+            assertEq({"a": 1, "b": 4}, h);
+            auto e = pp.callFunction("get_enum");
+            assertEq("enum<ChildEnum>", e.fullType());
+            assertTrue(child.callFunction("is_b", e));
+            assertEq(1, pp.callFunction("construct"));
+            assertEq(3, pp.callFunction("static_method"));
+            assertEq(5, pp.callFunction("get_static"));
+            pp.callFunction("set_static", 7);
+            assertEq(7, pp.callFunction("get_static"));
+            assertEq(7, child.callFunction("call_static"));
+        };
+        child_src += "int sub call_static() { return ChildClass::smem; }\n";
+        check_child();
+
+        # the Program has been deleted
+        string err = "builtins.RuntimeError";
+        string desc = "the Qore Program that declared it has been deleted";
+        assertThrows(err, "Qore hashdecl 'ChildHash' cannot be used: " + desc, \pp.callFunction(), "make_hash");
+        assertThrows(err, "Qore hashdecl 'ChildHash' cannot be used: " + desc, \pp.callFunction(), "get_hash");
+        assertThrows(err, "Qore enum 'ChildEnum' cannot be used: " + desc, \pp.callFunction(), "get_enum");
+        assertThrows(err, "Qore class 'ChildClass' cannot be used: " + desc, \pp.callFunction(), "construct");
+        assertThrows(err, "Qore class 'ChildClass' cannot be used: " + desc, \pp.callFunction(), "call_method");
+        assertThrows(err, "Qore class 'ChildClass' cannot be used: " + desc, \pp.callFunction(), "static_method");
+        assertThrows(err, "Qore class 'ChildClass' cannot be used: " + desc, \pp.callFunction(), "get_static");
+        assertThrows(err, "Qore class 'ChildClass' cannot be used: " + desc, \pp.callFunction(), ("set_static", 1));
+        assertThrows(err, "Qore class 'ChildClass' cannot be used: " + desc, \pp.callFunction(), "subclass");
+
+        # the same declarations in a new Program get new types
+        check_child();
+
+        # a hashdecl or class that outlives its Program (held by a value) has no Python type, which would outlive it:
+        # its hash is a dict, and its object cannot be converted
+        hash<auto> h;
+        object o;
+        {
+            Program child(PO_NEW_STYLE);
+            child.parse(child_src, "child");
+            h = child.callFunction("get_hash");
+            o = child.callFunction("get_object");
+        }
+        assertEq("hash<ChildHash>", h.fullType());
+        PythonProgram pp2("def type_name(v):\n    return type(v).__name__\ndef echo(v):\n    return v\n", "outlived.py");
+        assertEq("dict", pp2.callFunction("type_name", h));
+        hash<auto> h2 = pp2.callFunction("echo", h);
+        assertEq("hash<auto>", h2.fullType());
+        assertEq({"a": 1, "b": 4}, h2);
+        assertThrows("PYTHON-VALUE-ERROR", "cannot convert an object of class 'ChildClass' to Python: the Qore Program "
+            "that declared the class has been deleted", \pp2.callFunction(), ("type_name", o));
+    }
+
     # the Python object of an object of a Qore class that inherits a Python subclass of a Qore class is the Qore object
     # (another Qore object of the Qore base class was created); the Qore base class is constructed by Qore, so
     # __init__() cannot pass arguments to it
@@ -4049,38 +4183,34 @@ def str_enum_key():
 ", "robust.py");
 
         # values nested too deeply raise STACK-LIMIT-EXCEEDED (Qore's limit of the thread's stack) or
-        # PYTHON-VALUE-ERROR (Python's recursion limit), whichever is reached first; on a thread created by Qore: once
-        # the jni module has created the JVM, the JVM's guard zones in the stack of the primary thread are not known to
-        # Qore or Python
-        Queue results();
-        background sub () {
-            code check = sub (code c) {
-                try {
-                    c();
-                    results.push("no error");
-                } catch (hash<ExceptionInfo> ex) {
-                    results.push(ex.err);
-                }
-            };
-            # Python -> Qore
-            check(sub () { p.callFunction("nested", 1000000); });
-            check(sub () { p.callFunction("nested_dict", 1000000); });
-            # Qore -> Python
+        # PYTHON-VALUE-ERROR (Python's recursion limit), whichever is reached first, also on the primary thread once
+        # the jni module has created the JVM (qoretechnologies/qore#5518)
+        code check = sub (code c) {
+            string err = "no error";
+            try {
+                c();
+            } catch (hash<ExceptionInfo> ex) {
+                err = ex.err;
+            }
+            assertTrue(err == "STACK-LIMIT-EXCEEDED" || err == "PYTHON-VALUE-ERROR", err);
+        };
+        # Python -> Qore
+        check(sub () { p.callFunction("nested", 1000000); });
+        check(sub () { p.callFunction("nested_dict", 1000000); });
+        # Qore -> Python
+        {
             auto deep = ();
             for (int i = 0; i < 1000000; ++i) {
                 deep = (deep,);
             }
             check(sub () { p.callFunction("depth", deep); });
-            delete deep;
+        }
+        {
             hash<auto> deep_hash = {};
             for (int i = 0; i < 1000000; ++i) {
                 deep_hash = {"a": deep_hash};
             }
             check(sub () { p.callFunction("depth", deep_hash); });
-        }();
-        for (int i = 0; i < 4; ++i) {
-            string err = results.get();
-            assertTrue(err == "STACK-LIMIT-EXCEEDED" || err == "PYTHON-VALUE-ERROR", err);
         }
         # a moderately nested value is converted
         list<auto> l = p.callFunction("nested", 50);

@@ -160,6 +160,7 @@ set(CPP_SRC
     src/PythonQoreCallable.cpp
     src/ModuleNamespace.cpp
     src/QorePythonStackLocationHelper.cpp
+    src/QorePythonDeclHandle.cpp
 )
 
 if (QORE_PYTHON_HAVE_INTERNAL_C_HEADERS)
