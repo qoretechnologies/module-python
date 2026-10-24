@@ -24,8 +24,15 @@
       performed before acquiring the Python GIL when a sandbox manager is active
       (<a href="https://github.com/qoretechnologies/qore/issues/5116">issue 5116</a>)
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
+    - %Qore code can call %Python functions and methods with keyword arguments with the new \c keyword_arguments
+      argument of @ref Python::PythonProgram::callFunctionArgs() "PythonProgram::callFunctionArgs()" and
+      @ref Python::PythonProgram::callMethodArgs() "PythonProgram::callMethodArgs()" (see
+      @ref python_keyword_arguments; <a href="https://github.com/qoretechnologies/qore/issues/5498">issue 5498</a>)
 
     <b>Bug Fixes:</b>
+    - keyword arguments in calls from %Python to %Qore callables and constructors raise a \c TypeError, as they do for
+      %Qore functions and methods, instead of being ignored (ex: <tt>Mutex(bogus=1)</tt> created a \c Mutex)
+      (<a href="https://github.com/qoretechnologies/qore/issues/5498">issue 5498</a>)
     - exceptions are converted consistently and without losing information between %Qore and %Python (see
       @ref python_exceptionsguide): %Qore exceptions are raised in %Python as \c qoreloader.QoreException (a
       \c RuntimeError that can be imported with <tt>from qoreloader import QoreException</tt>, one for each

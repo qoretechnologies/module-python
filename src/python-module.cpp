@@ -506,6 +506,14 @@ int qore_python_thread_registration_init() {
     return PyType_Ready(&QorePythonThreadSentinel_Type);
 }
 
+int qore_python_check_no_kwargs(PyObject* kwargs, const char* name) {
+    if (!kwargs || !PyDict_Size(kwargs)) {
+        return 0;
+    }
+    PyErr_Format(PyExc_TypeError, "%s takes no keyword arguments", name);
+    return -1;
+}
+
 int qore_python_register_thread() {
     int rc = q_register_foreign_thread();
     if (rc == QFT_REGISTERED) {

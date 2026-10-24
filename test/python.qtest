@@ -146,6 +146,7 @@ class PythonTest inherits Test {
         addTestCase("module spec failure recovery", \moduleSpecFailureTest());
         addTestCase("references surviving interpreter finalization", \persistentReferenceFinalizationTest());
         addTestCase("named argument calls", \namedArgumentTest());
+        addTestCase("keyword arguments between Qore and Python", \keywordArgumentTest());
         addTestCase("import test", \importTest());
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
@@ -2586,6 +2587,82 @@ class Calc:
         PythonProgram::evalStatementKeep(source_code: "static_named_value = 11", source_label: "static_keep.py");
         assertEq(11, PythonProgram::evalExpression(source_code: "static_named_value", source_label: "static_expr.py"));
         PythonProgram::setSaveObjectCallback(save_object_callback: NOTHING);
+    }
+
+    # Qore code calls Python functions and methods with keyword arguments; keyword arguments in calls from Python to
+    # Qore code, which takes positional arguments, raise TypeError instead of being ignored
+    keywordArgumentTest() {
+        PythonProgram p("
+from qore.__root__.Qore.Thread import Mutex
+from qore import sprintf
+
+def f(a, b=2, *, c=3):
+    return [a, b, c]
+
+class K:
+    @staticmethod
+    def s(a, b=2):
+        return [a, b]
+
+def type_error(f):
+    try:
+        f()
+    except TypeError as e:
+        return str(e)
+
+def callable_kw(f):
+    return type_error(lambda: f(1, extra=2))
+
+def constructor_kw():
+    return type_error(lambda: Mutex(bogus=1))
+
+def function_kw():
+    return type_error(lambda: sprintf('%d', 1, extra=2))
+
+def method_kw():
+    return type_error(lambda: Mutex().lock(timeout=1))
+
+class Named(Mutex):
+    def __init__(self, name=None):
+        super().__init__()
+        self.name = name
+
+class Plain(Mutex):
+    pass
+
+def subclass_kw():
+    return [Named(name='n').name, type_error(lambda: Plain(bogus=1))]
+", "kw.py");
+
+        # Qore -> Python
+        assertEq((1, 3, 4), p.callFunctionArgs("f", 1, {"b": 3, "c": 4}));
+        assertEq((5, 2, 3), p.callFunctionArgs("f", NOTHING, {"a": 5}));
+        assertEq((1, 2, 9), p.callFunctionArgs(function_name: "f", arguments: (1,), keyword_arguments: {"c": 9}));
+        assertEq((1, 2, 3), p.callFunctionArgs("f", 1, {}));
+        assertEq((1, 7), p.callMethodArgs("K", "s", 1, {"b": 7}));
+        assertEq((1, 8), p.callMethodArgs(class_name: "K", method_name: "s", arguments: 1,
+            keyword_arguments: {"b": 8}));
+        assertThrows("builtins.TypeError", "unexpected keyword argument 'zz'", \p.callFunctionArgs(), ("f", 1,
+            {"zz": 1}));
+        assertThrows("builtins.TypeError", "multiple values for argument 'b'", \p.callFunctionArgs(), ("f", (1, 2),
+            {"b": 1}));
+        int i = 1;
+        assertThrows("PYTHON-VALUE-ERROR", "while converting the keyword arguments", \p.callFunctionArgs(),
+            ("f", 1, {"b": \i}));
+
+        # Python -> Qore
+        *list<auto> args;
+        bool called = False;
+        assertEq("a Qore callable takes no keyword arguments",
+            p.callFunction("callable_kw", sub () { called = True; args = argv; }));
+        # the callable was not called
+        assertFalse(called);
+        assertEq(NOTHING, args);
+        assertEq("qore.Thread.Mutex() takes no keyword arguments", p.callFunction("constructor_kw"));
+        assertRegex("takes no keyword arguments", p.callFunction("function_kw"));
+        assertRegex("takes no keyword arguments", p.callFunction("method_kw"));
+        # a Python subclass of a Qore class takes the keyword arguments of its __init__()
+        assertEq(("n", "Plain() takes no keyword arguments"), p.callFunction("subclass_kw"));
     }
 
     # Python values that a Qore value cannot represent raise an exception instead of crashing the process: containers

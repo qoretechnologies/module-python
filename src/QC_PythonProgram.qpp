@@ -100,15 +100,30 @@ auto PythonProgram::callFunction(string func_name, ...) {
 //! Call the given function and return the result
 /** @param function_name the function name to call
     @param arguments arguments to the function as a list converted to Python values as per @ref python_qore_to_python
+    @param keyword_arguments keyword arguments to the function: the keys are the names of the arguments, and the
+    values are converted to Python values as per @ref python_qore_to_python
 
     @return the return value of the Python function converted to Qore as per @ref python_python_to_qore
 
+    @par Example:
+    @code{.py}
+PythonProgram p("def send(to, subject, cc=None, priority='normal'):\n"
+    "    return [to, subject, cc, priority]", "mail.py");
+# ["ops@example.com", "disk full", NOTHING, "high"]
+list<auto> l = p.callFunctionArgs("send", ("ops@example.com", "disk full"), {"priority": "high"});
+    @endcode
+
     @throw NO-FUNCTION the given function cannot be found in the Python program's module dictionary
 
+    @note Python raises \c builtins.TypeError if the function does not take a keyword argument given
+
     @see @ref python_exceptionsguide
+
+    @since python 1.3 the \a keyword_arguments argument
 */
-auto PythonProgram::callFunctionArgs(string function_name, *softlist<auto> arguments) [flags=NAMED_ARGS] {
-    return pp->callFunction(xsink, function_name, arguments);
+auto PythonProgram::callFunctionArgs(string function_name, *softlist<auto> arguments, *hash<auto> keyword_arguments)
+        [flags=NAMED_ARGS] {
+    return pp->callFunction(xsink, function_name, arguments, 0, keyword_arguments);
 }
 
 //! Call the given method and return the result
@@ -131,16 +146,31 @@ auto PythonProgram::callMethod(string class_name, string method_name, ...) {
 /** @param class_name the name of the class implementing the method to call
     @param method_name the method to call
     @param arguments arguments to the method as a list converted to Python values as per @ref python_qore_to_python
+    @param keyword_arguments keyword arguments to the method: the keys are the names of the arguments, and the values
+    are converted to Python values as per @ref python_qore_to_python
 
     @return the return value of the Python method call converted to Qore as per @ref python_python_to_qore
+
+    @par Example:
+    @code{.py}
+PythonProgram p("class Report:\n    @staticmethod\n    def render(rows, fmt='text', title=None):\n"
+    "        return '%s:%s:%d' % (fmt, title, len(rows))", "report.py");
+# "csv:Daily:2"
+string s = p.callMethodArgs("Report", "render", ((1, 2),), {"fmt": "csv", "title": "Daily"});
+    @endcode
 
     @throw NO-CLASS the given class cannot be found in the Python program's module dictionary
     @throw NO-METHOD the given method cannot be found in the class
 
+    @note Python raises \c builtins.TypeError if the method does not take a keyword argument given
+
     @see @ref python_exceptionsguide
+
+    @since python 1.3 the \a keyword_arguments argument
 */
-auto PythonProgram::callMethodArgs(string class_name, string method_name, *softlist<auto> arguments) [flags=NAMED_ARGS] {
-    return pp->callMethod(xsink, class_name, method_name, arguments);
+auto PythonProgram::callMethodArgs(string class_name, string method_name, *softlist<auto> arguments,
+        *hash<auto> keyword_arguments) [flags=NAMED_ARGS] {
+    return pp->callMethod(xsink, class_name, method_name, arguments, 0, keyword_arguments);
 }
 
 //! Parse, compile, and evaluate the given statement and return any result; declarations are not persistent

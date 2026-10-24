@@ -149,6 +149,10 @@ PyObject* qore_callable_call(PyQoreCallable* self, PyObject* args, PyObject* kwa
         PyErr_SetString(PyExc_ValueError, desc.c_str());
         return nullptr;
     }
+    // Qore code takes positional arguments; keyword arguments are not ignored
+    if (qore_python_check_no_kwargs(kwargs, "a Qore callable")) {
+        return nullptr;
+    }
 
     QorePythonQoreEntryHelper qeh;
     if (!qeh.check()) {

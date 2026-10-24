@@ -581,6 +581,11 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
     //printd(5, "PythonQoreClass::py_init() self: %p '%s' args: %p (%d: %s) kwds: %p\n", self, Py_TYPE(self)->tp_name,
     //  args, (int)PyTuple_Size(args), PyUnicode_AsUTF8(*argstr), kwds);
 
+    // Qore constructors take positional arguments; keyword arguments are not ignored
+    if (kwds && qore_python_check_no_kwargs(kwds, QoreStringMaker("%s()", Py_TYPE(self)->tp_name).c_str())) {
+        return -1;
+    }
+
     QorePythonQoreEntryHelper qeh;
     if (!qeh.check()) {
         return -1;

@@ -133,24 +133,29 @@ public:
             int input, bool encapsulate);
 
     //! Call the function and return the result
+    /** @param kwargs the keyword arguments of the call, if any
+    */
     DLLLOCAL QoreValue callFunction(ExceptionSink* xsink, const QoreString& func_name, const QoreListNode* args,
-        size_t arg_offset = 0);
+        size_t arg_offset = 0, const QoreHashNode* kwargs = nullptr);
 
     //! Call a method and return the result
     /** converts the string arguments to UTF-8 and makes the call
     */
     DLLLOCAL QoreValue callMethod(ExceptionSink* xsink, const QoreString& class_name, const QoreString& method_name,
-        const QoreListNode* args, size_t arg_offset = 0);
+        const QoreListNode* args, size_t arg_offset = 0, const QoreHashNode* kwargs = nullptr);
 
     //! Call a method and return the result
     /** string args are assumed to be in UTF-8 encoding
     */
     DLLLOCAL QoreValue callMethod(ExceptionSink* xsink, const char* cname, const char* mname,
-        const QoreListNode* args, size_t arg_offset = 0, PyObject* first = nullptr);
+        const QoreListNode* args, size_t arg_offset = 0, PyObject* first = nullptr,
+        const QoreHashNode* kwargs = nullptr);
 
     //! Call a callable and and return the result
+    /** @param kwargs the keyword arguments of the call, if any; the keys are the names of the arguments
+    */
     DLLLOCAL QoreValue callInternal(ExceptionSink* xsink, PyObject* callable, const QoreListNode* args,
-        size_t arg_offset = 0, PyObject* first = nullptr);
+        size_t arg_offset = 0, PyObject* first = nullptr, const QoreHashNode* kwargs = nullptr);
 
     //! Call a callable and and return the result as a Python value
     DLLLOCAL PyObject* callPythonInternal(ExceptionSink* xsink, PyObject* callable, const QoreListNode* args,

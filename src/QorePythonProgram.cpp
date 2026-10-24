@@ -3591,7 +3591,7 @@ QoreNumberNode* QorePythonProgram::getQoreNumberFromDecimal(ExceptionSink* xsink
 }
 
 QoreValue QorePythonProgram::callFunction(ExceptionSink* xsink, const QoreString& func_name, const QoreListNode* args,
-        size_t arg_offset) {
+        size_t arg_offset, const QoreHashNode* kwargs) {
     assert(!haveGil());
     //printd(5, "QorePythonProgram::callFunction() this: %p func: '%s' module: %p module_dict: %p valid: %d\n",
     //    this, func_name.c_str(), *module, module_dict, (int)valid);
@@ -3625,14 +3625,14 @@ QoreValue QorePythonProgram::callFunction(ExceptionSink* xsink, const QoreString
         }
 
         //printd(5, "QorePythonProgram::callFunction() this: %p %s()\n", this, func_name.c_str());
-        rv = callInternal(xsink, py_func, args, arg_offset);
+        rv = callInternal(xsink, py_func, args, arg_offset, nullptr, kwargs);
     }
     assert(!haveGil());
     return rv.release();
 }
 
 QoreValue QorePythonProgram::callMethod(ExceptionSink* xsink, const QoreString& class_name,
-    const QoreString& method_name, const QoreListNode* args, size_t arg_offset) {
+    const QoreString& method_name, const QoreListNode* args, size_t arg_offset, const QoreHashNode* kwargs) {
     TempEncodingHelper cname(class_name, QCS_UTF8, xsink);
     if (*xsink) {
         xsink->appendLastDescription(" (while processing the \"class_name\" argument)");
@@ -3645,11 +3645,11 @@ QoreValue QorePythonProgram::callMethod(ExceptionSink* xsink, const QoreString& 
         return QoreValue();
     }
 
-    return callMethod(xsink, cname->c_str(), mname->c_str(), args, arg_offset);
+    return callMethod(xsink, cname->c_str(), mname->c_str(), args, arg_offset, nullptr, kwargs);
 }
 
 QoreValue QorePythonProgram::callMethod(ExceptionSink* xsink, const char* cname, const char* mname,
-    const QoreListNode* args, size_t arg_offset, PyObject* first) {
+    const QoreListNode* args, size_t arg_offset, PyObject* first, const QoreHashNode* kwargs) {
     // set Qore program context for Qore APIs
     QoreExternalProgramContextHelper pch(xsink, qpgm);
     if (*xsink) {
@@ -3687,11 +3687,11 @@ QoreValue QorePythonProgram::callMethod(ExceptionSink* xsink, const char* cname,
 
     //printd(5, "QorePythonProgram::callMethod() %s::%s() args: %d\n", cname, mname, args ? (int)args->size() : 0);
 
-    return callInternal(xsink, *py_method, args, arg_offset);
+    return callInternal(xsink, *py_method, args, arg_offset, first, kwargs);
 }
 
 QoreValue QorePythonProgram::callInternal(ExceptionSink* xsink, PyObject* callable, const QoreListNode* args,
-    size_t arg_offset, PyObject* first) {
+    size_t arg_offset, PyObject* first, const QoreHashNode* kwargs) {
     // set Qore program context for Qore APIs
     QoreExternalProgramContextHelper pch(xsink, qpgm);
     if (*xsink) {
@@ -3704,7 +3704,16 @@ QoreValue QorePythonProgram::callInternal(ExceptionSink* xsink, PyObject* callab
     }
     //printd(5, "QorePythonProgram::callInternal() f: %p args: %d (%d) self: %p\n", callable,
     //    args ? (int)args->size() : 0, (int)arg_offset, first);
-    QorePythonReferenceHolder rv(callPythonInternal(xsink, callable, args, arg_offset, first));
+    // the keys of the hash are the names of the keyword arguments
+    QorePythonReferenceHolder py_kwargs;
+    if (kwargs && !kwargs->empty()) {
+        py_kwargs = getPythonDict(xsink, kwargs);
+        if (*xsink) {
+            xsink->appendLastDescription(" (while converting the keyword arguments)");
+            return QoreValue();
+        }
+    }
+    QorePythonReferenceHolder rv(callPythonInternal(xsink, callable, args, arg_offset, first, *py_kwargs));
     return *xsink ? QoreValue() : getQoreValue(xsink, rv);
 }
 

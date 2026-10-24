@@ -45,6 +45,24 @@
     %Qore APIs called from %Python remain subject to the restrictions and the sandbox of the %Program whose %Python
     code calls them, also on threads created by %Python (see @ref python_created_threads).
 
+    @section python_keyword_arguments Keyword Arguments
+
+    %Qore code calls %Python functions and methods with keyword arguments with
+    @ref Python::PythonProgram::callFunctionArgs() "PythonProgram::callFunctionArgs()" and
+    @ref Python::PythonProgram::callMethodArgs() "PythonProgram::callMethodArgs()", whose \c keyword_arguments hash
+    gives the names and the values of the keyword arguments:
+
+    @code{.py}
+PythonProgram p("def send(to, subject, cc=None, priority='normal'):\n"
+    "    return [to, subject, cc, priority]", "mail.py");
+# ["ops@example.com", "disk full", NOTHING, "high"]
+list<auto> l = p.callFunctionArgs("send", ("ops@example.com", "disk full"), {"priority": "high"});
+    @endcode
+
+    %Qore functions, methods, constructors and callables take positional arguments; calling them from %Python with
+    keyword arguments raises a \c TypeError (ex: <tt>Mutex(timeout=1)</tt>: \c "qore.Thread.Mutex() takes no keyword
+    arguments").  A %Python subclass of a %Qore class takes the keyword arguments of its own \c __init__() method.
+
     @section pythondocumentation Documentation
 
     - @anchor python_examples @subpage python_examplesguide

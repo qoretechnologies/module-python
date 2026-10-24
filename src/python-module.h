@@ -521,6 +521,14 @@ protected:
 */
 DLLLOCAL int qore_python_register_thread();
 
+//! raises a Python TypeError if keyword arguments are given in a call of Qore code, which takes positional arguments
+/** @param kwargs the keyword arguments of the call (a dict or nullptr)
+    @param name the Qore code called, for the error message (ex: \c "Qore::Thread::Mutex()")
+
+    @return -1 if keyword arguments were given and the Python exception was raised, 0 if not
+*/
+DLLLOCAL int qore_python_check_no_kwargs(PyObject* kwargs, const char* name);
+
 //! Registers the fork handlers of the program registry locks (qoreloadermodule.cpp); returns -1 if there is no memory
 DLLLOCAL int qpy_register_fork_handlers();
 
