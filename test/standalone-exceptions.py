@@ -20,7 +20,8 @@ def main():
     from qore import call_function
     from qore.__root__.Qore.Thread import Mutex
 
-    # a Qore exception is a qoreloader.QoreException, a RuntimeError, with the location of the Python call
+    # a Qore exception is a qoreloader.QoreException, a RuntimeError, with the location of the Python call (the module
+    # gives normalized paths of Python files)
     assert QoreException.__module__ == "qoreloader", QoreException.__module__
     assert issubclass(QoreException, RuntimeError)
     try:
@@ -32,7 +33,7 @@ def main():
         assert "unlock" in e.desc, e.desc
         assert e.arg is None, e.arg
         assert str(e) == "LOCK-ERROR: " + e.desc, str(e)
-        assert e.file == __file__, e.file
+        assert e.file == os.path.normpath(__file__), (e.file, __file__)
         assert e.line == line, e.line
         assert e.lang == "Python", e.lang
         assert [x["function"] for x in e.callstack] == ["Mutex::unlock", "main", "<module>"], e.callstack
@@ -74,7 +75,7 @@ def main():
         raise AssertionError("no exception")
     except QoreException as e:
         assert (e.err, e.desc, e.arg) == ("PY-ERR", "py desc", {"a": [1, 2]}), (e.err, e.desc, e.arg)
-        assert e.file == __file__, e.file
+        assert e.file == os.path.normpath(__file__), (e.file, __file__)
         assert e.line == line, e.line
 
     # SystemExit raised in a Python callback of Qore code exits the process
