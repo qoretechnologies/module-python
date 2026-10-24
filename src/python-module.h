@@ -655,6 +655,9 @@ public:
     DLLLOCAL QorePythonPersistentReferenceHolder(QorePythonProgram* owner, PyObject* obj);
     DLLLOCAL ~QorePythonPersistentReferenceHolder();
 
+    //! Releases the Python reference and unregisters it; repeated calls do nothing.
+    DLLLOCAL void reset();
+
     DLLLOCAL QorePythonProgram* getOwner() const {
         return owner;
     }

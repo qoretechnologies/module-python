@@ -29,6 +29,7 @@
     information.
 */
 
+#include <qore/QoreSandboxManager.h>
 #include "PythonCallableCallReferenceNode.h"
 #include "QorePythonProgram.h"
 
@@ -37,6 +38,7 @@ PythonCallableCallReferenceNode::PythonCallableCallReferenceNode(QorePythonProgr
 }
 
 QoreValue PythonCallableCallReferenceNode::execValue(const QoreListNode* args, ExceptionSink* xsink) const {
+    QoreSandboxProvenanceHelper provenance(this);
     //printd(5, "PythonCallableCallReferenceNode::execValue() f: %p self: %p\n", *val, *self);
     QorePythonHelper qph(*pypgm, xsink);
     if (*xsink) {
@@ -44,6 +46,13 @@ QoreValue PythonCallableCallReferenceNode::execValue(const QoreListNode* args, E
     }
     //QorePythonGilHelper qpgh;
     return pypgm->callInternal(xsink, *val, args, 0, *self);
+}
+
+bool PythonCallableCallReferenceNode::derefImpl(ExceptionSink* xsink) {
+    QoreSandboxProvenanceHelper provenance(this);
+    self.reset();
+    val.reset();
+    return ResolvedCallReferenceNode::derefImpl(xsink);
 }
 
 int PythonCallableCallReferenceNode::getAsString(QoreString& str, int foff, ExceptionSink* xsink) const {

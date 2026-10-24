@@ -53,6 +53,9 @@ public:
         return "python callable call";
     }
 
+protected:
+    DLLLOCAL bool derefImpl(ExceptionSink* xsink) override;
+
 private:
     mutable QorePythonProgramWeakReferenceHolder pypgm;
     QorePythonPersistentReferenceHolder val;

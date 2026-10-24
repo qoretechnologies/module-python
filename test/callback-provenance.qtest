@@ -1,0 +1,83 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%no-child-restrictions
+%prepend-module-path "${SCRIPT_DIR}/../build"
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires python
+%requires QUnit
+
+%exec-class ProvenanceTest
+
+class ProvenanceTest inherits QUnit::Test {
+    constructor() : QUnit::Test("python callback provenance", "1.0", \ARGV) {
+        addTestCase("a returned foreign callback retains its creation policy", \testProvenance());
+        addTestCase("foreign callback cleanup retains provenance", \testRelease());
+        set_return_value(main());
+    }
+
+    testProvenance() {
+        string path = get_script_path();
+        code reader = string sub () {
+            try { ReadOnlyFile::readTextFile(path); return "allowed"; }
+            catch (hash<ExceptionInfo> ex) { return ex.err; }
+        };
+        PythonProgram runtime("def make(reader):\n    return lambda: reader()\n", "provenance.py");
+        Program sandbox(PO_NEW_STYLE);
+        sandbox.parse("code sub make(object runtime, code reader) { return runtime.callFunction(\"make\", reader); }", "foreign-callback-factory");
+        SandboxManager sm();
+        sm.setFilesystemDefaultPolicy(False);
+        sandbox.setSandboxManager(sm);
+        code trusted = runtime.callFunction("make", reader);
+        code restricted = sandbox.callFunction("make", runtime, reader);
+        assertEq("allowed", trusted());
+        assertEq("FILESYSTEM-ACCESS-DENIED", restricted());
+        Queue results();
+        ThreadPool pool(1);
+        on_exit pool.stopWait();
+        pool.submit(sub () { results.push(restricted()); });
+        assertEq("FILESYSTEM-ACCESS-DENIED", results.get(10s));
+        pool.submit(sub () { results.push(trusted()); });
+        assertEq("allowed", results.get(10s), "worker reuse restores the previous context");
+    }
+
+    testRelease() {
+        string path = get_script_path();
+        Queue results();
+        code reader = string sub () {
+            try { ReadOnlyFile::readTextFile(path); return "allowed"; }
+            catch (hash<ExceptionInfo> ex) { return ex.err; }
+        };
+        PythonProgram runtime("
+class Tracked:
+    def __init__(self, reader, report):
+        self.reader = reader
+        self.report = report
+    def __call__(self):
+        return self.reader()
+    def __del__(self):
+        self.report(self.reader())
+saved = None
+def prepare(reader, report):
+    global saved
+    saved = Tracked(reader, report)
+def take():
+    return saved.__call__
+def clear():
+    global saved
+    saved = None
+", "provenance-release.py");
+        # The foreign object and both Qore callbacks originate in trusted code. Only the returned wrapper is tagged.
+        runtime.callFunction("prepare", reader, sub (string result) { results.push(result); });
+        Program sandbox(PO_NEW_STYLE);
+        sandbox.parse("code sub take(object runtime) { return runtime.callFunction(\"take\"); }", "callback-release");
+        SandboxManager sm();
+        sm.setFilesystemDefaultPolicy(False);
+        sandbox.setSandboxManager(sm);
+        code restricted = sandbox.callFunction("take", runtime);
+        runtime.callFunction("clear");
+        remove restricted;
+        assertEq("FILESYSTEM-ACCESS-DENIED", results.get(10s));
+    }
+
+}

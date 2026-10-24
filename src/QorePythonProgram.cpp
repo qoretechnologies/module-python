@@ -614,9 +614,15 @@ QorePythonPersistentReferenceHolder::QorePythonPersistentReferenceHolder(QorePyt
 }
 
 QorePythonPersistentReferenceHolder::~QorePythonPersistentReferenceHolder() {
+    reset();
+}
+
+void QorePythonPersistentReferenceHolder::reset() {
     if (owner) {
-        owner->releasePersistentReference(this);
-        owner->weakDeref();
+        QorePythonProgram* previous = owner;
+        owner = nullptr;
+        previous->releasePersistentReference(this);
+        previous->weakDeref();
     }
 }
 
