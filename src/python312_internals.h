@@ -26,14 +26,6 @@
 
 #include <fileobject.h>
 
-inline int PyThreadState_GetRecursionLimit(PyThreadState* state) {
-    return state->py_recursion_limit;
-}
-
-inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_limit) {
-    state->py_recursion_limit = new_limit;
-}
-
 // Python 3.12 GIL Tracking
 // ========================
 // In Python 3.12, PyEval_ReleaseThread() does NOT clear the Thread-Specific Storage (TSS)
@@ -77,6 +69,9 @@ inline thread_local bool _qore_tss_initialized = false;
 // Track whether the current thread holds the GIL (independent of tstate tracking)
 // This is needed because QorePythonReleaseGilHelper uses this to track GIL state
 inline thread_local bool _qore_gil_held = false;
+
+//! sets the module's tracking of whether the thread holds the GIL
+#define _QORE_SET_GIL_HELD(v) (_qore_gil_held = (v))
 
 // Get the current thread state from our thread-local tracking
 DLLLOCAL static inline PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
@@ -199,11 +194,6 @@ DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadStat
 // In GIL-enabled mode, use standard PyThreadState_Swap
 #define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
 
-// gilstate_counter access macros - these are available in GIL-enabled Python
-#define _QORE_GILSTATE_COUNTER_INC(tstate) (++(tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_DEC(tstate) (--(tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_GET(tstate) ((tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_ASSERT_ONE(tstate) assert((tstate)->gilstate_counter == 1)
 
 // Thread state management functions for GIL-enabled Python
 DLLLOCAL static inline bool _qore_has_thread_state_attached() {

@@ -27,14 +27,6 @@
 #include <dynamic_annotations.h>
 #include <fileobject.h>
 
-inline int PyThreadState_GetRecursionLimit(PyThreadState* state) {
-    return state->recursion_limit;
-}
-
-inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_limit) {
-    state->recursion_limit = new_limit;
-}
-
 typedef struct _Py_atomic_address {
     uintptr_t _value;
 } _Py_atomic_address;
@@ -467,6 +459,9 @@ inline thread_local bool _qore_tss_initialized = false;
 // PyInterpreterState_Clear/Delete but the GIL mutex is still locked by us.
 inline thread_local bool _qore_gil_held = false;
 
+//! sets the module's tracking of whether the thread holds the GIL
+#define _QORE_SET_GIL_HELD(v) (_qore_gil_held = (v))
+
 // Get the current thread state - use Python's native function which is reliable in 3.11
 DLLLOCAL static inline PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
     // In Python 3.11, PyGILState_GetThisThreadState() is reliable
@@ -585,11 +580,6 @@ DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadStat
 // In GIL-enabled mode, use standard PyThreadState_Swap
 #define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
 
-// gilstate_counter access macros - these are available in GIL-enabled Python
-#define _QORE_GILSTATE_COUNTER_INC(tstate) (++(tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_DEC(tstate) (--(tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_GET(tstate) ((tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_ASSERT_ONE(tstate) assert((tstate)->gilstate_counter == 1)
 
 // Thread state management functions for GIL-enabled Python
 DLLLOCAL static inline bool _qore_has_thread_state_attached() {

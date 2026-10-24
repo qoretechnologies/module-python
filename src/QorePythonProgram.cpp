@@ -1143,7 +1143,6 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
             }
             return -1;
         }
-        _QORE_GILSTATE_COUNTER_ASSERT_ONE(python);
         //printd(5, "QorePythonProgram::createInterpreter() created thead state: %p\n", python);
 
         // NOTE: we have to reenable PyGILState_Check() here
@@ -1508,7 +1507,6 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
             printd(5, "QorePythonProgram::setContext() this: %p created new thread context: %p (py_thr_map: %p "
                 "size: %d)\n", this, python, &py_thr_map, (int)py_thr_map.size());
             assert(python);
-            _QORE_GILSTATE_COUNTER_ASSERT_ONE(python);
 
 
             // IMPORTANT - Python 3.12 PyThreadState_New() Behavior Change:
@@ -1563,8 +1561,8 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         //printd(5, "QorePythonProgram::setContext() this: %p\n", this);
     }
 
-    printd(5, "QorePythonProgram::setContext() got thread context: %p (GIL: %d hG: %d) refs: %d\n", python,
-        PyGILState_Check(), haveGil(), _QORE_GILSTATE_COUNTER_GET(python));
+    printd(5, "QorePythonProgram::setContext() got thread context: %p (GIL: %d hG: %d)\n", python,
+        PyGILState_Check(), haveGil());
     // the state belongs to this native thread (see the check of the cached state above)
     assert(python->thread_id == PyThread_get_thread_ident());
 
@@ -1623,7 +1621,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         }
         PyEval_RestoreThread(python);
         g_state = PyGILState_UNLOCKED;
-        _qore_gil_held = true;  // Track that we now hold the GIL
+        _QORE_SET_GIL_HELD(true);  // Track that we now hold the GIL
     }
 
     // Update our tracking
@@ -1665,7 +1663,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         PyEval_RestoreThread(python);
         // Set our tracking now that we have the GIL
         _qore_PyGILState_SetThisThreadState(python);
-        _qore_gil_held = true;  // Track that we now hold the GIL
+        _QORE_SET_GIL_HELD(true);  // Track that we now hold the GIL
         g_state = PyGILState_UNLOCKED;
     }
 
@@ -1701,7 +1699,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         ceval_state = nullptr;
         PyEval_RestoreThread(python);
         g_state = PyGILState_UNLOCKED;
-        _qore_gil_held = true;  // Track that we now hold the GIL
+        _QORE_SET_GIL_HELD(true);  // Track that we now hold the GIL
     }
     // Update tracking for consistency
     _qore_PyGILState_SetThisThreadState(python);
@@ -1711,10 +1709,9 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 #ifndef Py_GIL_DISABLED
     // Now we have the GIL - verify our state is consistent
 #if PY_VERSION_HEX >= 0x030D0000
-    // Python 3.13+: PyGILState_Check() and PyGILState_GetThisThreadState() rely on Python's
-    // internal TSS (autoTSSkey) which can become stale or cleared when external modules like
-    // JNI interact with Python. Our thread-local tracking (_qore_tss_tstate) is authoritative.
-    assert(_qore_PyCeval_GetGilLockedStatus());
+    // Python 3.13+: the attached state, not the state bound for the GIL state API (PyGILState_Check(),
+    // PyGILState_GetThisThreadState()), tells that the thread holds the GIL with this program's state
+    assert(PyThreadState_GetUnchecked() == python);
 #else
     assert(PyGILState_Check());
     // TSS state assertions - only reliable in Python < 3.13
@@ -1727,7 +1724,6 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 
     //printd(5, "QorePythonProgram::setContext() old thread context: %p\n", t_state);
 
-    _QORE_GILSTATE_COUNTER_INC(python);
 
     QorePythonThreadInfo rv = {tss_state, t_state, ceval_state, released_other_interp_tstate, g_state, true};
 #ifdef QORE_PYTHON_TSTATE_C_RECURSION_COUNTER
@@ -1753,7 +1749,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 // It handles:
 // 1. Releasing the GIL when g_state == PyGILState_UNLOCKED (we acquired it in setContext)
 // 2. Restoring thread states when we swapped them for cross-interpreter calls
-// 3. Restoring our tracking variables (_qore_tss_tstate, _qore_gil_held, etc.)
+// 3. Restoring the module's tracking of the GIL (Python 3.11 and 3.12; 3.13+ use the attached state)
 // 4. Decrementing thread reference counts for thread map management
 //
 // The oldstate parameter contains the saved state from setContext() that must be restored.
@@ -1792,7 +1788,6 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
     }
 #endif
 
-    _QORE_GILSTATE_COUNTER_DEC(python);
 
     //printd(5, "QorePythonProgram::releaseContext() t_state: %p g_state: %d\n", oldstate.t_state, oldstate.g_state);
 
@@ -1823,7 +1818,7 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
         if (oldstate.released_other_interp_tstate) {
             PyEval_RestoreThread(oldstate.released_other_interp_tstate);
             _qore_PyGILState_SetThisThreadState(oldstate.released_other_interp_tstate);
-            _qore_gil_held = true;
+            _QORE_SET_GIL_HELD(true);
         }
     } else {
         // We already had the GIL - swap back to original thread state if needed

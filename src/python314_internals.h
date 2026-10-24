@@ -41,23 +41,12 @@
     - Thread state management for threads created outside Python
 */
 
-// Recursion limit APIs - Python 3.14 uses global limits, not per-thread
-inline int PyThreadState_GetRecursionLimit(PyThreadState* state) {
-    (void)state;  // unused in Python 3.14+
-    return Py_GetRecursionLimit();
-}
-
 // _PyGILState_GetInterpreterStateUnsafe was removed in Python 3.14
 // Use PyInterpreterState_Main() as a replacement when there's no thread state
 inline PyInterpreterState* _PyGILState_GetInterpreterStateUnsafe() {
     return PyInterpreterState_Main();
 }
 #define QORE_PY_GILSTATE_UNSAFE_DEFINED 1
-
-inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_limit) {
-    (void)state;  // unused in Python 3.14+
-    Py_SetRecursionLimit(new_limit);
-}
 
 /*
     In Python 3.14 free-threading mode, the traditional GIL state tracking
@@ -66,14 +55,13 @@ inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_lim
     - PyThreadState_Swap() - swap thread states
     - PyGILState_Ensure()/PyGILState_Release() - for thread safety around blocking ops
 
-    In GIL-enabled mode, we use a thread-local variable to track thread state,
-    similar to Python 3.12 internals.
+    In GIL-enabled mode, the attached state (PyThreadState_GetUnchecked()) tells whether and with which state the
+    thread holds the GIL.
 */
 
 #ifdef Py_GIL_DISABLED
-// In free-threading mode, there's no GIL but we still need the variable for API compatibility
-// This flag is effectively always false since there's no GIL to hold
-inline thread_local bool _qore_gil_held = false;
+// In free-threading mode, there's no GIL to track
+#define _QORE_SET_GIL_HELD(v) ((void)0)
 
 // The following functions are provided for API compatibility with GIL-enabled code paths
 // but may not be used in all compilation units in free-threading mode
@@ -122,15 +110,6 @@ DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadStat
 #define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
 
 /*
-    In free-threading mode, gilstate_counter doesn't exist or isn't meaningful.
-    These macros provide no-op wrappers for code that manipulates it.
-*/
-#define _QORE_GILSTATE_COUNTER_INC(tstate) ((void)0)
-#define _QORE_GILSTATE_COUNTER_DEC(tstate) ((void)0)
-#define _QORE_GILSTATE_COUNTER_GET(tstate) 1
-#define _QORE_GILSTATE_COUNTER_ASSERT_ONE(tstate) ((void)0)
-
-/*
     In free-threading mode, we don't need to acquire/release the GIL.
     PyEval_AcquireThread/PyEval_ReleaseThread still exist but behave differently -
     they primarily manage thread state attachment, not GIL acquisition.
@@ -165,92 +144,46 @@ DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
 #else
 // the default (GIL-enabled) build of Python 3.14 and later
 
-// For GIL-enabled Python 3.14, use thread-local state to track current thread state
-// This mirrors the approach used in Python 3.12 internals
-// Using inline thread_local ensures a single instance shared across all compilation units (C++17)
-inline thread_local PyThreadState* _qore_tss_tstate = nullptr;
+// The thread state that the thread has attached (PyThreadState_GetUnchecked()) tells whether and with which state
+// the thread holds the GIL: the module keeps no tracking of its own (see python313_internals.h)
 
-// Track whether we've ever initialized our GIL tracking for this thread.
-// This distinguishes between:
-// - Qore threads that released the GIL: _qore_tss_initialized=true, _qore_tss_tstate=nullptr
-// - Python-created threads with GIL: _qore_tss_initialized=false, _qore_tss_tstate=nullptr
-inline thread_local bool _qore_tss_initialized = false;
-
-// Track whether the current thread holds the GIL (independent of tstate tracking)
-// This is needed because QorePythonReleaseGilHelper uses this to track GIL state
-inline thread_local bool _qore_gil_held = false;
-
-// Get the current thread state from our thread-local tracking
-DLLLOCAL static PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
-    return _qore_tss_tstate;
+DLLLOCAL static inline PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
+    return PyThreadState_GetUnchecked();
 }
 
-// Set this thread's state in thread-local storage
-// NOTE: Only set _qore_tss_initialized when actually acquiring the GIL (state != nullptr).
-// When releasing the GIL (state = nullptr), we keep initialized=true to indicate
-// this is a Qore-managed thread that released the GIL (vs a Python-created thread).
-// NOTE: This function does NOT update _qore_gil_held - that's only done by
-// _qore_acquire_thread_state and _qore_release_thread_state which actually change GIL ownership.
-DLLLOCAL static void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
-    _qore_tss_tstate = state;
-    if (state != nullptr) {
-        _qore_tss_initialized = true;
-    }
+//! no tracking to update: the attachment is changed with the CPython API
+DLLLOCAL static inline void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
+    (void)state;
 }
 
-// GIL status check - use our own tracking since PyGILState_Check() can be unreliable
-// in Python 3.14 after GIL transitions with sub-interpreters and JNI interaction
-DLLLOCAL static bool _qore_PyCeval_GetGilLockedStatus() {
-    // Use our own tracking - if we have a thread state set, we consider ourselves
-    // to be holding the GIL for the purposes of our API
-    return _qore_tss_tstate != nullptr;
+DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
+    return PyThreadState_GetUnchecked() != nullptr;
 }
 
-// Check if this might be a Python-created thread that already has the GIL.
-// This handles the case where a Python threading.Thread calls back into Qore.
-// Returns the thread state if this is a Python-created thread with the GIL, nullptr otherwise.
+//! returns the attached state of a thread that holds the GIL without a context of the module (ex: a thread created
+//! by Python), or nullptr
 DLLLOCAL static inline PyThreadState* _qore_check_python_created_thread_gil() {
-    // If our tracking is already initialized, this is a Qore-managed thread
-    if (_qore_tss_initialized) {
-        return nullptr;
-    }
-    // Check if Python thinks this thread has the GIL
-    // For Python-created threads, the TSS will be set correctly by Python
-    PyThreadState* tss_state = PyGILState_GetThisThreadState();
-    if (tss_state != nullptr && PyGILState_Check()) {
-        // This is a Python-created thread that has the GIL
-        // Initialize our tracking with Python's state
-        _qore_tss_tstate = tss_state;
-        _qore_tss_initialized = true;
-        _qore_gil_held = true;  // Track that we hold the GIL
-        return tss_state;
-    }
-    return nullptr;
+    return PyThreadState_GetUnchecked();
 }
 
-// Get the thread state that holds the GIL
-// In Python 3.14, PyGILState_Check() and TSS can be inconsistent during GIL transitions
-// with sub-interpreters. Use our own tracking for reliability.
-DLLLOCAL static PyThreadState* _qore_PyCeval_GetThreadState() {
-    return _qore_tss_tstate;
+DLLLOCAL static inline PyThreadState* _qore_PyCeval_GetThreadState() {
+    return PyThreadState_GetUnchecked();
 }
 
+//! returns the attached state; the attachment is changed with the CPython API
 DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* new_state) {
-    PyThreadState* old = _qore_tss_tstate;
-    _qore_tss_tstate = new_state;
-    return old;
+    (void)new_state;
+    return PyThreadState_GetUnchecked();
 }
+
+//! no tracking of the GIL
+#define _QORE_SET_GIL_HELD(v) ((void)0)
 
 #define _QORE_PYTHON_REENABLE_GIL_CHECK
 
 // In GIL-enabled mode, use standard PyThreadState_Swap
 #define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
 
-// In GIL-enabled mode, these work with gilstate_counter (if accessible)
-#define _QORE_GILSTATE_COUNTER_INC(tstate) (++(tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_DEC(tstate) (--(tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_GET(tstate) ((tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_ASSERT_ONE(tstate) assert((tstate)->gilstate_counter == 1)
 
 // In GIL-enabled mode, use the standard GIL functions
 DLLLOCAL static inline bool _qore_has_thread_state_attached() {
@@ -259,18 +192,10 @@ DLLLOCAL static inline bool _qore_has_thread_state_attached() {
 
 DLLLOCAL static inline void _qore_acquire_thread_state(PyThreadState* tstate) {
     PyEval_AcquireThread(tstate);
-    // Set thread-local tracking AFTER acquiring the GIL to ensure consistency.
-    // PyEval_AcquireThread() either succeeds or aborts (fatal error), so if we
-    // reach this point, we definitely hold the GIL.
-    _qore_tss_tstate = tstate;
-    _qore_tss_initialized = true;
-    _qore_gil_held = true;
 }
 
 DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
     PyEval_ReleaseThread(tstate);
-    _qore_tss_tstate = nullptr;
-    _qore_gil_held = false;
 }
 
 #endif // Py_GIL_DISABLED

@@ -164,7 +164,7 @@ namespace {
 // QorePythonReleaseGilHelper), as the helper does when the call returns
 void python_fork_protocol_acquire(PyThreadState* tstate) {
     PyEval_RestoreThread(tstate);
-    _qore_gil_held = true;
+    _QORE_SET_GIL_HELD(true);
     _qore_PyGILState_SetThisThreadState(tstate);
 }
 
@@ -172,7 +172,7 @@ void python_fork_protocol_acquire(PyThreadState* tstate) {
 void python_fork_protocol_release() {
     PyEval_SaveThread();
     _qore_PyGILState_SetThisThreadState(nullptr);
-    _qore_gil_held = false;
+    _QORE_SET_GIL_HELD(false);
 }
 
 // returns true if the main interpreter is the only interpreter; the GIL must be held
@@ -982,7 +982,7 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     }
     _qore_PyGILState_SetThisThreadState(init_tstate);
     // We have the GIL at this point after Py_InitializeEx()
-    _qore_gil_held = true;
+    _QORE_SET_GIL_HELD(true);
 #endif
 
     if (init_global_qore_python_pgm()) {
@@ -1539,7 +1539,7 @@ void qore_python_release_context() {
 #endif
     PyEval_SaveThread();
     _qore_PyGILState_SetThisThreadState(nullptr);
-    _qore_gil_held = false;
+    _QORE_SET_GIL_HELD(false);
 }
 
 void qore_python_delete_idle_thread_state() {
@@ -1616,11 +1616,8 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
             PyThreadState_Swap(new_thread_state);
         }
     }
-    // CRITICAL: Update our tracking AFTER acquiring the GIL.
-    // _qore_gil_held must be set for _qore_PyCeval_GetGilLockedStatus() to return true.
-    _qore_gil_held = true;
-    _QORE_GILSTATE_COUNTER_INC(new_thread_state);
-    _qore_PyGILState_SetThisThreadState(new_thread_state);
+    // the attached state tells that the thread holds the GIL with new_thread_state (no tracking in 3.13+)
+    assert(PyThreadState_GetUnchecked() == new_thread_state);
 #else
     if (release_gil) {
         // No bound_gilstate flag or binding is changed without the GIL: other threads use the state (the main thread
@@ -1641,7 +1638,6 @@ QorePythonGilHelper::QorePythonGilHelper(PyThreadState* new_thread_state)
     // NOTE: even if the current thread state is equal to the new one, we still need to set all thread states in all
     // locations
 
-    _QORE_GILSTATE_COUNTER_INC(new_thread_state);
     _QORE_PYTHREAD_STATE_SWAP(new_thread_state);
 
     // set this thread state
@@ -1673,19 +1669,16 @@ QorePythonGilHelper::~QorePythonGilHelper() {
     // Python 3.13+ GIL mode
     printd(5, "QorePythonGilHelper dtor: release_gil: %d t_state: %p new_thread_state: %p\n",
         release_gil, t_state, new_thread_state);
-    _QORE_GILSTATE_COUNTER_DEC(new_thread_state);
 
     if (release_gil) {
         // We acquired the GIL, so release it
         // Use PyEval_SaveThread which properly releases the GIL
         qore_python_release_context();
-    } else {
-        // We already had the GIL - restore the original tracking
-        // Keep _qore_gil_held = true since we still have the GIL
-        _qore_PyGILState_SetThisThreadState(t_state);
+    } else if (t_state != new_thread_state) {
+        // We already had the GIL with t_state - attach it again, as the constructor attached new_thread_state
+        PyThreadState_Swap(t_state);
     }
 #else
-    _QORE_GILSTATE_COUNTER_DEC(new_thread_state);
 
     if (release_gil) {
         //printd(5, "QorePythonGilHelper::~QorePythonGilHelper() releasing %llx state: %llx t_state: %llx\n",
@@ -1726,41 +1719,19 @@ void QorePythonGilHelper::releaseBeforeSubInterpreter() {
 void QorePythonGilHelper::set(PyThreadState* other_state) {
     // This function is called after Py_NewInterpreter() to switch from the main interpreter's
     // thread state (which was used to acquire the GIL in the constructor) to the new sub-interpreter's
-    // thread state.
-    //
-    // GIL State Counter Balancing:
-    // - Constructor incremented the MAIN interpreter's gilstate_counter
-    // - Destructor will decrement new_thread_state's gilstate_counter
-    // - Since we're switching new_thread_state to point to other_state (sub-interpreter),
-    //   we must:
-    //   1. Decrement the MAIN interpreter's counter to balance the constructor's increment
-    //   2. Increment the SUB interpreter's counter to balance the destructor's decrement
-    //
-    // Without step 1, the main thread state's counter would leak (+1 for each sub-interpreter
-    // creation), potentially breaking later GIL bookkeeping assertions.
-    // Without step 2, Py_NewInterpreter's thread state (which starts with gilstate_counter=1)
-    // would be decremented to 0, causing PyEval_RestoreThread to fail its assertion.
-    //
-    // See design/python-module.md for detailed explanation.
+    // thread state, which the destructor then releases.  The module does not change the gilstate_counter of thread
+    // states: CPython creates every state with a counter of 1, and only PyGILState_Release() changes it (see
+    // design/python-module.md).
 #ifdef Py_GIL_DISABLED
     // In free-threading mode, Py_NewInterpreterFromConfig already attached the new thread state.
     // Just update our tracking variable so the destructor restores correctly.
     // Do NOT call PyThreadState_Swap again as it may corrupt the thread's heap state.
-    // gilstate_counter balancing is not needed in free-threading mode.
     new_thread_state = other_state;
 #else
     assert(_qore_PyCeval_GetGilLockedStatus() && _qore_PyCeval_GetThreadState());
 
-    // CRITICAL: Decrement the main thread state's counter to balance the increment in the
-    // constructor. This must be done BEFORE changing new_thread_state.
-    _QORE_GILSTATE_COUNTER_DEC(new_thread_state);
-
     // Update new_thread_state so the destructor releases the correct thread state
     new_thread_state = other_state;
-
-    // CRITICAL: Increment the new thread state's gilstate_counter to balance the decrement
-    // in the destructor.
-    _QORE_GILSTATE_COUNTER_INC(other_state);
 
     _QORE_PYTHREAD_STATE_SWAP(other_state);
     _qore_PyCeval_SwapThreadState(other_state);

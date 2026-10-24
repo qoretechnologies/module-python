@@ -199,8 +199,7 @@ inline PyInterpreterState* _PyGILState_GetInterpreterStateUnsafe() {
 //! acquires the GIL and sets the main interpreter thread context
 /** This class is used when a new interpreter context is created.
 
-    The new interpreter context has its gilstate_counter decremented in the destructor, and the main interpreter
-    thread context is restored before releasing the GIL.
+    The main interpreter thread context is restored before releasing the GIL.
 
     This way we don't need to use the deprecated GIL acquire and release APIs
 */
@@ -253,7 +252,7 @@ public:
         // This is critical for multi-threaded scenarios where another thread might check
         // _qore_PyCeval_GetGilLockedStatus() to see if it needs to acquire the GIL.
         _qore_PyGILState_SetThisThreadState(nullptr);
-        _qore_gil_held = false;  // Track that we no longer hold the GIL
+        _QORE_SET_GIL_HELD(false);  // Track that we no longer hold the GIL
         printd(5, "QorePythonReleaseGilHelper: released GIL, saved tstate: %p\n", _save);
     }
 
@@ -274,7 +273,7 @@ public:
         } else {
             // GIL is not held - acquire it
             PyEval_RestoreThread(_save);
-            _qore_gil_held = true;  // Track that we now hold the GIL
+            _QORE_SET_GIL_HELD(true);  // Track that we now hold the GIL
         }
         // Restore our tracking now that we have the GIL with our saved thread state
         _qore_PyGILState_SetThisThreadState(_save);
@@ -569,11 +568,7 @@ public:
         }
         if (!python_shutdown) {
 #if PY_VERSION_HEX >= 0x030D0000
-            // Python 3.13+: Always use PyGILState_Ensure/Release for cleanup.
-            // Our tracking (_qore_tss_tstate) may be out of sync with Python's actual
-            // GIL state if external code (like JNI) releases the GIL without going
-            // through our API. PyGILState_Ensure is safe to call even if we already
-            // have the GIL - it just increments the gilstate_counter.
+            // Python 3.13+: PyGILState_Ensure/Release for cleanup, unless the bound state is attached
             if (Py_IsInitialized()) {
                 // the thread runs with its bound state attached (it holds the GIL or, in free-threaded builds, is
                 // attached): PyGILState_Ensure() would only count the use of the state

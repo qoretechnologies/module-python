@@ -56,50 +56,52 @@ them (see "Threads Created by Python").  Test: `restrictedProgramTest()` in `tes
 
 ### Thread State Tracking
 
-Python's internal thread state tracking changed significantly across versions:
+Whether and with which state the thread holds the GIL:
 
-1. **Python's TSS (Thread-Specific Storage)**: Python uses `autoTSSkey` to track the current
-   thread state per-thread. However, `PyEval_ReleaseThread()` does NOT clear this TSS in
-   Python 3.12+, leading to stale references.
+- **Python 3.13+** (GIL-enabled and free-threaded builds): the attached state, `PyThreadState_GetUnchecked()`
+  (public API).  The module keeps no tracking of its own: the functions of `python313_internals.h` and
+  `python314_internals.h` (`_qore_PyCeval_GetThreadState()`, `_qore_PyCeval_GetGilLockedStatus()`, ...) read the
+  attached state, and the ones that set the tracking (`_qore_PyGILState_SetThisThreadState()` in GIL builds,
+  `_QORE_SET_GIL_HELD()`) do nothing.  `PyGILState_Check()` and `PyGILState_GetThisThreadState()` report the state
+  bound to the thread for the GIL state API, which with sub-interpreters is not necessarily the attached state.
+  A thread that holds the GIL without a context of the module (ex: a thread created by Python) is detected by its
+  attached state.  The module's own tracking could differ from the attached state (ex: after JNI released the GIL);
+  `QorePythonGilHelper`'s destructor restored only the tracking, not the state it had replaced.
+- **Python 3.11 and 3.12**: the module's thread-local tracking (`_qore_tss_tstate`, `_qore_tss_initialized`,
+  `_qore_gil_held` in `python311_internals.h` and `python312_internals.h`): 3.11 has no public way to read the
+  attached state (`_PyThreadState_UncheckedGet()` is private), and in 3.12 `PyEval_ReleaseThread()` does not clear
+  the binding of the GIL state API, so `PyGILState_Check()` reports the GIL after it was released.  Never set the
+  tracking before the GIL is acquired: `_qore_PyCeval_GetGilLockedStatus()` would then skip
+  `PyEval_RestoreThread()`.
 
-2. **Our Tracking Variables** (in `python3XX_internals.h`):
-   - `_qore_tss_tstate`: Thread-local tracking of current thread state
-   - `_qore_tss_initialized`: Whether our tracking has been initialized for this thread
-   - `_qore_gil_held`: Whether the current thread holds the GIL
+### CPython Internals Used
 
-3. **Why We Need Our Own Tracking**:
-   - `PyGILState_Check()` can return incorrect results after GIL transitions
-   - `PyGILState_GetThisThreadState()` can return stale thread states
-   - Sub-interpreter thread states can be incorrectly reported by Python's TSS
+Each remaining use of CPython-specific members or internal structures, and why no public API can replace it:
 
-4. **CRITICAL: TSS vs GIL Tracking Order**:
-   - `_qore_tss_tstate` is used to track the current thread state
-   - `_qore_gil_held` tracks whether the GIL is actually held
-   - For GIL-enabled Python (3.12, 3.13, 3.14), NEVER set `_qore_tss_tstate` before acquiring the GIL
-   - Setting TSS before GIL acquisition causes `_qore_PyCeval_GetGilLockedStatus()` to return
-     true when we don't actually hold the GIL, leading to skipped `PyEval_RestoreThread()` calls
-   - Free-threading mode (`Py_GIL_DISABLED`) requires TSS setup before thread state operations,
-     so the rule is inverted there
+- `PyThreadState::_status.bound_gilstate` (3.12+, detected by CMake: `QORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE`):
+  cleared before the module deletes an idle state of another thread when an interpreter is deleted
+  (`deleteIntern()`), and in 3.12's `setContext()` when the flag of an attached state is stale; deleting a state
+  whose flag is set clears the binding of the *deleting* thread (`unbind_gilstate_tstate()`), and no public API
+  changes the binding.
+- `PyThreadState::c_recursion_remaining` (3.11-3.13, `QORE_PYTHON_TSTATE_C_RECURSION_COUNTER`): reduced to what the
+  stack of a Qore thread can hold (see "Stack Usage and Recursion"); 3.14 checks the stack itself.
+- Python 3.11's `_PyRuntime.gilstate` (`autoTSSkey`, `tstate_current`, `check_enabled`) and `_PyRuntime.ceval.gil`
+  (`last_holder`), with the copied layouts of `python311_internals.h`: the GIL state API of 3.11 does not support
+  sub-interpreters, and `PyThreadState_Swap()` does not update its binding; the module binds the state of the
+  interpreter that it attaches, so that extension code using `PyGILState_Ensure()` in a sub-interpreter gets its
+  state.  3.11 is the minimum version; the layouts are fixed for it.
+- `src/python_fork_gil.c` (compiled with the internal headers, `internal/pycore_*.h`): recreates the GIL in a child
+  of `fork()` when another thread held it (see "fork()"); CPython only does this for `os.fork()`.
+- Reads of public `PyThreadState` members (`interp`, `thread_id`) that have accessor functions only in some versions.
 
-### gilstate_counter Management
+### gilstate_counter
 
-**Critical Bug Found (January 2026)**: The `gilstate_counter` field in `PyThreadState`
-must be properly maintained. Python's `PyEval_RestoreThread()` asserts that
-`gilstate_counter > 0`.
-
-**Root Cause**: In `QorePythonGilHelper::set()`, when switching from the main interpreter's
-thread state to a sub-interpreter's thread state after `Py_NewInterpreter()`:
-- The constructor incremented the MAIN interpreter's `gilstate_counter`
-- `set()` changed `new_thread_state` to point to the SUB-interpreter's thread state
-- The destructor decremented the SUB-interpreter's `gilstate_counter`
-- This caused sub-interpreter's counter to go from 1 to 0, corrupting the thread state
-- Additionally, the main interpreter's counter was never decremented, causing a leak
-
-**Fix**: In `set()`, we now:
-1. Decrement the MAIN interpreter's counter to balance the constructor's increment
-2. Increment the SUB interpreter's counter to balance the destructor's decrement
-
-This ensures both interpreters maintain correct counter values.
+The module does not change `PyThreadState::gilstate_counter`.  CPython creates every thread state with a counter of 1
+(`PyGILState_Release()` must not delete it), except a state that `PyGILState_Ensure()` creates for itself, which its
+matching `PyGILState_Release()` deletes; `PyGILState_Ensure()`/`PyGILState_Release()` change it in balanced pairs.
+The module incremented it when it attached a state and decremented it when it released the state, which only
+mirrored those pairs, and had to be rebalanced when `QorePythonGilHelper::set()` switched states (an imbalance left a
+counter at 0, and the state was deleted by the next `PyGILState_Release()`).
 
 ### setContext() / releaseContext() Flow
 
@@ -139,7 +141,7 @@ detaches and attaches again.  Most of the cost of a call from Python to Qore is 
 ### Key Invariants
 
 1. Every `setContext()` must have a matching `releaseContext()` (except for nested helpers, which call neither)
-2. `gilstate_counter` must remain >= 1 for active thread states
+2. The module does not change `gilstate_counter` (CPython keeps it >= 1 for the states it does not delete)
 3. Thread states must only be used with their owning interpreter
 4. When an interpreter is deleted, all its thread states become invalid
 
@@ -351,7 +353,6 @@ GIL.  As a safeguard, before creating a new thread state, `setContext()` checks 
 ### Python 3.12 Differences
 
 Python 3.12 has similar TSS issues but different internal structures:
-- Uses `gilstate_counter` instead of `_status.bound_gilstate` for some tracking
 - Our tracking variables (`_qore_tss_tstate`, etc.) are authoritative
 - `PyGILState_Check()` results should not be trusted after GIL transitions
 
@@ -681,8 +682,8 @@ Key differences in our code:
    `interp->_initial_thread` when `threads.head` is NULL but `_status.initialized` is 1.
    Usually caused by improper thread state cleanup.
 
-2. **SIGSEGV in `_PyEvalFramePushAndInit`**: Thread state's data stack is corrupted,
-   often due to `gilstate_counter` being 0 when `PyEval_RestoreThread()` is called.
+2. **SIGSEGV in `_PyEvalFramePushAndInit`**: Thread state's data stack is corrupted, ex: the state was deleted by
+   `PyGILState_Release()` (its `gilstate_counter` reached 0) while the module still used it.
 
 3. **"non-NULL old thread state" in free-threading**: Tried to attach a thread state
    when one was already attached. Use `PyGILState_GetThisThreadState()` to check first.
@@ -696,7 +697,7 @@ qore --debug=5 -l python your_script.q
 
 Key debug messages to look for:
 - `setContext() ENTRY`: Shows thread state pointers and tracking state
-- `got thread context`: Shows `GIL:` (PyGILState_Check), `hG:` (our tracking), `refs:` (gilstate_counter)
+- `got thread context`: Shows `GIL:` (PyGILState_Check), `hG:` (our tracking)
 - `creating new thread state`: New thread state being created
 - `Python 3.XX is_python_created_thread`: Thread origin detection
 
