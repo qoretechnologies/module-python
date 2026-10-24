@@ -269,14 +269,35 @@ PyObject* QoreMetaPathFinder::tryLoadModule(const QoreString& full_name, const c
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
     ExceptionSink xsink;
     if (ModuleManager::runTimeLoadModule(mod_name, qore_python_pgm->getQoreProgram(), &xsink)) {
-#ifdef _QORE_PYTHON_DEBUG_MODULE_ERRORS
-        // the exception message is lost, to get it for debugging purposes, enable this block
+        // a module that does not exist is not found (ModuleNotFoundError); Qore raises LOAD-MODULE-ERROR with this
+        // description for the module requested (a missing module that it requires has another name)
         QoreStringValueHelper err(xsink.getExceptionErr());
         QoreStringValueHelper desc(xsink.getExceptionDesc());
-        printf("%s: %s\n", err->c_str(), desc->c_str());
-#endif
-        // ignore exceptions and continue
-        xsink.clear();
+        QoreStringMaker not_found("feature '%s' is not builtin and no module with this name could be found",
+            mod_name);
+        if (!strcmp(err->c_str(), "LOAD-MODULE-ERROR") && desc->equalPartial(not_found.c_str())) {
+            xsink.clear();
+            return nullptr;
+        }
+        // a module that exists but cannot be loaded raises ImportError, caused by the Qore exception
+        QoreStringMaker msg("cannot load Qore module '%s': %s: %s", mod_name, err->c_str(), desc->c_str());
+        qore_python_pgm->raisePythonException(xsink);
+        QorePythonReferenceHolder cause_type, cause, tb;
+        PyErr_Fetch(cause_type.getRef(), cause.getRef(), tb.getRef());
+        PyErr_NormalizeException(cause_type.getRef(), cause.getRef(), tb.getRef());
+        QorePythonReferenceHolder name(PyUnicode_FromString(full_name.c_str()));
+        QorePythonReferenceHolder msg_obj(PyUnicode_FromStringAndSize(msg.c_str(), msg.size()));
+        if (name && msg_obj) {
+            PyErr_SetImportError(*msg_obj, *name, nullptr);
+        }
+        if (cause && PyErr_Occurred()) {
+            QorePythonReferenceHolder ex_type, ex, ex_tb;
+            PyErr_Fetch(ex_type.getRef(), ex.getRef(), ex_tb.getRef());
+            PyErr_NormalizeException(ex_type.getRef(), ex.getRef(), ex_tb.getRef());
+            // steals the reference
+            PyException_SetCause(*ex, cause.release());
+            PyErr_Restore(ex_type.release(), ex.release(), ex_tb.release());
+        }
         return nullptr;
     }
     assert(!xsink);

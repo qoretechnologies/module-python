@@ -25,6 +25,7 @@
 #include "QC_PythonProgram.h"
 
 #include <qore/QoreForkHandler.h>
+#include <qore/QoreIteratorBase.h>
 
 #include <atomic>
 #include <pthread.h>
@@ -1966,6 +1967,9 @@ int QorePythonProgram::saveQoreObjectFromPython(const QoreValue& rv, ExceptionSi
     }
     return 0;
 }
+
+// the internal member of the Qore objects of Python iterators that holds the current item in a list
+static constexpr const char* QORE_PYTHON_ITERATOR_KEY = "__$PYITER__";
 
 // the maximum number of chained exceptions converted between Qore and Python, as for the ExceptionInfo hash in Qore
 static constexpr int QORE_PYTHON_MAX_CHAINED_EXCEPTIONS = 20;
@@ -3913,10 +3917,19 @@ QoreValue QorePythonProgram::callFunction(ExceptionSink* xsink, const QoreString
 
         //printd(5, "QorePythonProgram::callFunction() calling PyDict_GetItemString(module_dict: %p, fname: '%s')\n",
         //    module_dict, fname->c_str());
-        // returns a borrowed reference
+        // any callable in the module's globals or in the builtins (ex: a function, a class, a functools.partial
+        // object, len()); returns a borrowed reference
         PyObject* py_func = PyDict_GetItemString(module_dict, fname->c_str());
-        if (!py_func || !PyFunction_Check(py_func)) {
-            xsink->raiseException("NO-FUNCTION", "cannot find function '%s'", fname->c_str());
+        if (!py_func && builtin_dict) {
+            py_func = PyDict_GetItemString(builtin_dict, fname->c_str());
+        }
+        if (!py_func || !PyCallable_Check(py_func)) {
+            if (py_func) {
+                xsink->raiseException("NO-FUNCTION", "'%s' is not callable (type '%s')", fname->c_str(),
+                    Py_TYPE(py_func)->tp_name);
+            } else {
+                xsink->raiseException("NO-FUNCTION", "cannot find function '%s'", fname->c_str());
+            }
             return QoreValue();
         }
 
@@ -3925,6 +3938,52 @@ QoreValue QorePythonProgram::callFunction(ExceptionSink* xsink, const QoreString
     }
     assert(!haveGil());
     return rv.release();
+}
+
+QoreValue QorePythonProgram::getAttribute(ExceptionSink* xsink, const QoreString& name) {
+    TempEncodingHelper str(name, QCS_UTF8, xsink);
+    if (*xsink) {
+        return QoreValue();
+    }
+    QoreExternalProgramContextHelper pch(xsink, qpgm);
+    if (*xsink) {
+        return QoreValue();
+    }
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
+        return QoreValue();
+    }
+    // returns a borrowed reference
+    PyObject* val = PyDict_GetItemString(module_dict, str->c_str());
+    if (!val) {
+        if (!checkPythonException(xsink)) {
+            xsink->raiseException("NO-ATTRIBUTE", "the Python program has no global variable '%s'", str->c_str());
+        }
+        return QoreValue();
+    }
+    return getQoreValue(xsink, val);
+}
+
+void QorePythonProgram::setAttribute(ExceptionSink* xsink, const QoreString& name, QoreValue value) {
+    TempEncodingHelper str(name, QCS_UTF8, xsink);
+    if (*xsink) {
+        return;
+    }
+    QoreExternalProgramContextHelper pch(xsink, qpgm);
+    if (*xsink) {
+        return;
+    }
+    QorePythonHelper qph(this, xsink);
+    if (*xsink || checkValid(xsink)) {
+        return;
+    }
+    QorePythonReferenceHolder val(getPythonValue(value, xsink));
+    if (!val) {
+        return;
+    }
+    if (PyDict_SetItemString(module_dict, str->c_str(), *val) < 0) {
+        checkPythonException(xsink);
+    }
 }
 
 QoreValue QorePythonProgram::callMethod(ExceptionSink* xsink, const QoreString& class_name,
@@ -3971,12 +4030,17 @@ QoreValue QorePythonProgram::callMethod(ExceptionSink* xsink, const char* cname,
         }
     }
 
-    // returns a borrowed reference
-    QorePythonReferenceHolder py_method;
-    if (PyObject_HasAttrString(py_class, mname)) {
-        py_method = PyObject_GetAttrString(py_class, mname);
+    // any callable attribute of the class (ex: a function, a static method, a class method bound to the class, a
+    // method descriptor)
+    QorePythonReferenceHolder py_method(PyObject_GetAttrString(py_class, mname));
+    if (!py_method) {
+        if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            checkPythonException(xsink);
+            return QoreValue();
+        }
+        PyErr_Clear();
     }
-    if (!py_method || (!PyFunction_Check(*py_method) && (Py_TYPE(*py_method) != &PyMethodDescr_Type))) {
+    if (!py_method || !PyCallable_Check(*py_method)) {
         xsink->raiseException("NO-METHOD", "cannot find method '%s.%s()'", cname, mname);
         return QoreValue();
     }
@@ -4596,6 +4660,23 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
 
     cls->addBuiltinVirtualBaseClass(QC_PYTHONBASEOBJECT);
 
+    // a Python iterator (ex: a generator) is a Qore iterator, so that foreach and other iterator APIs iterate it; the
+    // current item is an internal member, so Qore releases it; not for types that have attributes with the names of
+    // the methods
+    if (PyObject_HasAttrString(reinterpret_cast<PyObject*>(type), "__next__")
+        && !PyObject_HasAttrString(reinterpret_cast<PyObject*>(type), "next")
+        && !PyObject_HasAttrString(reinterpret_cast<PyObject*>(type), "getValue")
+        && !PyObject_HasAttrString(reinterpret_cast<PyObject*>(type), "valid")) {
+        cls->addBuiltinVirtualBaseClass(QC_ABSTRACTITERATOR);
+        cls->addMember(QORE_PYTHON_ITERATOR_KEY, Internal, autoTypeInfo);
+        cls->addMethod(nullptr, "next", (q_external_method_t)QorePythonProgram::execPythonIteratorNext, Public,
+            QCF_NO_FLAGS, QDOM_UNCONTROLLED_API, boolTypeInfo);
+        cls->addMethod(nullptr, "getValue", (q_external_method_t)QorePythonProgram::execPythonIteratorGetValue,
+            Public, QCF_NO_FLAGS, QDOM_UNCONTROLLED_API, autoTypeInfo);
+        cls->addMethod(nullptr, "valid", (q_external_method_t)QorePythonProgram::execPythonIteratorValid, Public,
+            QCF_NO_FLAGS, QDOM_UNCONTROLLED_API, boolTypeInfo);
+    }
+
     ns->addSystemClass(cls.get());
 
     printd(5, "QorePythonProgram::setupQorePythonClass() %s methods: %p\n", type->tp_name,
@@ -5124,6 +5205,62 @@ void QorePythonProgram::execPythonDestructor(const QorePythonClass& thisclass, P
     }
 }
 
+QoreValue QorePythonProgram::execPythonIteratorNext(const QoreMethod& meth, const void* m, QoreObject* self,
+        QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink) {
+    QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
+    ValueHolder item(xsink);
+    bool valid = false;
+    {
+        QoreExternalProgramContextHelper pch(xsink, pypgm->qpgm);
+        if (*xsink) {
+            return QoreValue();
+        }
+        QorePythonHelper qph(pypgm, xsink);
+        if (*xsink || pypgm->checkValid(xsink)) {
+            return QoreValue();
+        }
+        QorePythonReferenceHolder py_item(PyIter_Next(pd->get()));
+        if (py_item) {
+            item = pypgm->getQoreValue(xsink, *py_item);
+            if (*xsink) {
+                return QoreValue();
+            }
+            valid = true;
+        } else if (pypgm->checkPythonException(xsink)) {
+            return QoreValue();
+        }
+    }
+    // the current item: a list with the item, or no value at the end of the iteration
+    ValueHolder current(xsink);
+    if (valid) {
+        ReferenceHolder<QoreListNode> l(new QoreListNode(autoTypeInfo), xsink);
+        l->push(item.release(), xsink);
+        current = l.release();
+    }
+    self->setMemberValue(QORE_PYTHON_ITERATOR_KEY, meth.getClass(), current.release(), xsink);
+    return *xsink ? QoreValue() : QoreValue(valid);
+}
+
+QoreValue QorePythonProgram::execPythonIteratorGetValue(const QoreMethod& meth, const void* m, QoreObject* self,
+        QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink) {
+    ValueHolder current(self->getReferencedMemberNoMethod(QORE_PYTHON_ITERATOR_KEY, meth.getClass(), xsink), xsink);
+    if (*xsink) {
+        return QoreValue();
+    }
+    if (current->getType() != NT_LIST) {
+        xsink->raiseException("ITERATOR-ERROR", "the %s object is not on a valid iterator position",
+            meth.getClassName());
+        return QoreValue();
+    }
+    return current->get<const QoreListNode>()->getReferencedEntry(0);
+}
+
+QoreValue QorePythonProgram::execPythonIteratorValid(const QoreMethod& meth, const void* m, QoreObject* self,
+        QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink) {
+    ValueHolder current(self->getReferencedMemberNoMethod(QORE_PYTHON_ITERATOR_KEY, meth.getClass(), xsink), xsink);
+    return *xsink ? QoreValue() : QoreValue(current->getType() == NT_LIST);
+}
+
 QoreValue QorePythonProgram::execPythonStaticMethod(const QoreMethod& meth, PyObject* m,
         const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink) {
     QorePythonProgram* pypgm = QorePythonProgram::getPythonProgramFromMethod(meth, xsink);
@@ -5352,11 +5489,18 @@ int QorePythonProgram::importModule(ExceptionSink* xsink, PyObject* mod, const c
     // returns a borrowed reference
     {
         PyObject* all = PyDict_GetItemString(mod_dict, "__all__");
-        if (all && PyTuple_Check(all)) {
-            Py_ssize_t len = PyTuple_Size(all);
+        // any sequence (usually a list or a tuple)
+        QorePythonReferenceHolder all_seq(all ? PySequence_Fast(all, "") : nullptr);
+        if (all && !all_seq) {
+            PyErr_Clear();
+            throw QoreStandardException("PYTHON-IMPORT-ERROR", "module '%s' __all__ is not a sequence (type '%s')",
+                module, Py_TYPE(all)->tp_name);
+        }
+        if (all_seq) {
+            Py_ssize_t len = PySequence_Fast_GET_SIZE(*all_seq);
             for (Py_ssize_t i = 0; i < len; ++i) {
                 // returns a borrowed reference
-                PyObject* sv = PyTuple_GetItem(all, i);
+                PyObject* sv = PySequence_Fast_GET_ITEM(*all_seq, i);
                 if (!sv || !PyUnicode_Check(sv)) {
                     throw QoreStandardException("PYTHON-IMPORT-ERROR", "module '%s' __all__ has an invalid " \
                         "element with type '%s'; expecting 'str'", module, sv ? Py_TYPE(sv)->tp_name : "null");

@@ -233,6 +233,7 @@ class PythonTest inherits Test {
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
         addTestCase("identity, attributes and weak references of Qore objects in Python", \qoreObjectProtocolTest());
         addTestCase("static members, enums and hashdecls of Qore in Python", \qoreDeclarationTest());
+        addTestCase("callables, iterators, module attributes, __all__ and import errors", \pythonApiTest());
         addTestCase("import test", \importTest());
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
@@ -3156,6 +3157,123 @@ def static_value():
         auto info = p.evalExpression("Info(a=11)");
         assertEq("hash<Info>", info.fullType());
         assertEq(11, info.a);
+    }
+
+    # callFunction() calls any callable; Python iterators are Qore iterators; the global variables of a Python program
+    # are read and set; __all__ is honored when it is a list; a Qore module that cannot be loaded raises ImportError
+    pythonApiTest() {
+        PythonProgram p("
+import functools
+part = functools.partial(pow, 2)
+notcallable = 5
+class K:
+    def __init__(self, v):
+        self.v = v
+    @staticmethod
+    def st(x):
+        return x + 1
+    @classmethod
+    def cm(cls, x):
+        return cls.__name__ + str(x)
+def gen(n):
+    for i in range(n):
+        yield i * 10
+def failing_gen():
+    yield 1
+    raise ValueError('generator failed')
+class HasNext:
+    def __iter__(self):
+        return self
+    def __next__(self):
+        raise StopIteration
+    def next(self):
+        return 'own next'
+def has_next():
+    return HasNext()
+def limit():
+    return limits['max']
+", "api.py");
+
+        # any callable: a functools.partial object, a class, a builtin
+        assertEq(8, p.callFunction("part", 3));
+        assertEq(4, p.callFunction("K", 4).v);
+        assertEq(3, p.callFunction("len", (1, 2, 3)));
+        assertThrows("NO-FUNCTION", "'notcallable' is not callable", \p.callFunction(), "notcallable");
+        assertThrows("NO-FUNCTION", "cannot find function 'nosuch'", \p.callFunction(), "nosuch");
+        # static methods and class methods
+        assertEq(2, p.callMethod("K", "st", 1));
+        assertEq("K5", p.callMethod("K", "cm", 5));
+        assertThrows("NO-METHOD", "cannot find method 'K\\.nosuch\\(\\)'", \p.callMethod(), ("K", "nosuch"));
+
+        # a generator is a Qore iterator
+        list<auto> l = ();
+        foreach auto v in (p.callFunction("gen", 3)) {
+            l += v;
+        }
+        assertEq((0, 10, 20), l);
+        object it = p.callFunction("gen", 1);
+        assertFalse(it.valid());
+        assertThrows("ITERATOR-ERROR", "not on a valid iterator position", \it.getValue());
+        assertTrue(it.next());
+        assertTrue(it.valid());
+        assertEq(0, it.getValue());
+        assertFalse(it.next());
+        assertFalse(it.valid());
+        # an exception raised by the generator is raised by next()
+        object fit = p.callFunction("failing_gen");
+        assertTrue(fit.next());
+        assertThrows("builtins.ValueError", "generator failed", \fit.next());
+        # a type with its own next() method is not mapped
+        assertEq("own next", p.callFunction("has_next").next());
+
+        # the global variables of the program
+        p.setAttribute("limits", {"max": 20});
+        assertEq(20, p.callFunction("limit"));
+        assertEq({"max": 20}, p.getAttribute("limits"));
+        assertEq(5, p.getAttribute(name: "notcallable"));
+        assertThrows("NO-ATTRIBUTE", "no global variable 'nosuch'", \p.getAttribute(), "nosuch");
+
+        TmpDir tmp("python-api-");
+        # __all__ as a list
+        {
+            File f();
+            f.open2(tmp.path + "/allmod_list.py", O_WRONLY | O_CREAT | O_TRUNC);
+            f.write("__all__ = ['pub']\ndef pub():\n    return 1\ndef notpub():\n    return 2\n");
+            f.close();
+            Program pgm(PO_NEW_STYLE);
+            pgm.loadModule("python");
+            pgm.issueModuleCmd("python", "add-module-path " + tmp.path);
+            pgm.issueModuleCmd("python", "import allmod_list");
+            pgm.parse("int sub pub() { return allmod_list::pub(); }\n", "allmod");
+            assertEq(1, pgm.callFunction("pub"));
+            assertThrows("NO-FUNCTION", \pgm.callFunction(), "allmod_list::notpub");
+        }
+
+        # a Qore module that cannot be loaded raises ImportError with the Qore exception as the cause; a module that
+        # does not exist raises ModuleNotFoundError
+        {
+            File f();
+            f.open2(tmp.path + "/PyApiBroken.qm", O_WRONLY | O_CREAT | O_TRUNC);
+            f.write("%modern\nmodule PyApiBroken { version = \"1.0\"; desc = \"test\"; author = \"test\"; "
+                "url = \"test\"; license = \"MIT\"; }\nthis is not valid\n");
+            f.close();
+            Program pgm(PO_NEW_STYLE);
+            pgm.parse(sprintf("%%append-module-path %s\nint sub marker() { return 1; }\n", tmp.path), "broken");
+            pgm.loadModule("python");
+            pgm.issueModuleCmd("python", "parse broken_import import qoreloader\n"
+                "def try_import(name):\n"
+                "    try:\n"
+                "        __import__('qore.' + name)\n"
+                "    except ImportError as e:\n"
+                "        return [type(e).__name__, str(e), type(e.__cause__).__name__ if e.__cause__ else None]\n");
+            pgm.issueModuleCmd("python", "export-func try_import");
+            list<auto> r = pgm.callFunction("try_import", "PyApiBroken");
+            assertEq("ImportError", r[0]);
+            assertRegex("^cannot load Qore module 'PyApiBroken': PARSE-EXCEPTION", r[1]);
+            assertEq("QoreException", r[2]);
+            r = pgm.callFunction("try_import", "PyApiNoSuchModule");
+            assertEq(("ModuleNotFoundError", "No module named 'qore.PyApiNoSuchModule'", NOTHING), r);
+        }
     }
 
     # Python values that a Qore value cannot represent raise an exception instead of crashing the process: containers

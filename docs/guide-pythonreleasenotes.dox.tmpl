@@ -24,12 +24,23 @@
       performed before acquiring the Python GIL when a sandbox manager is active
       (<a href="https://github.com/qoretechnologies/qore/issues/5116">issue 5116</a>)
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
+    - Added @ref Python::PythonProgram::getAttribute() "PythonProgram::getAttribute()" and
+      @ref Python::PythonProgram::setAttribute() "PythonProgram::setAttribute()" to read and set the global variables
+      of a %Python program (<a href="https://github.com/qoretechnologies/qore/issues/5501">issue 5501</a>)
     - %Qore code can call %Python functions and methods with keyword arguments with the new \c keyword_arguments
       argument of @ref Python::PythonProgram::callFunctionArgs() "PythonProgram::callFunctionArgs()" and
       @ref Python::PythonProgram::callMethodArgs() "PythonProgram::callMethodArgs()" (see
       @ref python_keyword_arguments; <a href="https://github.com/qoretechnologies/qore/issues/5498">issue 5498</a>)
 
     <b>Bug Fixes:</b>
+    - @ref Python::PythonProgram::callFunction() "PythonProgram::callFunction()" calls any callable global or builtin
+      (ex: a class, a \c functools.partial object, \c len), and
+      @ref Python::PythonProgram::callMethod() "PythonProgram::callMethod()" any callable attribute of the class (only
+      plain functions were found); %Python iterators (ex: generators) are %Qore iterators; \c __all__ is honored when
+      it is a list (only tuples were); a %Qore module that exists but cannot be loaded raises \c ImportError with the
+      %Qore error instead of \c ModuleNotFoundError; the static \c PythonProgram::eval*() methods raise
+      \c PYTHON-ERROR instead of asserting when there is no Python program context
+      (<a href="https://github.com/qoretechnologies/qore/issues/5501">issue 5501</a>)
     - a %Qore object is the same %Python object each time it is passed to %Python (each pass created a new object,
       and objects were not equal); reading a missing member raises \c AttributeError instead of returning \c None
       (so \c hasattr() and \c getattr() with a default work; private members, and objects of %Python subclasses that

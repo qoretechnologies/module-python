@@ -40,8 +40,10 @@ print(t.getTable().selectRow({"where": {"col1": "value"}}))
     See the next section about importing the special \c <tt><b>qore.__root__</b></tt> module.
 
     @note Unlike <tt><b>qore.__root__</b></tt>, using any other submodule name other than <tt><b>__root__</b></tt>
-    after <tt><b>qore</b></tt> will cause a %Qore module to be loaded.  If the %Qore module cannot be found, an
-    appropriate exception is thrown.
+    after <tt><b>qore</b></tt> will cause a %Qore module to be loaded.  If the %Qore module cannot be found,
+    \c ModuleNotFoundError is raised; if it exists but cannot be loaded (ex: it has a parse error), \c ImportError is
+    raised with the %Qore error in its message and the %Qore exception (a \c qoreloader.QoreException) as its
+    \c __cause__.
 
     @section python_qore_root_imports qore.__root__ Module
 

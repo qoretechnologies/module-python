@@ -191,6 +191,13 @@ Qore exception in its arguments, and a Qore exception was then guessed from a `R
 `QorePythonStackLocationHelper` adds the Python frames to the Qore call stack of Qore code called from Python (Qore
 methods, callables and functions), starting with the innermost frame (`sys._getframe(0)`).
 
+## Python Iterators
+
+The Qore class of a Python type with `__next__` (and without attributes named `next`, `getValue` or `valid`) has
+`AbstractIterator` as a builtin virtual base class and the methods `next()` (`PyIter_Next()`), `getValue()` and
+`valid()`; the current item is the internal member `__$PYITER__` (a list with the item, or no value), so Qore releases
+it with the object.
+
 ## Python Objects of Qore Objects
 
 A Qore object has at most one Python object (`PyQoreObject` with a strong reference) in each interpreter: `proxy_map`

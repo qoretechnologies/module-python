@@ -84,12 +84,16 @@ auto PythonProgram::run() {
 }
 
 //! Call the given function and return the result
-/** @param func_name the function name to call
+/** The function can be any callable global of the program (ex: a function, a class, a \c functools.partial object)
+    or builtin (ex: \c len)
+
+    @param func_name the function name to call
     @param ... arguments to the function should follow the name converted to Python values as per @ref python_qore_to_python
 
     @return the return value of the Python function converted to Qore as per @ref python_python_to_qore
 
-    @throw NO-FUNCTION the given function cannot be found in the Python program's module dictionary
+    @throw NO-FUNCTION the given function cannot be found in the Python program's module dictionary or in the
+    builtins, or is not callable
 
     @see @ref python_exceptionsguide
 */
@@ -171,6 +175,43 @@ string s = p.callMethodArgs("Report", "render", ((1, 2),), {"fmt": "csv", "title
 auto PythonProgram::callMethodArgs(string class_name, string method_name, *softlist<auto> arguments,
         *hash<auto> keyword_arguments) [flags=NAMED_ARGS] {
     return pp->callMethod(xsink, class_name, method_name, arguments, 0, keyword_arguments);
+}
+
+//! Returns the value of a global variable (an attribute of the module) of the Python program
+/** @param name the name of the variable
+
+    @return the value converted to Qore as per @ref python_python_to_qore
+
+    @par Example:
+    @code{.py}
+PythonProgram p("limits = {'max': 10}", "config.py");
+hash<auto> limits = p.getAttribute("limits");
+    @endcode
+
+    @throw NO-ATTRIBUTE the Python program has no global variable with the given name
+
+    @since python 1.3
+*/
+auto PythonProgram::getAttribute(string name) [flags=NAMED_ARGS] {
+    return pp->getAttribute(xsink, *name);
+}
+
+//! Sets a global variable (an attribute of the module) of the Python program
+/** @param name the name of the variable
+    @param value the value, converted to Python as per @ref python_qore_to_python
+
+    @par Example:
+    @code{.py}
+PythonProgram p("def limit():\n    return limits['max']", "config.py");
+p.setAttribute("limits", {"max": 20});
+# 20
+int max = p.callFunction("limit");
+    @endcode
+
+    @since python 1.3
+*/
+nothing PythonProgram::setAttribute(string name, auto value) [flags=NAMED_ARGS] {
+    pp->setAttribute(xsink, *name, value);
 }
 
 //! Parse, compile, and evaluate the given statement and return any result; declarations are not persistent
@@ -294,7 +335,10 @@ PythonProgram::aliasDefinition(string python_source_path, string python_target_p
  */
 static auto PythonProgram::evalStatement(string source_code, string source_label = "stmt") [flags=NAMED_ARGS] {
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
-    assert(pypgm);
+    if (!pypgm) {
+        xsink->raiseException("PYTHON-ERROR", "there is no Python program context in the current Program");
+        return QoreValue();
+    }
     return pypgm->eval(xsink, *source_code, *source_label, Py_file_input, true);
 }
 
@@ -303,6 +347,7 @@ static auto PythonProgram::evalStatement(string source_code, string source_label
     @param source_label the label or file name of the source
 
     @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
+    @throw PYTHON-ERROR there is no Python program context in the current Program
 
     @note This method uses the PythonProgram context in the current program to parse, compile, and evaluate the input
     string
@@ -311,7 +356,10 @@ static auto PythonProgram::evalStatement(string source_code, string source_label
  */
 static auto PythonProgram::evalStatementKeep(string source_code, string source_label = "stmt") [flags=NAMED_ARGS] {
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
-    assert(pypgm);
+    if (!pypgm) {
+        xsink->raiseException("PYTHON-ERROR", "there is no Python program context in the current Program");
+        return QoreValue();
+    }
     return pypgm->eval(xsink, *source_code, *source_label, Py_file_input, false);
 }
 
@@ -325,7 +373,10 @@ static auto PythonProgram::evalStatementKeep(string source_code, string source_l
  */
 static auto PythonProgram::evalExpression(string source_code, string source_label = "exp") [flags=NAMED_ARGS] {
     QorePythonProgram* pypgm = QorePythonProgram::getContext();
-    assert(pypgm);
+    if (!pypgm) {
+        xsink->raiseException("PYTHON-ERROR", "there is no Python program context in the current Program");
+        return QoreValue();
+    }
     return pypgm->eval(xsink, *source_code, *source_label, Py_eval_input, false);
 }
 

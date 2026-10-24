@@ -32,6 +32,8 @@ p.issueModuleCmd("python", "import math");
     %Python objects (ex: \c exit and \c quit, which would hide %Qore's @ref Qore::exit() "exit()") or values with
     %Qore equivalents (\c True, \c False, \c None).
 
+    If the module defines \c __all__ (a list or another sequence of names), only the names in it are imported.
+
     The methods of a %Python class whose names have a special meaning in %Qore classes (\c constructor,
     \c destructor, \c copy, \c methodGate, \c memberGate and \c memberNotification) are imported with a \c _
     prefix: ex: the \c copy() method of a %Python class is \c _copy() in %Qore.
@@ -49,6 +51,20 @@ p.issueModuleCmd("python", "import math");
     object (ex: a \c lambda or a \c functools.partial object stored in the object) and methods added to its class
     after its %Qore class was created are called with all the arguments; calling an attribute that is not callable
     raises a \c METHOD-DOES-NOT-EXIST exception.
+
+    A %Python iterator (an object with a \c __next__() method, ex: a generator) is an
+    @ref Qore::AbstractIterator "AbstractIterator" in %Qore, so it can be iterated with \c foreach and the other
+    iterator APIs (unless its class has attributes named \c next, \c getValue or \c valid):
+
+    @code{.py}
+PythonProgram p("def squares(n):\n    for i in range(n):\n        yield i * i\n", "gen.py");
+# prints 0 1 4
+foreach int v in (p.callFunction("squares", 3)) {
+    printf("%d\n", v);
+}
+    @endcode
+
+    A coroutine can be run with \c asyncio.run() in a %Python function called from %Qore.
 
     @subsection python_qore_overrides Qore Classes Inheriting Python Classes
 

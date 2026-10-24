@@ -132,6 +132,12 @@ public:
     DLLLOCAL QoreValue eval(ExceptionSink* xsink, const QoreString& source_code, const QoreString& source_label,
             int input, bool encapsulate);
 
+    //! Returns the value of a global variable of the program's module
+    DLLLOCAL QoreValue getAttribute(ExceptionSink* xsink, const QoreString& name);
+
+    //! Sets a global variable of the program's module
+    DLLLOCAL void setAttribute(ExceptionSink* xsink, const QoreString& name, QoreValue value);
+
     //! Call the function and return the result
     /** @param kwargs the keyword arguments of the call, if any
     */
@@ -774,6 +780,18 @@ protected:
 
     DLLLOCAL static QoreValue execPythonStaticMethod(const QoreMethod& meth, PyObject* m, const QoreListNode* args,
             q_rt_flags_t rtflags, ExceptionSink* xsink);
+    //! AbstractIterator::next() of the Qore classes of Python iterators: gets the next item of the iterator
+    DLLLOCAL static QoreValue execPythonIteratorNext(const QoreMethod& meth, const void* m, QoreObject* self,
+        QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink);
+
+    //! AbstractIterator::getValue() of the Qore classes of Python iterators: returns the current item
+    DLLLOCAL static QoreValue execPythonIteratorGetValue(const QoreMethod& meth, const void* m, QoreObject* self,
+        QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink);
+
+    //! AbstractIterator::valid() of the Qore classes of Python iterators: returns true if there is a current item
+    DLLLOCAL static QoreValue execPythonIteratorValid(const QoreMethod& meth, const void* m, QoreObject* self,
+        QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink);
+
     DLLLOCAL static QoreValue execPythonNormalMethod(const QoreMethod& meth, PyObject* m, QoreObject* self,
             QorePythonPrivateData* pd, const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink);
 
