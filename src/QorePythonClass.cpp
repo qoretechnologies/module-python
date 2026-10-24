@@ -100,7 +100,8 @@ QoreValue QorePythonClass::methodGate(const QoreMethod& meth, void* m, QoreObjec
     }
 
     const QorePythonClass* cls = static_cast<const QorePythonClass*>(meth.getClass());
-    return cls->callPythonMethod(xsink, pypgm, mname->c_str(), args, pd, 2);
+    // the arguments of the call follow the method name
+    return cls->callPythonMethod(xsink, pypgm, mname->c_str(), args, pd, 1);
 }
 
 // static method
@@ -130,27 +131,25 @@ QoreValue QorePythonClass::callPythonMethod(ExceptionSink* xsink, QorePythonProg
     }
     PyObject* pyobj = pd->get();
     assert(pyobj);
-    PyTypeObject* mtype = Py_TYPE(pyobj);
-    // Use PyObject_GetAttrString to properly traverse the MRO for inherited methods
-    // (PyDict_GetItemString only looks in the immediate type's dict, missing inherited methods like __sizeof__)
-    // Note: PyObject_GetAttrString returns a new reference and may return a bound method
-    QorePythonReferenceHolder attr(PyObject_GetAttrString((PyObject*)mtype, mname));
-    if (!*attr) {
+    // the attribute of the object, as in Python: a method bound to the object, a class method bound to its class, a
+    // static method, or a callable attribute of the object (ex: a lambda or a functools.partial object)
+    QorePythonReferenceHolder attr(PyObject_GetAttrString(pyobj, mname));
+    if (!attr) {
+        if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            pypgm->checkPythonException(xsink);
+            return QoreValue();
+        }
         PyErr_Clear();
         xsink->raiseException("METHOD-DOES-NOT-EXIST", "Python value of type '%s' has no method or member '%s'",
-            mtype->tp_name, mname);
+            Py_TYPE(pyobj)->tp_name, mname);
         return QoreValue();
     }
-    // PyObject_GetAttrString can return either:
-    // 1. Unbound descriptors (function, method_descriptor, etc.) - need self prepended, use arg_offset
-    // 2. Bound methods (builtin_function_or_method for classmethods) - self already bound, use arg_offset - 1
-    // Check if it's a bound builtin method by checking if it's a PyCFunction that's already bound
-    PyTypeObject* attr_type = Py_TYPE(*attr);
-    if (PyCFunction_Check(*attr) && attr_type != &PyMethodDescr_Type && attr_type != &PyClassMethodDescr_Type) {
-        // Bound method - only skip the method name, not the implicit self
-        return pypgm->callPythonMethod(xsink, *attr, pyobj, args, arg_offset - 1);
+    if (!PyCallable_Check(*attr)) {
+        xsink->raiseException("METHOD-DOES-NOT-EXIST", "the attribute '%s' of the Python value of type '%s' is not "
+            "callable (type '%s')", mname, Py_TYPE(pyobj)->tp_name, Py_TYPE(*attr)->tp_name);
+        return QoreValue();
     }
-    return pypgm->callPythonMethod(xsink, *attr, pyobj, args, arg_offset);
+    return pypgm->callInternal(xsink, *attr, args, arg_offset);
 }
 
 QoreValue QorePythonClass::getPythonMember(QorePythonProgram* pypgm, const char* mname, QorePythonPrivateData* pd,

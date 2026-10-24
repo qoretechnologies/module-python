@@ -30,6 +30,13 @@
       @ref python_keyword_arguments; <a href="https://github.com/qoretechnologies/qore/issues/5498">issue 5498</a>)
 
     <b>Bug Fixes:</b>
+    - %Python class methods (\c \@classmethod) can be called from %Qore: they are static methods that get the class
+      they are called for, also when inherited (calling one raised \c PYTHON-ERROR, and class methods were missing
+      from exported classes); callable attributes of %Python objects (ex: a \c lambda stored in the object) can be
+      called as methods; methods that are not methods of the %Qore class (ex: added to the %Python class later) get
+      their first argument, which was dropped; all the base classes of a %Python class are parent classes of its
+      %Qore class (only the first was) (see @ref python_classes_in_qore;
+      <a href="https://github.com/qoretechnologies/qore/issues/5499">issue 5499</a>)
     - keyword arguments in calls from %Python to %Qore callables and constructors raise a \c TypeError, as they do for
       %Qore functions and methods, instead of being ignored (ex: <tt>Mutex(bogus=1)</tt> created a \c Mutex)
       (<a href="https://github.com/qoretechnologies/qore/issues/5498">issue 5498</a>)

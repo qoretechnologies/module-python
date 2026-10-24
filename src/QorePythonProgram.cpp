@@ -4090,37 +4090,6 @@ void QorePythonProgram::raiseQoreException(ExceptionSink& xsink, PyObject* ex_ty
         seen);
 }
 
-QoreValue QorePythonProgram::callPythonMethod(ExceptionSink* xsink, PyObject* attr, PyObject* obj,
-    const QoreListNode* args, size_t arg_offset) {
-    PyTypeObject* mtype = Py_TYPE(attr);
-    // check for static method
-    if (mtype == &PyStaticMethod_Type) {
-        // get callable from static method
-        QorePythonReferenceHolder py_method(PyStaticMethod_Type.tp_descr_get(attr, nullptr, nullptr));
-        assert(py_method);
-        return callInternal(xsink, *py_method, args, arg_offset);
-    }
-    // check for wrapper descriptors -> normal method
-    if (mtype == &PyWrapperDescr_Type) {
-        return callWrapperDescriptorMethod(xsink, obj, attr, args, arg_offset);
-    }
-    if (mtype == &PyMethodDescr_Type) {
-        return callMethodDescriptorMethod(xsink, obj, attr, args, arg_offset);
-    }
-    if (mtype == &PyClassMethodDescr_Type) {
-        return callClassMethodDescriptorMethod(xsink, obj, attr, args, arg_offset);
-    }
-    if (PyFunction_Check(attr)) {
-        return callFunctionObject(xsink, attr, args, arg_offset, obj);
-    }
-    if (PyCFunction_Check(attr)) {
-        return callCFunctionMethod(xsink, attr, args, arg_offset);
-    }
-
-    xsink->raiseException("PYTHON-ERROR", "cannot make a call with Python type '%s'", mtype->tp_name);
-    return QoreValue();
-}
-
 QoreClass* QorePythonProgram::getCreateQorePythonClass(ExceptionSink* xsink, PyTypeObject* type, int flags) {
     // grab current Program's parse lock before manipulating namespaces
     CurrentProgramRuntimeExternalParseContextHelper pch;
@@ -4312,17 +4281,21 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
         cls->addBaseClass(qore_bclass, false);
     }
 
-    // add single base class
-    if (type->tp_base) {
-        QoreClass* bclass = getCreateQorePythonClassIntern(xsink, type->tp_base, nsset);
+    // add the base classes in the order of their declaration, which is the order of Python's method resolution for
+    // the methods that the class inherits
+    PyObject* bases = type->tp_bases;
+    Py_ssize_t base_count = bases && PyTuple_Check(bases) ? PyTuple_GET_SIZE(bases) : 0;
+    for (Py_ssize_t i = 0; i < base_count; ++i) {
+        PyTypeObject* base = reinterpret_cast<PyTypeObject*>(PyTuple_GET_ITEM(bases, i));
+        QoreClass* bclass = getCreateQorePythonClassIntern(xsink, base, nsset);
         if (!bclass) {
             assert(*xsink);
             return nullptr;
         }
 
         printd(5, "QorePythonProgram::setupQorePythonClass() %s (id: %d) parent: %s (bclass: %p id: %d)\n",
-            type->tp_name, cls->getID(), type->tp_base->tp_name, bclass, bclass->getID());
-        cls->addBaseClass(bclass, !PyQoreObjectType_Check(type->tp_base));
+            type->tp_name, cls->getID(), base->tp_name, bclass, bclass->getID());
+        cls->addBaseClass(bclass, !PyQoreObjectType_Check(base));
     }
 
     cls->addBuiltinVirtualBaseClass(QC_PYTHONBASEOBJECT);
@@ -4341,7 +4314,54 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
         }
     }
 
+    addPythonClassMethods(type, cls.get());
+
     return cls.release();
+}
+
+void QorePythonProgram::addPythonClassMethods(PyTypeObject* type, QorePythonClass* cls) {
+    // the class methods of the type and the ones it inherits, in method resolution order, are static methods of the
+    // class bound to the type, so that they get the class they are called for, as in Python (a class method that the
+    // class inherits gets the class, not the base class that defines it)
+    PyObject* mro = type->tp_mro;
+    Py_ssize_t mro_size = mro && PyTuple_Check(mro) ? PyTuple_GET_SIZE(mro) : 0;
+    strset_t names;
+    for (Py_ssize_t i = 0; i < mro_size; ++i) {
+        PyTypeObject* t = reinterpret_cast<PyTypeObject*>(PyTuple_GET_ITEM(mro, i));
+        if (!t->tp_dict) {
+            continue;
+        }
+        PyObject* key, * value;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(t->tp_dict, &pos, &key, &value)) {
+            const char* keystr = PyUnicode_Check(key) ? PyUnicode_AsUTF8(key) : nullptr;
+            if (!keystr) {
+                PyErr_Clear();
+                continue;
+            }
+            // a name defined by a class earlier in the method resolution order hides the others
+            if (!names.insert(keystr).second || Py_TYPE(value) != &PyClassMethod_Type) {
+                continue;
+            }
+            QoreString special_name;
+            if (qore_python_is_special_method_name(keystr)) {
+                special_name.sprintf("_%s", keystr);
+                keystr = special_name.c_str();
+            }
+            // returns a new reference: the method bound to the type
+            PyObject* py_method = PyClassMethod_Type.tp_descr_get(value, nullptr, reinterpret_cast<PyObject*>(type));
+            if (!py_method) {
+                PyErr_Clear();
+                continue;
+            }
+            cls->addObj(py_method);
+            cls->addStaticMethod((void*)py_method, keystr,
+                (q_external_static_method_t)QorePythonProgram::execPythonStaticMethod, Public, static_meth_flags,
+                QDOM_UNCONTROLLED_API, autoTypeInfo);
+            printd(5, "QorePythonProgram::addPythonClassMethods() added class method %s.%s() from %s\n",
+                type->tp_name, keystr, t->tp_name);
+        }
+    }
 }
 
 void QorePythonProgram::addPythonTypeAttributes(PyTypeObject* type, QorePythonClass* cls, strset_t& names) {

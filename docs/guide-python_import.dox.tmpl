@@ -36,6 +36,47 @@ p.issueModuleCmd("python", "import math");
     \c destructor, \c copy, \c methodGate, \c memberGate and \c memberNotification) are imported with a \c _
     prefix: ex: the \c copy() method of a %Python class is \c _copy() in %Qore.
 
+    @section python_classes_in_qore Python Classes in Qore
+
+    The methods of a %Python class are methods of its %Qore class, and its static methods and class methods
+    (\c \@staticmethod, \c \@classmethod) are static methods; a class method gets the class it is called for: the
+    class methods that a class inherits are static methods of its %Qore class that get the class, not the base class
+    that defines them.  All the base classes of a %Python class are parent classes of its %Qore class, in the order of
+    their declaration.
+
+    The attributes of a %Python object are read as members of the %Qore object (ex: \c obj.attr).  Other methods of
+    the object are called as %Python gets them from the object (with \c getattr()): callable attributes of the
+    object (ex: a \c lambda or a \c functools.partial object stored in the object) and methods added to its class
+    after its %Qore class was created are called with all the arguments; calling an attribute that is not callable
+    raises a \c METHOD-DOES-NOT-EXIST exception.
+
+    @par Example:
+    @code{.py}
+%modern
+%requires python
+
+PythonProgram p("
+class Order:
+    def __init__(self):
+        self.total = lambda tax: 100 * (1 + tax)
+    @classmethod
+    def create(cls):
+        return cls()
+
+class RushOrder(Order):
+    pass
+
+def new_order():
+    return RushOrder.create()
+", "orders.py");
+
+object order = p.callFunction("new_order");
+# "RushOrder": the class method gets the subclass
+printf("%s\n", order.create().className());
+# 120.0: a callable attribute of the object
+printf("%y\n", order.total(0.2));
+    @endcode
+
     @section python_module_path Set the Python Module Path
 
     Elements can be added to the %Python import module path by using the following module command:

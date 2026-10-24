@@ -147,6 +147,7 @@ class PythonTest inherits Test {
         addTestCase("references surviving interpreter finalization", \persistentReferenceFinalizationTest());
         addTestCase("named argument calls", \namedArgumentTest());
         addTestCase("keyword arguments between Qore and Python", \keywordArgumentTest());
+        addTestCase("class methods, callable attributes and base classes of Python classes", \pythonClassTest());
         addTestCase("import test", \importTest());
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
@@ -2663,6 +2664,107 @@ def subclass_kw():
         assertRegex("takes no keyword arguments", p.callFunction("method_kw"));
         # a Python subclass of a Qore class takes the keyword arguments of its __init__()
         assertEq(("n", "Plain() takes no keyword arguments"), p.callFunction("subclass_kw"));
+    }
+
+    # Python class methods are static methods bound to the class they are called for; methods that are not methods
+    # of the Qore class (callable attributes of the object, methods added to the class later) are called as Python
+    # gets them from the object, with all their arguments; all the base classes of a Python class are its Qore parents
+    pythonClassTest() {
+        PythonProgram p("
+import functools
+
+class A:
+    def __init__(self):
+        self.v = 1
+        self.cb = lambda x: x + 1
+        self.part = functools.partial(lambda a, b: [a, b], 'p')
+        self.notcallable = 5
+    @classmethod
+    def cm(cls, v):
+        return [cls.__name__, v * 2]
+    @classmethod
+    def make(cls):
+        return cls()
+    @property
+    def broken(self):
+        raise ValueError('broken property')
+
+class B(A):
+    pass
+
+class M1:
+    def m1(self):
+        return 'm1'
+    @classmethod
+    def mixin_cm(cls):
+        return cls.__name__
+
+class C(B, M1):
+    @classmethod
+    def cm(cls, v):
+        return ['C.cm', v]
+
+def get(name):
+    return globals()[name]()
+
+def patch():
+    A.late = lambda self, *args: ['late', list(args)]
+", "classes.py");
+
+        object a = p.callFunction("get", "A");
+        object b = p.callFunction("get", "B");
+        object c = p.callFunction("get", "C");
+
+        # class methods get the class of the object; inherited ones get the subclass
+        assertEq(("A", 6), a.cm(3));
+        assertEq(("B", 8), b.cm(4));
+        assertEq(("C.cm", 5), c.cm(5));
+        assertEq("C", c.mixin_cm());
+        object made = b.make();
+        assertEq("B", made.className());
+
+        # callable attributes of the object
+        assertEq(2, a.cb(1));
+        assertEq(("p", "q"), a.part("q"));
+        # (closures: call references to methods that are not methods of the Qore class cannot be created)
+        assertThrows("METHOD-DOES-NOT-EXIST", "'notcallable' of the Python value of type 'A' is not callable",
+            sub () { a.notcallable(); });
+        assertThrows("METHOD-DOES-NOT-EXIST", "has no method or member 'nosuch'", sub () { a.nosuch(); });
+        # an exception other than AttributeError raised when getting the attribute is raised
+        assertThrows("builtins.ValueError", "broken property", sub () { a.broken(); });
+
+        # a method added to the class after its Qore class was created gets all its arguments
+        p.callFunction("patch");
+        assertEq(("late", (1, 2, 3)), a.late(1, 2, 3));
+        assertEq(("late", ()), a.late());
+
+        # all the base classes are parents of the Qore class
+        assertEq(("B", "M1"), (map $1.cls.getName(), Class::getClass(c).getParentClasses())[0..1]);
+        assertEq("m1", c.m1());
+
+        # a class method of a class exported to a Qore Program
+        Program pgm(PO_NEW_STYLE);
+        pgm.issueModuleCmd("python", "parse class_test.py #
+class Base:
+    @classmethod
+    def make(cls):
+        return cls()
+    @classmethod
+    def name(cls):
+        return cls.__name__
+class Sub(Base):
+    pass
+");
+        pgm.issueModuleCmd("python", "export-class Base");
+        pgm.issueModuleCmd("python", "export-class Sub");
+        pgm.parse("
+string sub base_name() { return Base::name(); }
+string sub sub_name() { return Sub::name(); }
+string sub made_name() { return Sub::make().name(); }
+", "class_test");
+        assertEq("Base", pgm.callFunction("base_name"));
+        assertEq("Sub", pgm.callFunction("sub_name"));
+        assertEq("Sub", pgm.callFunction("made_name"));
     }
 
     # Python values that a Qore value cannot represent raise an exception instead of crashing the process: containers

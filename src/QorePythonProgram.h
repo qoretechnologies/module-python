@@ -183,10 +183,6 @@ public:
     //! Clears any Python
     DLLLOCAL void clearPythonException();
 
-    //! Calls a Python method and returns the result as a %Qore value
-    DLLLOCAL QoreValue callPythonMethod(ExceptionSink* xsink, PyObject* attr, PyObject* obj, const QoreListNode* args,
-            size_t arg_offset = 0);
-
     //! Import Python code into the Qore program object
     DLLLOCAL int import(ExceptionSink* xsink, const char* module, const char* symbol = nullptr, int filter = IF_ALL);
 
@@ -362,6 +358,9 @@ public:
     //! Adds the methods and members of the dict of the given Python type to the Qore class
     /** @param names the names already added, which are skipped (names defined by subclasses); updated
     */
+    //! Adds the class methods of the type and its base classes as static methods bound to the type
+    DLLLOCAL void addPythonClassMethods(PyTypeObject* type, QorePythonClass* cls);
+
     DLLLOCAL void addPythonTypeAttributes(PyTypeObject* type, QorePythonClass* cls, strset_t& names);
 
     //! Creates ot retrieves a QoreClass for the given Python type
