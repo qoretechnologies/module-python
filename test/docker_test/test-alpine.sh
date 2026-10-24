@@ -39,6 +39,7 @@ python3 -c "import qoreloader;from qore.__root__.Qore.Thread import Counter;c = 
 PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-lifecycle.py
 PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-threads.py
 PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-exceptions.py
+PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-objects.py
 
 # add Qore user and group
 if ! grep -q "^qore:x:${QORE_GID}" /etc/group; then

@@ -191,6 +191,22 @@ Qore exception in its arguments, and a Qore exception was then guessed from a `R
 `QorePythonStackLocationHelper` adds the Python frames to the Qore call stack of Qore code called from Python (Qore
 methods, callables and functions), starting with the innermost frame (`sys._getframe(0)`).
 
+## Python Objects of Qore Objects
+
+A Qore object has at most one Python object (`PyQoreObject` with a strong reference) in each interpreter: `proxy_map`
+in `PythonQoreClass.cpp` maps (interpreter, Qore object) to the Python object, under the leaf lock `qpy_proxy_lock`
+(fork handlers).  `wrap()` and `newQoreObject()` (objects of Qore classes created from Python) register the object;
+`releaseQoreObject()` removes it first, before the GIL can be released, so with the GIL a registered object always
+has references; free-threaded builds take the reference with `PyUnstable_TryIncRef()` (enabled with
+`PyUnstable_EnableTryIncRef()`), and free-threaded 3.13, which lacks it, has no map.  Objects of Python subclasses
+of Qore classes are not registered: the Qore object's private data gives the Python object.
+
+`py_getattro()` raises `AttributeError` for special names, members that the object does not have (declared members
+exist; undeclared ones exist with a value, as with `exists`; classes with `memberGate()` give all members) and
+`INVALID-MEMBER`/`PRIVATE-MEMBER`; `py_setattro()` sets Qore members (data descriptors of the Python type and new
+attributes of objects with a dict, i.e. of Python subclasses, are Python attributes); `__dir__` (in each type's
+dict) adds the public members; `weakreflist` is the `__weaklistoffset__` member.
+
 ## Qore Classes Inheriting Python Classes
 
 `execPythonConstructor()` runs for the Qore class of the Python class; when the object's class is a Qore class (not a

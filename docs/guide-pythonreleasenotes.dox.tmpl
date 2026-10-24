@@ -30,6 +30,13 @@
       @ref python_keyword_arguments; <a href="https://github.com/qoretechnologies/qore/issues/5498">issue 5498</a>)
 
     <b>Bug Fixes:</b>
+    - a %Qore object is the same %Python object each time it is passed to %Python (each pass created a new object,
+      and objects were not equal); reading a missing member raises \c AttributeError instead of returning \c None
+      (so \c hasattr() and \c getattr() with a default work; private members, and objects of %Python subclasses that
+      did not call the %Qore constructor, raised \c QoreException or gave \c None); setting attributes sets %Qore
+      members, also from %Python subclasses (which set %Python attributes that %Qore did not see); \c dir() lists
+      the public members; %Qore objects support weak references (see @ref python_qore_objects;
+      <a href="https://github.com/qoretechnologies/qore/issues/5500">issue 5500</a>)
     - %Python class methods (\c \@classmethod) can be called from %Qore: they are static methods that get the class
       they are called for, also when inherited (calling one raised \c PYTHON-ERROR, and class methods were missing
       from exported classes); callable attributes of %Python objects (ex: a \c lambda stored in the object) can be

@@ -13,6 +13,33 @@ Program p(PO_NEW_STYLE);
 p.issueModuleCmd("python", "import-ns MyQoreNamespace MyPythonModule");
     @endcode
 
+    @section python_qore_objects Qore Objects in Python
+
+    A %Qore object is the same %Python object each time it is passed to %Python code in an interpreter, so \c is,
+    \c == and \c hash() work as for %Python objects.  The public members of a %Qore object are attributes of its
+    %Python object:
+    - reading a member that the object does not have raises \c AttributeError (also for private members), so
+      \c hasattr() and \c getattr() with a default follow %Python semantics; a member whose value was removed is
+      missing as with %Qore's \c exists operator; special names (ex: \c __fspath__) are never %Qore members; for a
+      class with a \c memberGate() method, the method gives the values of the members that the object does not have
+    - setting an attribute sets the %Qore member (\c del removes it); setting a private member or a member that a
+      class with declared members does not declare raises \c AttributeError; on the object of a %Python subclass,
+      attributes that are not %Qore members (and properties of the %Python class) are %Python attributes
+    - \c dir() lists the public members of the %Qore object as well
+    - %Python can create weak references to %Qore objects (\c weakref)
+
+    @par Example:
+    @code{.py}
+import qoreloader
+from qore.__root__.Qore.Thread import Queue, Mutex
+
+q = Queue()
+m = Mutex()
+q.push(m)
+assert q.get() is m
+assert getattr(q, 'nope', None) is None
+    @endcode
+
     @section python_inheriting_qore_classes Inheriting Qore Classes in Python
 
     When %Python code inherits %Qore classes, the %Qore constructor must be explicitly called in the %Python

@@ -35,6 +35,40 @@ class PythonSandboxTestReader {
     }
 }
 
+#! has declared public and private members; used to check the attributes of Qore objects in Python
+class PythonAttrDecl {
+    public {
+        int pub = 1;
+        *string opt;
+    }
+
+    private {
+        int priv = 2;
+    }
+
+    int getPriv() {
+        return priv;
+    }
+
+    int getPub() {
+        return pub;
+    }
+}
+
+#! has no declared members; used to check the attributes of Qore objects in Python
+class PythonAttrDyn {
+    auto get(string m) {
+        return self{m};
+    }
+}
+
+#! gives the values of its members with a member gate; used to check the attributes of Qore objects in Python
+class PythonAttrGate {
+    auto memberGate(string m) {
+        return "gate-" + m;
+    }
+}
+
 #! its destructor throws an exception; used to raise chained Qore exceptions
 class PythonThrowingDestructor {
     destructor() {
@@ -149,6 +183,7 @@ class PythonTest inherits Test {
         addTestCase("keyword arguments between Qore and Python", \keywordArgumentTest());
         addTestCase("class methods, callable attributes and base classes of Python classes", \pythonClassTest());
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
+        addTestCase("identity, attributes and weak references of Qore objects in Python", \qoreObjectProtocolTest());
         addTestCase("import test", \importTest());
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
@@ -2898,6 +2933,115 @@ object sub new_t() { return new T(); }
             delete q1;
         }
         assertThrows("OBJECT-ALREADY-DELETED", \pgm.callFunction(), "call_saved");
+    }
+
+    # a Qore object is the same Python object each time it is passed to Python; missing members raise AttributeError,
+    # so hasattr() and getattr() with a default work; Python code sets the members of Qore objects (also from Python
+    # subclasses), dir() lists the public members, and Qore objects support weak references
+    qoreObjectProtocolTest() {
+        PythonProgram p("
+import weakref
+from qore.__root__ import PythonAttrDecl, PythonAttrDyn, PythonAttrGate
+from qore.__root__.Qore.Thread import Queue, Mutex
+
+class Sub(PythonAttrDecl):
+    def __init__(self):
+        super().__init__()
+        self.pyattr = 'py'
+        self.pub = 5
+    @property
+    def prop(self):
+        return self._p
+    @prop.setter
+    def prop(self, v):
+        self._p = v * 2
+
+class NoInit(PythonAttrDecl):
+    def __init__(self):
+        pass
+
+def error(f):
+    try:
+        f()
+    except AttributeError as e:
+        return str(e)
+
+def identity():
+    q = Queue()
+    m = Mutex()
+    q.push(m)
+    a = q.get()
+    return [a is m, a == m, hash(a) == hash(m)]
+
+def same(o1, o2):
+    return o1 is o2
+
+def run():
+    r = {}
+    d = PythonAttrDecl()
+    r['pub'] = d.pub
+    r['opt'] = d.opt
+    r['has_nope'] = hasattr(d, 'nope')
+    r['getattr_default'] = getattr(d, 'nope', 42)
+    r['nope'] = error(lambda: d.nope)
+    r['fspath'] = hasattr(d, '__fspath__')
+    r['priv_get'] = error(lambda: d.priv)
+    d.pub = 10
+    r['pub_set'] = d.getPub()
+    r['priv_set'] = error(lambda: setattr(d, 'priv', 3))
+    r['priv_unchanged'] = d.getPriv()
+    r['decl_new'] = error(lambda: setattr(d, 'newmember', 3))
+    y = PythonAttrDyn()
+    y.x = 7
+    r['dyn_x'] = [y.x, y.get('x')]
+    del y.x
+    r['dyn_del'] = [hasattr(y, 'x'), error(lambda: delattr(y, 'x'))]
+    r['gate'] = PythonAttrGate().anything
+    s = Sub()
+    r['sub_pub'] = s.getPub()
+    r['sub_pyattr'] = s.pyattr
+    s.prop = 4
+    r['sub_prop'] = s.prop
+    r['noinit'] = [error(lambda: NoInit().pub), hasattr(NoInit(), 'pub')]
+    r['dir'] = ['pub' in dir(d), 'opt' in dir(d), 'priv' in dir(d), 'getPub' in dir(d)]
+    w = weakref.ref(d)
+    r['weak'] = w() is d
+    del d
+    r['weak_dead'] = w() is None
+    return r
+", "objects.py");
+
+        assertEq((True, True, True), p.callFunction("identity"));
+        # a Qore object passed twice from Qore is the same Python object
+        Mutex m();
+        assertTrue(p.callFunction("same", m, m));
+        assertFalse(p.callFunction("same", m, new Mutex()));
+
+        hash<auto> r = p.callFunction("run");
+        assertEq(1, r.pub);
+        assertEq(NOTHING, r.opt);
+        assertFalse(r.has_nope);
+        assertEq(42, r.getattr_default);
+        assertEq("'PythonAttrDecl' object has no attribute 'nope'", r.nope);
+        # special names are Python protocols, not Qore members
+        assertFalse(r.fspath);
+        assertEq("'priv' is a private member of class 'PythonAttrDecl'", r.priv_get);
+        assertEq(10, r.pub_set);
+        assertEq("'priv' is a private member of Qore class 'PythonAttrDecl'", r.priv_set);
+        assertEq(2, r.priv_unchanged);
+        assertEq("'newmember' is not a registered member of Qore class 'PythonAttrDecl'", r.decl_new);
+        assertEq((7, 7), r.dyn_x);
+        assertEq((False, "'PythonAttrDyn' object has no attribute 'x'"), r.dyn_del);
+        assertEq("gate-anything", r.gate);
+        # the members set by a Python subclass are the Qore object's; other attributes are Python attributes
+        assertEq(5, r.sub_pub);
+        assertEq("py", r.sub_pyattr);
+        assertEq(8, r.sub_prop);
+        assertRegex("^'NoInit' object has no attribute 'pub' \\(the object has no Qore object", r.noinit[0]);
+        assertFalse(r.noinit[1]);
+        assertEq((True, True, False, True), r.dir);
+        assertTrue(r.weak);
+        assertTrue(r.weak_dead);
     }
 
     # Python values that a Qore value cannot represent raise an exception instead of crashing the process: containers

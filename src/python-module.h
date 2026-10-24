@@ -539,6 +539,9 @@ DLLLOCAL void qpy_unregister_fork_handlers();
 //! QorePythonProgram::getQoreSubclassType())
 DLLLOCAL extern QoreThreadLock qpy_subclass_type_lock;
 
+//! Serializes the map of the Python objects of Qore objects (a leaf lock; see PythonQoreClass::findProxy())
+DLLLOCAL extern QoreThreadLock qpy_proxy_lock;
+
 //! Initializes the type used to deregister threads that Python created; called once in the main interpreter
 DLLLOCAL int qore_python_thread_registration_init();
 

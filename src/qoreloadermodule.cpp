@@ -225,8 +225,10 @@ static std::atomic<int> qpy_destroyed_count{0};
 static QoreForkHandlerRegistration* qpy_lock_fork_reg = nullptr;
 static QoreForkHandlerRegistration* qpy_global_lock_fork_reg = nullptr;
 static QoreForkHandlerRegistration* qpy_subclass_type_lock_fork_reg = nullptr;
+static QoreForkHandlerRegistration* qpy_proxy_lock_fork_reg = nullptr;
 
 QoreThreadLock qpy_subclass_type_lock;
+QoreThreadLock qpy_proxy_lock;
 
 int qpy_register_fork_handlers() {
     assert(!qpy_lock_fork_reg && !qpy_global_lock_fork_reg);
@@ -237,7 +239,10 @@ int qpy_register_fork_handlers() {
     qpy_subclass_type_lock_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_qore_subclass_types",
         qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock,
         &qpy_subclass_type_lock);
-    if (!qpy_lock_fork_reg || !qpy_global_lock_fork_reg || !qpy_subclass_type_lock_fork_reg) {
+    qpy_proxy_lock_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_qore_object_proxies",
+        qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock, &qpy_proxy_lock);
+    if (!qpy_lock_fork_reg || !qpy_global_lock_fork_reg || !qpy_subclass_type_lock_fork_reg
+        || !qpy_proxy_lock_fork_reg) {
         qpy_unregister_fork_handlers();
         return -1;
     }
@@ -245,6 +250,8 @@ int qpy_register_fork_handlers() {
 }
 
 void qpy_unregister_fork_handlers() {
+    qore_unregister_fork_handler(qpy_proxy_lock_fork_reg);
+    qpy_proxy_lock_fork_reg = nullptr;
     qore_unregister_fork_handler(qpy_subclass_type_lock_fork_reg);
     qpy_subclass_type_lock_fork_reg = nullptr;
     qore_unregister_fork_handler(qpy_global_lock_fork_reg);

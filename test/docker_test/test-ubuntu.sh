@@ -62,6 +62,7 @@ ${PYTHON} -c "import qoreloader;from qore.__root__.Qore.Thread import Counter;c 
 PYTHONPATH="$PWD" ${PYTHON} -B -W error ../test/standalone-lifecycle.py
 PYTHONPATH="$PWD" ${PYTHON} -B -W error ../test/standalone-threads.py
 PYTHONPATH="$PWD" ${PYTHON} -B -W error ../test/standalone-exceptions.py
+PYTHONPATH="$PWD" ${PYTHON} -B -W error ../test/standalone-objects.py
 
 # add Qore user and group
 groupadd -o -g ${QORE_GID} qore

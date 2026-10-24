@@ -36,6 +36,10 @@ struct PyQoreObject {
     bool strong;
     //! true if qobj's private data holds a reference to this object (an instance of a Python subclass of a Qore class)
     bool qobj_refs_self;
+    //! true if the object is the Python object of qobj in its interpreter (see PythonQoreClass::findProxy())
+    bool registered;
+    //! the weak references to the object
+    PyObject* weakreflist;
 };
 
 class PythonQoreClass {
@@ -70,7 +74,16 @@ public:
     */
     DLLLOCAL PyObject* wrap(QoreObject* obj);
 
+    //! returns a new reference to the Python object of the Qore object in the current interpreter, if any
+    /** Each Qore object has at most one Python object in an interpreter, so that the same Qore object is the same
+        Python object (identity)
+    */
+    DLLLOCAL static PyObject* findProxy(QoreObject* obj);
+
     DLLLOCAL static const QoreClass* getQoreClass(PyTypeObject* type);
+
+    //! __dir__(): the Python attributes and the public members of the Qore object
+    DLLLOCAL static PyObject* py_dir(PyObject* unused, PyObject* self);
 
 private:
     QoreString name;
@@ -118,6 +131,17 @@ private:
     DLLLOCAL static void py_free(PyQoreObject* self);
     // get attribute
     DLLLOCAL static PyObject* py_getattro(PyObject* self, PyObject* attr);
+    // set or delete attribute
+    DLLLOCAL static int py_setattro(PyObject* self, PyObject* attr, PyObject* value);
+
+    //! makes the object the Python object of its Qore object in the current interpreter
+    /** @return the object, or a new reference to the Python object registered by another thread meanwhile, in which
+        case the reference to \a self is released
+    */
+    DLLLOCAL static PyObject* registerProxy(PyQoreObject* self);
+
+    //! removes the object as the Python object of its Qore object; called before the Qore object is released
+    DLLLOCAL static void deregisterProxy(PyQoreObject* self);
 };
 
 /*

@@ -27,8 +27,15 @@
 #include <string.h>
 #include <memory>
 #include <set>
+#include <map>
 
 #include <frameobject.h>
+#if PY_VERSION_HEX < 0x030C0000
+// the member types and flags of Python 3.11 (Py_T_PYSSIZET and Py_READONLY since Python 3.12)
+#include <structmember.h>
+#define Py_T_PYSSIZET T_PYSSIZET
+#define Py_READONLY READONLY
+#endif
 
 #include <pthread.h>
 
@@ -106,6 +113,9 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, PyTypeObject* type, c
     // can be deleted afterwards
 }
 
+static PyMethodDef qore_dir_def = {"__dir__", PythonQoreClass::py_dir, METH_O,
+    "returns the Python attributes and the public members of the Qore object"};
+
 PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_name, const QoreClass& qcls, py_cls_map_t::iterator i) {
     //printd(5, "PythonQoreClass::PythonQoreClass() %s.%s py_type: %p\n", module_name, qcls.getName(), &py_type);
 
@@ -115,6 +125,12 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
     doc.sprintf("Python wrapper class for Qore class %s", qcls.getName());
     const char* docstr = pypgm->saveString(doc.c_str());
 
+    static PyMemberDef members[] = {
+        // the objects support weak references
+        {"__weaklistoffset__", Py_T_PYSSIZET, offsetof(PyQoreObject, weakreflist), Py_READONLY, nullptr},
+        {nullptr, 0, 0, 0, nullptr},
+    };
+
     PyType_Slot slots[] = {
         {Py_tp_doc, (void*)docstr},
         {Py_tp_dealloc, (void*)PythonQoreClass::py_dealloc},
@@ -122,6 +138,8 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
         {Py_tp_clear, (void*)PythonQoreClass::py_clear},
         {Py_tp_repr, (void*)PythonQoreClass::py_repr},
         {Py_tp_getattro, (void*)PythonQoreClass::py_getattro},
+        {Py_tp_setattro, (void*)PythonQoreClass::py_setattro},
+        {Py_tp_members, (void*)members},
         {Py_tp_base, (void*)&PythonQoreObjectBase_Type},
         {Py_tp_alloc, (void*)PyType_GenericAlloc},
         {Py_tp_init, (void*)PythonQoreClass::py_init},
@@ -177,6 +195,15 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
 
     // setup class
     populateClass(pypgm, qcls, cls_set, meth_set);
+
+    // dir() lists the public members of the Qore object
+    {
+        QorePythonReferenceHolder func(PyCFunction_NewEx(&qore_dir_def, nullptr, nullptr));
+        QorePythonReferenceHolder meth(func ? PyInstanceMethod_New(*func) : nullptr);
+        if (!meth || PyDict_SetItemString(py_type->tp_dict, "__dir__", *meth) < 0) {
+            PyErr_Clear();
+        }
+    }
 
     // add normal methods
     for (size_t i = 0; i < py_normal_meth_vec.size(); ++i) {
@@ -366,6 +393,95 @@ void PythonQoreClass::populateClass(QorePythonProgram* pypgm, const QoreClass& q
     }
 }
 
+// the Python objects of Qore objects: (interpreter, Qore object) -> Python object; the Python objects are borrowed:
+// they are removed from the map before they release their Qore objects; guarded by qpy_proxy_lock
+typedef std::map<std::pair<PyInterpreterState*, QoreObject*>, PyQoreObject*> proxy_map_t;
+static proxy_map_t proxy_map;
+
+// free-threaded Python 3.13 has no API to take a reference to an object whose reference count can reach zero in
+// another thread, so the Qore objects have no unique Python objects there
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030E0000
+#define QORE_PYTHON_NO_PROXY_MAP 1
+#endif
+
+// returns true if the object is a special name (ex: __fspath__), which is a Python protocol, not a Qore member
+static bool qore_python_is_special_name(const char* name) {
+    size_t len = strlen(name);
+    return len > 4 && name[0] == '_' && name[1] == '_' && name[len - 2] == '_' && name[len - 1] == '_';
+}
+
+PyObject* PythonQoreClass::findProxy(QoreObject* obj) {
+#ifdef QORE_PYTHON_NO_PROXY_MAP
+    return nullptr;
+#else
+    AutoLocker al(qpy_proxy_lock);
+    proxy_map_t::iterator i = proxy_map.find(proxy_map_t::key_type(
+        qore_python_get_interpreter(PyThreadState_Get()), obj));
+    if (i == proxy_map.end()) {
+        return nullptr;
+    }
+    PyObject* rv = reinterpret_cast<PyObject*>(i->second);
+#ifdef Py_GIL_DISABLED
+    // the object can be being deallocated by another thread, which removes it from the map
+    if (!PyUnstable_TryIncRef(rv)) {
+        return nullptr;
+    }
+#else
+    // with the GIL, an object being deallocated has been removed from the map before the GIL can be released
+    Py_INCREF(rv);
+#endif
+    return rv;
+#endif
+}
+
+PyObject* PythonQoreClass::registerProxy(PyQoreObject* self) {
+#ifndef QORE_PYTHON_NO_PROXY_MAP
+    assert(self->qobj && self->strong && !self->registered);
+#ifdef Py_GIL_DISABLED
+    PyUnstable_EnableTryIncRef(reinterpret_cast<PyObject*>(self));
+#endif
+    proxy_map_t::key_type key(qore_python_get_interpreter(PyThreadState_Get()), self->qobj);
+    while (true) {
+        PyObject* other;
+        {
+            AutoLocker al(qpy_proxy_lock);
+            std::pair<proxy_map_t::iterator, bool> rv = proxy_map.insert(proxy_map_t::value_type(key, self));
+            if (rv.second) {
+                self->registered = true;
+                break;
+            }
+            // another thread registered the Python object of the Qore object meanwhile
+            other = reinterpret_cast<PyObject*>(rv.first->second);
+#ifdef Py_GIL_DISABLED
+            if (!PyUnstable_TryIncRef(other)) {
+                // the other object is being deallocated and is about to be removed from the map
+                continue;
+            }
+#else
+            Py_INCREF(other);
+#endif
+        }
+        // releasing the object can run Qore code: it must be released without the lock
+        Py_DECREF(reinterpret_cast<PyObject*>(self));
+        return other;
+    }
+#endif
+    return reinterpret_cast<PyObject*>(self);
+}
+
+void PythonQoreClass::deregisterProxy(PyQoreObject* self) {
+    if (!self->registered) {
+        return;
+    }
+    self->registered = false;
+    AutoLocker al(qpy_proxy_lock);
+    proxy_map_t::iterator i = proxy_map.find(proxy_map_t::key_type(
+        qore_python_get_interpreter(PyThreadState_Get()), self->qobj));
+    if (i != proxy_map.end() && i->second == self) {
+        proxy_map.erase(i);
+    }
+}
+
 PyObject* PythonQoreClass::wrap(QoreObject* obj) {
     PyQoreObject* self = (PyQoreObject*)py_type->tp_alloc(py_type, 0);
     if (!self) {
@@ -377,7 +493,7 @@ PyObject* PythonQoreClass::wrap(QoreObject* obj) {
     self->qobj = obj;
     self->strong = true;
     //printd(5, "PythonQoreClass::wrap() obj: %p (%s)\n", obj, obj->getClassName());
-    return (PyObject*)self;
+    return registerProxy(self);
 }
 
 PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* args) {
@@ -673,7 +789,12 @@ int PythonQoreClass::newQoreObject(ExceptionSink& xsink, PyQoreObject* pyself, Q
     pyself->qobj = qobj;
     pyself->strong = true;
 
-    if (qcls) {
+    if (!qcls) {
+        // the Python object of the new Qore object; there can be no other one
+        PyObject* rv = registerProxy(pyself);
+        assert(rv == reinterpret_cast<PyObject*>(pyself));
+        (void)rv;
+    } else {
         // add private data for python class; the reference cycle between the two objects is visible to Python's cycle
         // collector while the Python object holds the only reference to the Qore object (see py_traverse())
         Py_INCREF(pyself);
@@ -691,17 +812,94 @@ int PythonQoreClass::newQoreObject(ExceptionSink& xsink, PyQoreObject* pyself, Q
     return -1;
 }
 
+// raises AttributeError for the Qore exception for a member that cannot be accessed (INVALID-MEMBER,
+// PRIVATE-MEMBER), and returns true, or returns false for other exceptions
+static bool qore_python_member_attribute_error(ExceptionSink& xsink) {
+    QoreValue err = xsink.getExceptionErr();
+    if (err.getType() != NT_STRING) {
+        return false;
+    }
+    const char* errstr = err.get<const QoreStringNode>()->c_str();
+    if (strcmp(errstr, "INVALID-MEMBER") && strcmp(errstr, "PRIVATE-MEMBER")) {
+        return false;
+    }
+    QoreStringValueHelper desc(xsink.getExceptionDesc());
+    PyErr_SetString(PyExc_AttributeError, desc->c_str());
+    xsink.clear();
+    return true;
+}
+
+// returns true if the name is a data descriptor of the Python type (ex: a property of a Python subclass), which
+// handles setting and deleting the attribute
+static bool qore_python_has_data_descriptor(PyTypeObject* type, PyObject* attr) {
+    PyObject* mro = type->tp_mro;
+    Py_ssize_t size = mro && PyTuple_Check(mro) ? PyTuple_GET_SIZE(mro) : 0;
+    for (Py_ssize_t i = 0; i < size; ++i) {
+        PyTypeObject* t = reinterpret_cast<PyTypeObject*>(PyTuple_GET_ITEM(mro, i));
+        // returns a borrowed reference
+        PyObject* v = t->tp_dict ? PyDict_GetItem(t->tp_dict, attr) : nullptr;
+        if (v) {
+            return Py_TYPE(v)->tp_descr_set != nullptr;
+        }
+    }
+    return false;
+}
+
+// returns true if the Qore object has the member with a value, as Qore's exists operator: a member whose value was
+// removed (QoreObject::removeMember() leaves NOTHING) does not exist; QoreObject::hasMember() raises INVALID-MEMBER
+// for a member that is not declared in a class with declared members, which the object does not have; called without
+// the GIL, as releasing the value can run Qore code
+static bool qore_python_has_member(QoreObject* obj, const char* member, ExceptionSink& xsink) {
+    bool rv = obj->hasMember(member, &xsink);
+    if (xsink) {
+        QoreValue err = xsink.getExceptionErr();
+        if (err.getType() == NT_STRING && !strcmp(err.get<const QoreStringNode>()->c_str(), "INVALID-MEMBER")) {
+            xsink.clear();
+        }
+        return false;
+    }
+    if (!rv) {
+        return false;
+    }
+    ValueHolder v(obj->evalMember(member, &xsink), &xsink);
+    return !xsink && !v->isNothing();
+}
+
+// raises AttributeError for a missing attribute as Python does: "'<type name>' object has no attribute '<name>'"
+static void qore_python_no_attribute(PyObject* self, const char* member, const char* extra = "") {
+    QorePythonReferenceHolder name(PyType_GetName(Py_TYPE(self)));
+    if (!name) {
+        return;
+    }
+    PyErr_Format(PyExc_AttributeError, "'%U' object has no attribute '%s'%s", *name, member, extra);
+}
+
 PyObject* PythonQoreClass::py_getattro(PyObject* self, PyObject* attr) {
     // first try to get python attribute
     PyObject* pyrv = PyObject_GenericGetAttr(self, attr);
-    if (pyrv) {
+    if (pyrv || !PyErr_ExceptionMatches(PyExc_AttributeError)) {
         return pyrv;
     }
-    // if that failed, then clear the error and try to get a Qore member
-    PyErr_Clear();
 
     assert(PyQoreObject_Check(self));
     assert(PyUnicode_Check(attr));
+    const char* member = PyUnicode_AsUTF8(attr);
+    if (!member) {
+        return nullptr;
+    }
+    // special names (ex: __fspath__, __array__) are Python protocols, not Qore members: the AttributeError is raised
+    if (qore_python_is_special_name(member)) {
+        return nullptr;
+    }
+    QoreObject* obj = reinterpret_cast<PyQoreObject*>(self)->qobj;
+    if (!obj) {
+        // ex: a Python subclass whose __init__() does not call the Qore constructor
+        qore_python_no_attribute(self, member, " (the object has no Qore object, as the constructor of the Qore "
+            "class was not called)");
+        return nullptr;
+    }
+    PyErr_Clear();
+
     QorePythonQoreEntryHelper qeh;
     if (!qeh.check()) {
         return nullptr;
@@ -711,26 +909,33 @@ PyObject* PythonQoreClass::py_getattro(PyObject* self, PyObject* attr) {
         return nullptr;
     }
 
-    const char* member = PyUnicode_AsUTF8(attr);
     ExceptionSink xsink;
-    QoreObject* obj = reinterpret_cast<PyQoreObject*>(self)->qobj;
-    if (!obj) {
-        Py_INCREF(Py_None);
-        return Py_None;
-    }
     //printd(5, "PythonQoreClass::py_getattro() obj %p %s.%s\n", obj, qcls->getName(), member);
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
     QoreExternalProgramContextHelper pch(&xsink, qore_python_pgm->getQoreProgram());
     if (!xsink) {
         ValueHolder v(&xsink);
+        bool exists = true;
         {
             QorePythonReleaseGilHelper prgh;
 
             QorePythonStackLocationHelper slh(qore_python_pgm);
 
-            v = obj->evalMember(member, &xsink);
+            // a member that the object does not have is an AttributeError, unless its class has a memberGate()
+            // method, which gives the values of all members
+            const QoreClass* ocls = obj->getClass();
+            bool priv;
+            if (!ocls->hasMemberGate() && !ocls->isPublicOrPrivateMember(member, priv)
+                && !qore_python_has_member(obj, member, xsink)) {
+                exists = false;
+            } else if (!xsink) {
+                v = obj->evalMember(member, &xsink);
+            }
         }
-        printd(5, "PythonQoreClass::py_getattro() obj %p %s.%s = %s\n", obj, qcls->getName(), member, v->getFullTypeName());
+        if (!exists && !xsink) {
+            qore_python_no_attribute(self, member);
+            return nullptr;
+        }
         QorePythonReferenceHolder rv;
         if (!xsink) {
             rv = qore_python_pgm->getPythonValue(*v, &xsink);
@@ -741,9 +946,142 @@ PyObject* PythonQoreClass::py_getattro(PyObject* self, PyObject* attr) {
             return rv.release();
         }
     }
+    if (qore_python_member_attribute_error(xsink)) {
+        return nullptr;
+    }
     qore_python_pgm->raisePythonException(xsink);
     assert(PyErr_Occurred());
     return nullptr;
+}
+
+int PythonQoreClass::py_setattro(PyObject* self, PyObject* attr, PyObject* value) {
+    assert(PyQoreObject_Check(self));
+    if (!PyUnicode_Check(attr)) {
+        return PyObject_GenericSetAttr(self, attr, value);
+    }
+    const char* member = PyUnicode_AsUTF8(attr);
+    if (!member) {
+        return -1;
+    }
+    QoreObject* obj = reinterpret_cast<PyQoreObject*>(self)->qobj;
+    // Python attributes: special names, attributes of objects without a Qore object, and data descriptors of the
+    // Python type (ex: a property of a Python subclass)
+    if (!obj || qore_python_is_special_name(member) || qore_python_has_data_descriptor(Py_TYPE(self), attr)) {
+        return PyObject_GenericSetAttr(self, attr, value);
+    }
+
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return -1;
+    }
+
+    ExceptionSink xsink;
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    QoreExternalProgramContextHelper pch(&xsink, qore_python_pgm->getQoreProgram());
+    if (!xsink) {
+        // the attribute is a Qore member if the class declares it or the object has it; otherwise an object of a
+        // Python subclass (which has a dict) gets a Python attribute
+        const QoreClass* ocls = obj->getClass();
+        bool priv;
+        bool declared = ocls->isPublicOrPrivateMember(member, priv);
+        bool has_member;
+        {
+            QorePythonReleaseGilHelper prgh;
+            has_member = declared || qore_python_has_member(obj, member, xsink);
+        }
+        if (xsink) {
+            // falls through to raise the exception
+        } else if (!has_member && Py_TYPE(self)->tp_dictoffset) {
+            return PyObject_GenericSetAttr(self, attr, value);
+        } else if (!value && !has_member) {
+            qore_python_no_attribute(self, member);
+            return -1;
+        } else if (declared && priv) {
+            PyErr_Format(PyExc_AttributeError, "'%s' is a private member of Qore class '%s'", member,
+                ocls->getName());
+            return -1;
+        } else if (!has_member && ocls->hasPublicMembersInHierarchy()) {
+            // a class with declared members has no other members
+            PyErr_Format(PyExc_AttributeError, "'%s' is not a registered member of Qore class '%s'", member,
+                ocls->getName());
+            return -1;
+        } else {
+            ValueHolder v(&xsink);
+            if (value) {
+                v = qore_python_pgm->getQoreValue(&xsink, value);
+            }
+            if (!xsink) {
+                // assigning the member or removing it releases the old value, which can run Qore code
+                QorePythonReleaseGilHelper prgh;
+                QorePythonStackLocationHelper slh(qore_python_pgm);
+                if (value) {
+                    obj->setMemberValue(member, nullptr, v.release(), &xsink);
+                } else {
+                    obj->removeMember(member, &xsink);
+                }
+            } else {
+                qore_python_release(v);
+            }
+            if (!xsink) {
+                return 0;
+            }
+        }
+    }
+    if (qore_python_member_attribute_error(xsink)) {
+        return -1;
+    }
+    qore_python_pgm->raisePythonException(xsink);
+    assert(PyErr_Occurred());
+    return -1;
+}
+
+PyObject* PythonQoreClass::py_dir(PyObject* /* unused */, PyObject* self) {
+    // the Python attributes
+    QorePythonReferenceHolder base_dir(PyObject_CallMethod(reinterpret_cast<PyObject*>(&PyBaseObject_Type),
+        "__dir__", "O", self));
+    if (!base_dir) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder rv(PySequence_List(*base_dir));
+    if (!rv) {
+        return nullptr;
+    }
+    QoreObject* obj = PyQoreObject_Check(self) ? reinterpret_cast<PyQoreObject*>(self)->qobj : nullptr;
+    if (!obj) {
+        return rv.release();
+    }
+
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
+    // the public members of the Qore object
+    ExceptionSink xsink;
+    ReferenceHolder<QoreListNode> members(&xsink);
+    {
+        QorePythonReleaseGilHelper prgh;
+        members = obj->getMemberList(&xsink);
+    }
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    if (xsink) {
+        qore_python_pgm->raisePythonException(xsink);
+        return nullptr;
+    }
+    const QoreClass* ocls = obj->getClass();
+    ConstListIterator i(*members);
+    while (i.next()) {
+        QoreStringValueHelper name(i.getValue(), QCS_UTF8, &xsink);
+        bool priv;
+        if (xsink || (ocls->isPublicOrPrivateMember(name->c_str(), priv) && priv)) {
+            xsink.clear();
+            continue;
+        }
+        QorePythonReferenceHolder str(PyUnicode_FromStringAndSize(name->c_str(), name->size()));
+        if (!str || PyList_Append(*rv, *str) < 0) {
+            return nullptr;
+        }
+    }
+    return rv.release();
 }
 
 const QoreClass* PythonQoreClass::findQoreClass(PyObject* self) {
@@ -799,6 +1137,8 @@ void PythonQoreClass::releaseQoreObject(PyQoreObject* self) {
     if (!obj) {
         return;
     }
+    // removed from the map of Python objects before the GIL can be released (see findProxy())
+    deregisterProxy(self);
     self->qobj = nullptr;
     if (!self->strong) {
         obj->tDeref();
@@ -821,6 +1161,9 @@ void PythonQoreClass::releaseQoreObject(PyQoreObject* self) {
 void PythonQoreClass::py_dealloc(PyQoreObject* self) {
     PyObject_GC_UnTrack(self);
     PyTypeObject* type = Py_TYPE(self);
+    if (self->weakreflist) {
+        PyObject_ClearWeakRefs(reinterpret_cast<PyObject*>(self));
+    }
     releaseQoreObject(self);
     type->tp_free(self);
     // PyType_GenericAlloc gives every instance a reference to its heap type.
