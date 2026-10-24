@@ -124,6 +124,15 @@ class PythonThrowingDestructor {
     }
 }
 
+#! throws an exception with a chain of n + 1 exceptions (one for each destructor that throws while it unwinds)
+sub python_test_chained_qore_exception(int n) {
+    PythonThrowingDestructor d();
+    if (n) {
+        python_test_chained_qore_exception(n - 1);
+    }
+    throw "CHAIN-ERR", "chain";
+}
+
 #! counts its destructions; used to check the lifetime of Qore objects used from Python
 class PythonLifecycleTracked {
     public {
@@ -232,7 +241,11 @@ class PythonTest inherits Test {
         addTestCase("class methods, callable attributes and base classes of Python classes", \pythonClassTest());
         addTestCase("assigning, removing and deleting the attributes of Python objects", \attributeWriteTest());
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
+        addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
+        addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("identity, attributes and weak references of Qore objects in Python", \qoreObjectProtocolTest());
+        addTestCase("the Python objects of Qore objects in weak reference callbacks and initialized again",
+            \qoreProxyLifetimeTest());
         addTestCase("static members, enums and hashdecls of Qore in Python", \qoreDeclarationTest());
         addTestCase("callables, iterators, module attributes, __all__ and import errors", \pythonApiTest());
         addTestCase("import test", \importTest());
@@ -241,6 +254,8 @@ class PythonTest inherits Test {
         addTestCase("the functions of qoreloader reject strings that cannot be converted", \qoreloaderArgumentTest());
         addTestCase("the scopes of evalStatement(), evalStatementKeep(), evalExpression() and run()", \evalScopeTest());
         addTestCase("module command syntax errors", \moduleCommandSyntaxTest());
+        addTestCase("conversion of deeply nested values, values changed while converted and str subclass keys",
+            \conversionRobustnessTest());
         addTestCase("type conversion test", \typeConversionTest());
         addTestCase("conversion of cyclic, shared and unrepresentable Python values", \unrepresentableValueTest());
         addTestCase("Qore number <-> Python int and decimal.Decimal", \numberConversionTest());
@@ -254,6 +269,8 @@ class PythonTest inherits Test {
         addTestCase("sandbox interrupt test", \sandboxInterruptTest());
         addTestCase("an interrupt stops running Python code", \runningInterruptTest());
         addTestCase("deleting a program interrupts the Python code that other threads run", \busyDeleteTest());
+        addTestCase("interrupts while a Python thread calls Qore", \interruptPythonThreadTest());
+        addTestCase("Qore exceptions in threads created by Python", \pythonThreadExceptionTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
         addTestCase("Python threads run under the sandbox of the interpreter's Program", \sandboxPythonThreadTest());
@@ -1386,6 +1403,19 @@ def catch_runtime_error(f):
         f()
     except RuntimeError as e:
         return type(e).__name__ + ': ' + str(e)
+def chain_on_qore(cb):
+    # a chain of 5 Python exceptions whose root is a Qore exception with a longer chain
+    try:
+        cb()
+    except Exception as x:
+        err = x
+    for i in range(5):
+        try:
+            raise err
+        except Exception as x:
+            err = ValueError('outer %d' % i)
+            err.__cause__ = x
+    raise err
 ", "exc.py");
 
         # Python -> Qore: the Python exception object is the argument; its attributes are available
@@ -1444,6 +1474,10 @@ def catch_runtime_error(f):
             assertEq("builtins.ValueError", ex.err);
             assertEq("builtins.KeyError", ex.next.err);
             assertFalse(exists ex.next.next);
+            # the KeyError was never raised: it has the Python location of the exception that it is chained to
+            assertEq("Python", ex.next.lang);
+            assertEq(ex.file, ex.next.file);
+            assertEq(ex.line, ex.next.line);
         }
         # the chain is limited to 20 exceptions
         try {
@@ -1457,6 +1491,18 @@ def catch_runtime_error(f):
             assertEq(20, count);
             assertEq("30", ex.desc);
             assertEq("29", ex.next.desc);
+        }
+        # also with the chain of a Qore exception that a Python exception is chained to
+        try {
+            p.callFunction("chain_on_qore", sub () { python_test_chained_qore_exception(25); });
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            int count = 0;
+            for (*hash<auto> h = ex; h; h = h.next) {
+                ++count;
+            }
+            assertEq(20, count);
+            assertEq("outer 4", ex.desc);
         }
 
         # a QoreException raised in Python is a Qore exception with its err, desc and arg
@@ -3157,6 +3203,75 @@ object sub new_t() { return new T(); }
         assertThrows("OBJECT-ALREADY-DELETED", \pgm.callFunction(), "call_saved");
     }
 
+    # the Python objects of a Program (ex: objects of a Python subclass of one of its classes kept by Python code) are
+    # released while the Program is still valid, so that the destructors of their Qore objects run in it: they ran
+    # after the Program was deleted (PROGRAM-ERROR); run in another process, as the error is printed by the destructor
+    programCleanupTest() {
+        TmpDir tmp("python-cleanup-");
+        string script = tmp.path + "/cleanup.q";
+        File f();
+        f.open2(script, O_WRONLY | O_CREAT | O_TRUNC);
+        f.write("%modern
+%requires python
+namespace CleanupTest {
+    class Tracked {
+        destructor() {
+            printf(\"destructor ran\\n\");
+        }
+    }
+}
+{
+    Program p(PO_NEW_STYLE);
+    p.importClass(\"CleanupTest::Tracked\");
+    p.issueModuleCmd(\"python\", \"import-ns CleanupTest x\");
+    p.issueModuleCmd(\"python\", \"parse cleanup.py import qoreloader\\nkeep = []\\n\"
+        \"class PyTracked(x.Tracked):\\n    pass\\ndef make():\\n    keep.append(PyTracked())\\n\");
+    p.issueModuleCmd(\"python\", \"export-func make\");
+    p.parse(\"sub run() { make(); }\", \"cleanup\");
+    p.callFunction(\"run\");
+}
+printf(\"done\\n\");
+");
+        f.close();
+        string output = backquote(sprintf("qore %s 2>&1", script));
+        assertEq("destructor ran\ndone\n", output);
+    }
+
+    # the Python object of an object of a Qore class that inherits a Python subclass of a Qore class is the Qore object
+    # (another Qore object of the Qore base class was created); the Qore base class is constructed by Qore, so
+    # __init__() cannot pass arguments to it
+    qorePythonQoreSubclassTest() {
+        Program pgm(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        pgm.loadModule("python");
+        pgm.issueModuleCmd("python", "parse qpq_test.py #
+from qore.__root__.Qore.Thread import Counter
+class PyCounter(Counter):
+    def me(self):
+        return self
+    def py_count(self):
+        return self.getCount()
+");
+        pgm.issueModuleCmd("python", "export-class PyCounter");
+        pgm.parse("
+class QoreCounter inherits PyCounter {
+    int qore_count() { return getCount(); }
+}
+class QoreCounterArgs inherits PyCounter {
+    constructor() : PyCounter(5) {}
+}
+object sub new_counter() { return new QoreCounter(); }
+object sub new_counter_args() { return new QoreCounterArgs(); }
+", "qpq_test");
+        object c = pgm.callFunction("new_counter");
+        assertTrue(c.me() == c);
+        c.inc();
+        c.inc();
+        assertEq(2, c.qore_count());
+        assertEq(2, c.py_count());
+        assertThrows("builtins.TypeError", "no arguments can be given to its __init__", \pgm.callFunction(),
+            "new_counter_args");
+    }
+
     # a Qore object is the same Python object each time it is passed to Python; missing members raise AttributeError,
     # so hasattr() and getattr() with a default work; Python code sets the members of Qore objects (also from Python
     # subclasses), dir() lists the public members, and Qore objects support weak references
@@ -3419,6 +3534,31 @@ def limit():
             pgm.parse("int sub pub() { return allmod_list::pub(); }\n", "allmod");
             assertEq(1, pgm.callFunction("pub"));
             assertThrows("NO-FUNCTION", \pgm.callFunction(), "allmod_list::notpub");
+        }
+        # names that cannot be encoded in UTF-8 (lone surrogates): in __all__ they raise UnicodeEncodeError; names of
+        # dir() are not imported
+        {
+            File f();
+            f.open2(tmp.path + "/allmod_surrogate.py", O_WRONLY | O_CREAT | O_TRUNC);
+            f.write("__all__ = ['pub', '\\udc80']\ndef pub():\n    return 1\n");
+            f.close();
+            f.open2(tmp.path + "/dirmod_surrogate.py", O_WRONLY | O_CREAT | O_TRUNC);
+            f.write("globals()['\\udc80'] = 1\ndef pub():\n    return 2\n");
+            f.close();
+            Program pgm(PO_NEW_STYLE);
+            pgm.loadModule("python");
+            pgm.issueModuleCmd("python", "add-module-path " + tmp.path);
+            assertThrows("builtins.UnicodeEncodeError", "surrogates not allowed", \pgm.issueModuleCmd(),
+                ("python", "import allmod_surrogate"));
+            pgm.issueModuleCmd("python", "import dirmod_surrogate");
+            pgm.parse("int sub pub() { return dirmod_surrogate::pub(); }\n", "dirmod");
+            assertEq(2, pgm.callFunction("pub"));
+        }
+        # a module name that cannot be encoded in UTF-8 given to the meta path finder of the module
+        {
+            PythonProgram ip("import importlib\ndef imp(name):\n    try:\n        importlib.import_module(name)\n"
+                "    except Exception as e:\n        return type(e).__name__\n", "imp_surrogate.py");
+            assertEq("UnicodeEncodeError", ip.evalExpression("imp('\\udc80')"));
         }
 
         # a Qore module that cannot be loaded raises ImportError with the Qore exception as the cause; a module that
@@ -3817,6 +3957,158 @@ def colliding_keys():
     # or destructor tripped an assertion and could not be called; only copy was renamed); the constants of Python's
     # builtins module are not imported into Python::builtins (its exit and quit objects shadowed Qore's exit(), and
     # reading such a constant aborted the process at exit), while its functions and classes are
+    # the callback of a weak reference to the Python object of a Qore object runs while the object is deallocated:
+    # converting the Qore object to Python again gives another Python object (the object being deallocated was given,
+    # which was then freed); calling __init__() again raises RuntimeError (it created another Qore object)
+    qoreProxyLifetimeTest() {
+        Counter c(7);
+        PythonProgram p("
+import gc, weakref
+from qore.__root__.Qore.Thread import Counter as QoreCounter
+saved = []
+def run(get):
+    p = get()
+    def cb(r):
+        saved.append(get())
+    r = weakref.ref(p, cb)
+    del p
+    gc.collect()
+    return [x.getCount() for x in saved]
+def reinit():
+    o = QoreCounter(2)
+    try:
+        o.__init__(3)
+    except RuntimeError as e:
+        return [str(e), o.getCount()]
+    return 'no error'
+", "proxy_lifetime.py");
+        assertEq((7,), p.callFunction("run", Counter sub () { return c; }));
+        assertEq(("the 'qore.Thread.Counter' object has already been initialized", 2), p.callFunction("reinit"));
+    }
+
+    # containers nested too deeply for the stack raise an exception instead of overflowing it; values that change
+    # while they are converted (by Python code that the conversion runs) are referenced; str subclasses are string keys
+    conversionRobustnessTest() {
+        PythonProgram p("
+import datetime, enum
+
+def nested(n):
+    x = []
+    for i in range(n):
+        x = [x]
+    return x
+
+def nested_dict(n):
+    x = {}
+    for i in range(n):
+        x = {'a': x}
+    return x
+
+def depth(v):
+    n = 0
+    while v:
+        v = v[0] if isinstance(v, list) else v['a']
+        n += 1
+    return n
+
+items = []
+
+class ClearingZone(datetime.tzinfo):
+    # clears the list that holds the datetime while the datetime is converted
+    def utcoffset(self, dt):
+        items.clear()
+        return datetime.timedelta(hours=1)
+    def dst(self, dt):
+        return datetime.timedelta(0)
+
+def clearing():
+    items.append(datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=ClearingZone()))
+    items.append(1)
+    return items
+
+class IntZone(datetime.tzinfo):
+    def utcoffset(self, dt):
+        return 3600
+    def dst(self, dt):
+        return None
+
+def int_offset():
+    return datetime.datetime(2020, 1, 1, tzinfo=IntZone())
+
+class MyTime(datetime.time):
+    pass
+
+def time_subclass():
+    return MyTime(1, 2, 3)
+
+class Color(enum.StrEnum):
+    RED = 'red'
+
+def str_enum_key():
+    return {Color.RED: 1}
+", "robust.py");
+
+        # values nested too deeply raise STACK-LIMIT-EXCEEDED (Qore's limit of the thread's stack) or
+        # PYTHON-VALUE-ERROR (Python's recursion limit), whichever is reached first; on a thread created by Qore: once
+        # the jni module has created the JVM, the JVM's guard zones in the stack of the primary thread are not known to
+        # Qore or Python
+        Queue results();
+        background sub () {
+            code check = sub (code c) {
+                try {
+                    c();
+                    results.push("no error");
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex.err);
+                }
+            };
+            # Python -> Qore
+            check(sub () { p.callFunction("nested", 1000000); });
+            check(sub () { p.callFunction("nested_dict", 1000000); });
+            # Qore -> Python
+            auto deep = ();
+            for (int i = 0; i < 1000000; ++i) {
+                deep = (deep,);
+            }
+            check(sub () { p.callFunction("depth", deep); });
+            delete deep;
+            hash<auto> deep_hash = {};
+            for (int i = 0; i < 1000000; ++i) {
+                deep_hash = {"a": deep_hash};
+            }
+            check(sub () { p.callFunction("depth", deep_hash); });
+        }();
+        for (int i = 0; i < 4; ++i) {
+            string err = results.get();
+            assertTrue(err == "STACK-LIMIT-EXCEEDED" || err == "PYTHON-VALUE-ERROR", err);
+        }
+        # a moderately nested value is converted
+        list<auto> l = p.callFunction("nested", 50);
+        int n = 0;
+        while (l) {
+            l = l[0];
+            ++n;
+        }
+        assertEq(50, n);
+
+        # the list is cleared while its first element is converted
+        list<auto> cleared = p.callFunction("clearing");
+        assertEq(1, cleared.size());
+        assertEq(2020-01-02T03:04:05+01:00, cleared[0]);
+
+        # datetime.utcoffset() checks the offset that tzinfo.utcoffset() returns
+        assertThrows("builtins.TypeError", "utcoffset", \p.callFunction(), "int_offset");
+
+        # subclasses of datetime.time
+        date t = p.callFunction("time_subclass");
+        assertEq(1, t.hours());
+        assertEq(2, t.minutes());
+        assertEq(3, t.seconds());
+
+        # a str subclass key is a string key
+        assertEq({"red": 1}, p.callFunction("str_enum_key"));
+    }
+
     # evalStatement() runs in the __main__ module of the interpreter, evalStatementKeep() and evalExpression() in the
     # globals of the program; statements have no value, and run() runs the code of the program again
     evalScopeTest() {
@@ -4374,6 +4666,86 @@ int sub simple() {
         }
         # the interrupt is not raised later
         assertEq(42, p.callFunction("simple"));
+    }
+
+    # a Qore exception raised in a thread created by Python: with Python 3.12, the thread returned to Python with
+    # another thread state attached, on which the exception was set (crash: "error return without exception set")
+    pythonThreadExceptionTest() {
+        if (Python::FreeThreading) {
+            testSkip("Python threads in sub-interpreters not supported with free-threading (PEP 703)");
+        }
+        PythonProgram pp("
+import threading
+from qore.__root__.Qore.Thread import Counter
+res = []
+def loop():
+    c = Counter(3)
+    for i in range(3):
+        try:
+            c.dec(); c.dec(); c.dec(); c.dec()
+        except Exception as e:
+            res.append(type(e).__name__)
+    res.append(c.getCount())
+def run():
+    t = threading.Thread(target=loop)
+    t.start()
+    t.join()
+    return res
+", "thread_exception.py");
+        assertEq(("QoreException", "QoreException", "QoreException", 0), pp.callFunction("run"));
+    }
+
+    # interrupts requested while a thread created by Python calls Qore methods: each call creates a helper with the GIL
+    # held, which registers the interrupt callback; the helper waited for a callback that waited for the GIL
+    # (deadlock)
+    interruptPythonThreadTest() {
+        if (Python::FreeThreading) {
+            testSkip("Background threads with Python not supported with free-threading (PEP 703)");
+        }
+        Program pgm(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        pgm.loadModule("python");
+        pgm.parse("
+our PythonProgram pp('
+import threading
+from qore.__root__.Qore.Thread import Counter
+done = threading.Event()
+stats = {\"calls\": 0, \"interrupted\": 0}
+def loop():
+    c = Counter()
+    while not done.is_set():
+        try:
+            c.getCount()
+            stats[\"calls\"] += 1
+        except BaseException:
+            stats[\"interrupted\"] += 1
+t = None
+def start():
+    global t
+    t = threading.Thread(target=loop)
+    t.start()
+def stop():
+    done.set()
+    t.join()
+    return stats
+', 'interrupt_thread.py');
+sub start() { pp.callFunction('start'); }
+hash<auto> sub stop() { return pp.callFunction('stop'); }
+", "interrupt_thread");
+        pgm.run();
+        SandboxManager sm();
+        pgm.setSandboxManager(sm);
+        pgm.callFunction("start");
+        date end = now_us() + 3s;
+        int requests = 0;
+        while (now_us() < end) {
+            sm.requestInterrupt();
+            sm.clearInterrupt();
+            ++requests;
+        }
+        hash<auto> stats = pgm.callFunction("stop");
+        assertGt(0, requests);
+        assertGt(0, stats.calls);
+        assertGt(0, stats.interrupted);
     }
 
     # deleting a PythonProgram while another thread runs its Python code interrupts the code, so that the deletion does

@@ -42,6 +42,16 @@
       <a href="https://github.com/qoretechnologies/qore/issues/5503">issue 5503</a>)
 
     <b>Bug Fixes:</b>
+    - values nested too deeply for the stack (in either direction) raise an exception instead of crashing; values
+      that %Python code changes while they are converted (ex: in \c tzinfo.utcoffset()) are converted safely;
+      \c str subclass keys (ex: \c StrEnum members) are strings; \c datetime.time subclasses are converted;
+      invalid UTC offsets raise the %Python exception; \c __all__ entries and module names with lone surrogates no
+      longer crash; the %Python object of a %Qore object is not reused while it is deallocated (weak reference
+      callbacks), and calling \c __init__() again raises \c RuntimeError; a %Qore class inheriting a %Python subclass
+      of a %Qore class uses its own %Qore object; interrupting a %Python thread that calls %Qore no longer deadlocks;
+      with %Python 3.12, %Qore exceptions in threads created by %Python no longer crash; %Qore objects held by the
+      %Python objects of a %Program are released while the %Program is valid (their destructors raised
+      \c PROGRAM-ERROR) (<a href="https://github.com/qoretechnologies/qore/issues/5515">issue 5515</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

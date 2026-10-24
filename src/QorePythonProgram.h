@@ -469,7 +469,7 @@ public:
         @param val the Python datetime object
         @return the Qore DateTimeNode or nullptr on error (if xsink is set)
     */
-    DLLLOCAL static DateTimeNode* getQoreDateTimeFromDateTime(ExceptionSink* xsink, PyObject* val);
+    DLLLOCAL DateTimeNode* getQoreDateTimeFromDateTime(ExceptionSink* xsink, PyObject* val);
 
     //! Returns a Qore absolute date time value from a Python Date object
     DLLLOCAL static DateTimeNode* getQoreDateTimeFromDate(PyObject* val);
@@ -540,6 +540,11 @@ public:
     DLLLOCAL static QoreObject* getQoreSubclassObject(PyObject* pyobj);
 
     DLLLOCAL static QorePythonProgram* getContext();
+
+    //! returns the number of fork() calls that made this process from the process that loaded the module
+    DLLLOCAL static unsigned getForkGeneration() {
+        return fork_generation;
+    }
 
     //! Static initialization
     DLLLOCAL static int staticInit();
@@ -669,6 +674,8 @@ protected:
 
     // for local program thread management
     mutable int pgm_thr_cnt = 0;
+    //! the TID of the thread that deletes the program (see deleteIntern()); in the py_thr_lck lock
+    int deleting_tid = 0;
     mutable int pgm_thr_waiting = 0;
     mutable QoreCondition pgm_thr_cond;
 
@@ -687,15 +694,19 @@ protected:
         @param ex_value the normalized exception
         @param traceback the traceback of the exception or Py_None
         @param seen the exceptions already raised, so that a cycle of chained exceptions ends
+        @param chained_loc the location of the exception that this one is chained to, if any; the location of an
+        exception without a traceback (one that was never raised, ex: a __cause__ set directly)
     */
     DLLLOCAL void raiseQoreException(ExceptionSink& xsink, PyObject* ex_type, PyObject* ex_value,
-        PyObject* traceback, pyobj_set_t& seen);
+        PyObject* traceback, pyobj_set_t& seen, const QoreExternalProgramLocationWrapper* chained_loc = nullptr);
 
     //! Raises a Qore exception raised in Python again with its location, call stack and chained exceptions
-    /** @return true if the Python exception was raised for a Qore exception, which was raised again in \a xsink,
+    /** @param max_exceptions the maximum number of exceptions of its chain raised
+
+        @return true if the Python exception was raised for a Qore exception, which was raised again in \a xsink,
         false if not
     */
-    DLLLOCAL bool raiseOriginalQoreException(ExceptionSink& xsink, PyObject* ex_value);
+    DLLLOCAL bool raiseOriginalQoreException(ExceptionSink& xsink, PyObject* ex_value, int max_exceptions);
 
     //! Returns a new qoreloader.QoreException object for the Qore exception given and the exceptions chained to it
     /** @return the exception or nullptr with a Python exception set
@@ -902,11 +913,19 @@ protected:
     DLLLOCAL int createInterpreter(QorePythonGilHelper& qpgh, ExceptionSink* xsink);
 
     //! Returns the Python thread state for this interpreter
-    DLLLOCAL PyThreadState* getAcquireThreadState() const {
+    //! Returns the cached Python thread state for this interpreter of the current thread, if any, and counts the use
+    /** @param python the cached state, if any
+        @return false if another thread deletes the program (the use is not counted)
+    */
+    DLLLOCAL bool getAcquireThreadState(PyThreadState*& python) const {
         AutoLocker al(py_thr_lck);
         checkForkIntern();
+        if (deleting_tid && deleting_tid != q_gettid()) {
+            return false;
+        }
         ++pgm_thr_cnt;
-        return getThreadStateIntern();
+        python = getThreadStateIntern();
+        return true;
     }
 
     //! Returns the Python thread state for this interpreter; releases the thread context

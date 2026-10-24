@@ -219,11 +219,23 @@ methods, callables and functions), starting with the innermost frame (`sys._getf
 sandbox manager of the current Program, if any, for the first helper of the program in the thread; the callback takes
 the state's mutex, attaches to the interpreter (a `QorePythonHelper` on the requesting thread) and, if the helper is
 still active, raises `KeyboardInterrupt` in the thread with `PyThreadState_SetAsyncExc()`.  The helper's destructor
-clears `active` and an undelivered async exception with the GIL held, releases the context, and only then takes the
-mutex (waiting for a running callback, which needs the GIL) and removes the callback.  `checkPythonException()` raises
-`PROGRAM-INTERRUPTED` for `KeyboardInterrupt` when `qore_check_cancel()` reports the interrupt, and
-`PYTHON-INTERPRETER-DELETED` when the program is being deleted: `deleteIntern()` raises `KeyboardInterrupt` in the
-threads of the program's thread map (other than its own) before waiting for them.
+(`deactivateInterrupt()`) takes the mutex with the thread detached (a running callback holds it while it waits for
+the GIL), attaches again with the mutex held (a callback takes the mutex before the GIL, so it cannot hold the GIL
+then), and clears `active` and an undelivered async exception; a later callback does nothing, so the callback is
+removed without waiting.  The helper can still hold the GIL when it is destroyed (a helper created with the GIL held,
+ex: on a thread created by Python, or a nested one): waiting for the mutex then deadlocked with a callback that waited
+for the GIL.  The mutex also serializes the callback with the deactivation in free-threaded builds.  In a child of
+`fork()` the mutex is not taken (a callback of a thread that does not exist can hold it).  `checkPythonException()`
+raises `PROGRAM-INTERRUPTED` for `KeyboardInterrupt` when `qore_check_cancel()` reports the interrupt, and
+`PYTHON-INTERPRETER-DELETED` when the program is being deleted: `deleteIntern()` records the deleting thread
+(`deleting_tid`, under `py_thr_lck`: `getAcquireThreadState()` refuses other threads from then on) and raises
+`KeyboardInterrupt` in the live threads of the interpreter whose states the program caches (other than its own) before
+waiting for them.
+
+The module registers a Program cleanup callback (`qore_register_program_cleanup_callback()`): the Python program
+created for a Program (its external data) is deleted while the Program is still valid, so that the Qore objects that
+its Python objects hold (strong references, see "Python Objects of Qore Objects") are released, and their destructors
+run, before the Program's data is cleared; deleting the external data later finds the program already deleted.
 
 `slot_qoreloader_exec()` initializes Qore with `QLO_DISABLE_SIGNAL_HANDLING`, as Python owns the signals of a process
 that it hosts.

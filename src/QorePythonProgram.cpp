@@ -702,26 +702,35 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
         // the Python code that other Qore threads run in the interpreter is interrupted (KeyboardInterrupt, raised as
         // PYTHON-INTERPRETER-DELETED in Qore), so that they leave it; a thread blocked in a call (ex: time.sleep())
         // leaves it when the call returns
-        std::vector<unsigned long> thread_ids;
+        // only the pointers of the states that the module caches are collected: the state of a thread that has ended
+        // can have been freed; the states are dereferenced only if they are in the interpreter's thread list
+        std::set<PyThreadState*> states;
         {
             AutoLocker al(py_thr_lck);
             checkForkIntern();
+            // from now on, other threads cannot use the program (see getAcquireThreadState()): a thread that passed
+            // the check of the validity of the program before must not use the interpreter after the wait below
+            deleting_tid = q_gettid();
             if (pgm_thr_cnt) {
-                unsigned long self_id = PyThread_get_thread_ident();
                 py_thr_map_t::iterator i = py_thr_map.find(this);
                 if (i != py_thr_map.end()) {
                     for (auto& ti : i->second) {
-                        if (ti.second.state && ti.second.state->thread_id != self_id) {
-                            thread_ids.push_back(ti.second.state->thread_id);
+                        if (ti.second.state) {
+                            states.insert(ti.second.state);
                         }
                     }
                 }
             }
         }
-        if (!thread_ids.empty()) {
+        if (!states.empty()) {
             QorePythonHelper qph(this);
-            for (unsigned long id : thread_ids) {
-                PyThreadState_SetAsyncExc(id, PyExc_KeyboardInterrupt);
+            if (qph.isValid()) {
+                PyThreadState* self = PyThreadState_Get();
+                for (PyThreadState* ts = PyInterpreterState_ThreadHead(interpreter); ts; ts = PyThreadState_Next(ts)) {
+                    if (ts != self && states.find(ts) != states.end()) {
+                        PyThreadState_SetAsyncExc(ts->thread_id, PyExc_KeyboardInterrupt);
+                    }
+                }
             }
         }
         {
@@ -1369,7 +1378,11 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     }
 
     assert(interpreter);
-    PyThreadState* python = getAcquireThreadState();
+    PyThreadState* python = nullptr;
+    // another thread deletes the program: the interpreter cannot be used
+    if (!getAcquireThreadState(python)) {
+        return {nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, false};
+    }
 
     // CRITICAL: Verify the cached thread state's interpreter matches ours.
     // The thread state's interp pointer can become stale if:
@@ -1382,15 +1395,13 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // the interpreter: "_PyThreadState_Attach: non-NULL old thread state", or critical sections of free-threaded
     // Python that are unlocked on the wrong state); a state belongs to the native thread that created it
     if (python) {
+        // the state is only dereferenced once it is found in the interpreter's thread list: the cached state of an
+        // ended thread can have been freed
         bool found = false;
-        if (python->thread_id == PyThread_get_thread_ident()) {
-            PyThreadState* ts = PyInterpreterState_ThreadHead(interpreter);
-            while (ts) {
-                if (ts == python) {
-                    found = true;
-                    break;
-                }
-                ts = PyThreadState_Next(ts);
+        for (PyThreadState* ts = PyInterpreterState_ThreadHead(interpreter); ts; ts = PyThreadState_Next(ts)) {
+            if (ts == python) {
+                found = python->thread_id == PyThread_get_thread_ident();
+                break;
             }
         }
         if (!found) {
@@ -1639,18 +1650,22 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         "_qore_tss_tstate: %p _qore_tss_initialized: %d tid: %d\n", is_python_created_thread, have_gil,
         _qore_PyCeval_GetThreadState(), _qore_tss_initialized, q_gettid());
     printd(5, "QorePythonProgram::setContext() final have_gil: %d\n", have_gil);
+    // the state that the thread has attached (ex: the state of a thread created by Python, with which Python called
+    // the module), which releaseContext() attaches again: the state that the tracking or the GIL state API gives can be
+    // another one, and the thread would then return to Python with the wrong state attached (an exception set on it
+    // is not seen by the Python code: "error return without exception set")
+    PyThreadState* attached = have_gil ? qore_python_attached_thread_state() : nullptr;
     if (have_gil) {
         // If bound_gilstate is stale, clear it to avoid tstate_activate assertions.
         if (qore_py_get_bound_gilstate(python) && PyGILState_GetThisThreadState() != python) {
             qore_py_set_bound_gilstate(python, 0);
         }
         // We already have the GIL - swap thread states
-        ceval_state = _qore_PyCeval_SwapThreadState(python);
+        _qore_PyCeval_SwapThreadState(python);
+        ceval_state = attached;
         g_state = PyGILState_LOCKED;
-        // Also update Python's TSS via PyThreadState_Swap
-        // NOTE: Our tracking is updated above, but Python's autoTSSkey is not.
-        // PyThreadState_Swap updates both the ceval thread state and autoTSSkey.
-        if (PyGILState_GetThisThreadState() != python) {
+        // PyThreadState_Swap updates both the attached state and autoTSSkey
+        if (attached != python) {
             PyThreadState_Swap(python);
         }
     } else {
@@ -1667,11 +1682,8 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         g_state = PyGILState_UNLOCKED;
     }
 
-    t_state = _qore_PyRuntimeGILState_GetThreadState();
-
-    if (t_state != python) {
-        _QORE_PYTHREAD_STATE_SWAP(python);
-    }
+    // releaseContext() attaches t_state again if the GIL was held
+    t_state = have_gil ? attached : _qore_PyRuntimeGILState_GetThreadState();
 #else
     // Python < 3.12 (3.11 and earlier)
     // In these versions, PyGILState_* functions are mostly reliable, but with sub-interpreters
@@ -2835,29 +2847,100 @@ namespace {
 */
 class QorePythonConversionPathHelper {
 public:
+    //! adds the container to the conversion path; a container nested too deeply for the stack raises RecursionError
+    /** Python's recursion guard limits the depth by the stack that the thread has left (see setContext()), so that
+        the recursive conversion does not overflow the stack
+    */
     DLLLOCAL QorePythonConversionPathHelper(std::set<PyObject*>& path, PyObject* val)
-            : path(path), val(val), cycle(!path.insert(val).second) {
+            : path(path), val(val), cycle(!path.insert(val).second),
+            too_deep(!cycle && Py_EnterRecursiveCall(" while converting a Python value to Qore")) {
     }
 
     DLLLOCAL ~QorePythonConversionPathHelper() {
         if (!cycle) {
+            if (!too_deep) {
+                Py_LeaveRecursiveCall();
+            }
             path.erase(val);
         }
     }
 
-    //! returns true and raises a Qore exception if the container is part of a cycle
-    DLLLOCAL bool checkCycle(ExceptionSink* xsink) const {
-        if (cycle && xsink) {
-            xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert a Python value of type '%s' that contains "
-                "itself to a Qore value", Py_TYPE(val)->tp_name);
+    //! returns true and raises a Qore exception if the container is part of a cycle or nested too deeply
+    /** the RecursionError is not converted: no Python code can run at this depth (ex: str() of the exception)
+    */
+    DLLLOCAL bool checkCycle(QorePythonProgram* pypgm, ExceptionSink* xsink) const {
+        if (too_deep) {
+            PyErr_Clear();
+            if (xsink) {
+                xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert a Python value of type '%s' that is nested "
+                    "too deeply for the stack of the thread to a Qore value", Py_TYPE(val)->tp_name);
+            }
+            return true;
         }
-        return cycle;
+        if (cycle) {
+            if (xsink) {
+                xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert a Python value of type '%s' that contains "
+                    "itself to a Qore value", Py_TYPE(val)->tp_name);
+            }
+            return true;
+        }
+        // Qore's limit of the thread's stack, which also accounts for stack that Python does not know about (ex: the
+        // guard zones of a JVM loaded in the process)
+        ExceptionSink stack_xsink;
+        if (q_check_stack(xsink ? xsink : &stack_xsink)) {
+            stack_xsink.clear();
+            return true;
+        }
+        return false;
     }
 
 private:
     std::set<PyObject*>& path;
     PyObject* val;
     bool cycle;
+    bool too_deep;
+};
+}
+
+namespace {
+//! limits the depth of the recursive conversion of Qore containers to Python by the stack that the thread has left
+/** with Python's recursion guard, as QorePythonConversionPathHelper does for the conversion to Qore; a container
+    nested too deeply raises a PYTHON-VALUE-ERROR exception (the RecursionError is not converted: no Python code can
+    run at this depth)
+*/
+class QorePythonRecursionGuard {
+public:
+    DLLLOCAL QorePythonRecursionGuard(const QoreValue& val, ExceptionSink* xsink)
+            : too_deep(Py_EnterRecursiveCall(" while converting a Qore value to Python")) {
+        if (too_deep) {
+            PyErr_Clear();
+            if (xsink) {
+                xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert a Qore value of type '%s' that is nested "
+                    "too deeply for the stack of the thread to a Python value", val.getTypeName());
+            }
+            return;
+        }
+        // Qore's limit of the thread's stack, which also accounts for stack that Python does not know about (ex: the
+        // guard zones of a JVM loaded in the process)
+        ExceptionSink stack_xsink;
+        stack_exceeded = q_check_stack(xsink ? xsink : &stack_xsink);
+        stack_xsink.clear();
+    }
+
+    DLLLOCAL ~QorePythonRecursionGuard() {
+        if (!too_deep) {
+            Py_LeaveRecursiveCall();
+        }
+    }
+
+    //! returns true if the value is nested too deeply, with a Qore exception raised
+    DLLLOCAL bool tooDeep() const {
+        return too_deep || stack_exceeded;
+    }
+
+private:
+    bool too_deep;
+    bool stack_exceeded = false;
 };
 }
 
@@ -2873,13 +2956,16 @@ static void qore_python_conversion_error(QorePythonProgram* pypgm, ExceptionSink
 QoreListNode* QorePythonProgram::getQoreListFromList(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset) {
     assert(PyList_Check(val));
     QorePythonConversionPathHelper path(rset, val);
-    if (path.checkCycle(xsink)) {
+    if (path.checkCycle(this, xsink)) {
         return nullptr;
     }
     ReferenceHolder<QoreListNode> rv(new QoreListNode(autoTypeInfo), xsink);
-    Py_ssize_t len = PyList_Size(val);
-    for (Py_ssize_t i = 0; i < len; ++i) {
-        ValueHolder qval(getQoreValue(xsink, PyList_GetItem(val, i), rset), xsink);
+    // the size is read for each element and each element is referenced while it is converted: converting a value
+    // can run Python code (ex: utcoffset() of a tzinfo) that changes the list
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(val); ++i) {
+        QorePythonReferenceHolder item(PyList_GET_ITEM(val, i));
+        item.py_ref();
+        ValueHolder qval(getQoreValue(xsink, *item, rset), xsink);
         if (*xsink) {
             return nullptr;
         }
@@ -2898,7 +2984,7 @@ QoreListNode* QorePythonProgram::getQoreListFromTuple(ExceptionSink* xsink, PyOb
 QoreListNode* QorePythonProgram::getQoreListFromTuple(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset,
     size_t offset, bool for_args) {
     QorePythonConversionPathHelper path(rset, val);
-    if (path.checkCycle(xsink)) {
+    if (path.checkCycle(this, xsink)) {
         return nullptr;
     }
     return getQoreListFromTupleElements(xsink, val, rset, offset, for_args);
@@ -2927,7 +3013,7 @@ QoreHashNode* QorePythonProgram::getQoreHashFromNamedTuple(ExceptionSink* xsink,
         pyobj_set_t& rset) {
     assert(PyTuple_Check(val) && PyTuple_Check(fields) && PyTuple_Size(val) == PyTuple_Size(fields));
     QorePythonConversionPathHelper path(rset, val);
-    if (path.checkCycle(xsink)) {
+    if (path.checkCycle(this, xsink)) {
         return nullptr;
     }
     ReferenceHolder<QoreHashNode> rv(new QoreHashNode(autoTypeInfo), xsink);
@@ -2948,7 +3034,7 @@ QoreHashNode* QorePythonProgram::getQoreHashFromNamedTuple(ExceptionSink* xsink,
 
 QoreListNode* QorePythonProgram::getQoreListFromIterable(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset) {
     QorePythonConversionPathHelper path(rset, val);
-    if (path.checkCycle(xsink)) {
+    if (path.checkCycle(this, xsink)) {
         return nullptr;
     }
     QorePythonReferenceHolder iter(PyObject_GetIter(val));
@@ -2978,21 +3064,28 @@ QoreListNode* QorePythonProgram::getQoreListFromIterable(ExceptionSink* xsink, P
 QoreHashNode* QorePythonProgram::getQoreHashFromDict(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset) {
     assert(PyDict_Check(val));
     QorePythonConversionPathHelper path(rset, val);
-    if (path.checkCycle(xsink)) {
+    if (path.checkCycle(this, xsink)) {
         return nullptr;
     }
 
     ReferenceHolder<QoreHashNode> rv(new QoreHashNode(autoTypeInfo), xsink);
 
-    PyObject* key, * value;
+    PyObject* borrowed_key, * borrowed_value;
     Py_ssize_t pos = 0;
-    while (PyDict_Next(val, &pos, &key, &value)) {
+    while (PyDict_Next(val, &pos, &borrowed_key, &borrowed_value)) {
+        // the key and the value are referenced while they are converted: converting a value can run Python code that
+        // changes the dict
+        QorePythonReferenceHolder key(borrowed_key);
+        key.py_ref();
+        QorePythonReferenceHolder value(borrowed_value);
+        value.py_ref();
         const char* keystr;
         QorePythonReferenceHolder tkey;
-        if (Py_TYPE(key) == &PyUnicode_Type) {
-            keystr = PyUnicode_AsUTF8(key);
+        // str subclasses (ex: StrEnum members) are strings
+        if (PyUnicode_Check(*key)) {
+            keystr = PyUnicode_AsUTF8(*key);
         } else {
-            tkey = PyObject_Repr(key);
+            tkey = PyObject_Repr(*key);
             keystr = tkey ? PyUnicode_AsUTF8(*tkey) : nullptr;
         }
         // ex: a key with lone surrogates, which cannot be encoded in UTF-8
@@ -3007,12 +3100,13 @@ QoreHashNode* QorePythonProgram::getQoreHashFromDict(ExceptionSink* xsink, PyObj
             if (xsink) {
                 xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert a Python dict to a Qore hash: the key "
                     "'%s' (of type '%s') gives the same Qore hash key as another key of the dict", keystr,
-                    Py_TYPE(key)->tp_name);
+                    Py_TYPE(*key)->tp_name);
             }
             return nullptr;
         }
 
-        ValueHolder qval(getQoreValue(xsink, value, rset), xsink);
+        // keystr belongs to key or tkey, which are referenced until the value is set
+        ValueHolder qval(getQoreValue(xsink, *value, rset), xsink);
         if (*xsink) {
             return nullptr;
         }
@@ -3076,28 +3170,14 @@ DateTimeNode* QorePythonProgram::getQoreDateTimeFromDateTime(ExceptionSink* xsin
     // field without using PyDateTimeAPI, making it safe across interpreter boundaries.
     PyObject* tzinfo = PyDateTime_DATE_GET_TZINFO(val);
     if (tzinfo && tzinfo != Py_None && PyTZInfo_Check(tzinfo)) {
-        // Get UTC offset using PyObject_CallMethod which is safer than attribute access
-        QorePythonReferenceHolder delta(PyObject_CallMethod(tzinfo, "utcoffset", "O", val));
+        // datetime.utcoffset() checks the result of tzinfo.utcoffset(): a timedelta strictly between -24 and 24 hours
+        // or None (TypeError or ValueError otherwise), as for datetime.time
+        QorePythonReferenceHolder delta(PyObject_CallMethod(val, "utcoffset", nullptr));
         if (!delta) {
-            // utcoffset() raised an exception - propagate to caller if xsink provided
-            if (xsink) {
-                // Fetch and format the Python exception
-                QorePythonReferenceHolder ex_type, ex_value, traceback;
-                PyErr_Fetch(ex_type.getRef(), ex_value.getRef(), traceback.getRef());
-                QoreStringNode* desc = new QoreStringNode("tzinfo.utcoffset() failed");
-                if (ex_value) {
-                    QorePythonReferenceHolder str(PyObject_Str(*ex_value));
-                    if (str) {
-                        desc->concat(": ");
-                        desc->concat(PyUnicode_AsUTF8(*str));
-                    }
-                }
-                xsink->raiseException("PYTHON-DATETIME-ERROR", desc);
-                return nullptr;
-            }
-            // No xsink provided - clear exception and proceed without timezone
-            PyErr_Clear();
-        } else if (*delta != Py_None && PyDelta_Check(*delta) && getQoreOffsetZone(xsink, *delta, zone)) {
+            qore_python_conversion_error(this, xsink);
+            return nullptr;
+        }
+        if (*delta != Py_None && getQoreOffsetZone(xsink, *delta, zone)) {
             return nullptr;
         }
     }
@@ -3131,7 +3211,8 @@ int QorePythonProgram::getQoreOffsetZone(ExceptionSink* xsink, PyObject* offset,
 }
 
 DateTimeNode* QorePythonProgram::getQoreDateTimeFromTime(ExceptionSink* xsink, PyObject* val) {
-    assert(Py_TYPE(val) == PyDateTimeAPI->TimeType);
+    // also subclasses of datetime.time
+    assert(PyTime_Check(val));
     // a time of day is an absolute date on 1970-01-01, as with the time values of Qore's database drivers, in the
     // zone given by the time's UTC offset, or in the current time zone
     const AbstractQoreZoneInfo* zone = currentTZ();
@@ -3502,8 +3583,11 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
 
     // the Python object of a Qore object whose class inherits a Python class is the Qore object
     {
+        // the Python object holds the existence count of the Qore object (a weak reference): the object stays
+        // allocated, and a reference is only taken while its destructor has not started (as with Qore's weak
+        // references)
         QoreObject* qobj = getQoreSubclassObject(val);
-        if (qobj && qobj->isValid()) {
+        if (qobj && qobj->isCurrent()) {
             return qobj->refSelf();
         }
     }
@@ -3786,12 +3870,24 @@ PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* 
             return getPythonString(xsink, *str);
         }
 
-        case NT_LIST:
+        case NT_LIST: {
+            QorePythonRecursionGuard guard(val, xsink);
+            if (guard.tooDeep()) {
+                return nullptr;
+            }
             return getPythonList(xsink, val.get<const QoreListNode>());
+        }
 
         case NT_HASH: {
             const QoreHashNode* h = val.get<const QoreHashNode>();
-            QorePythonReferenceHolder dict(getPythonDict(xsink, h));
+            QorePythonReferenceHolder dict;
+            {
+                QorePythonRecursionGuard guard(val, xsink);
+                if (guard.tooDeep()) {
+                    return nullptr;
+                }
+                dict = getPythonDict(xsink, h);
+            }
             const TypedHashDecl* hd = h->getHashDecl();
             if (!dict || !hd) {
                 return dict.release();
@@ -4212,7 +4308,7 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
     return -1;
 }
 
-bool QorePythonProgram::raiseOriginalQoreException(ExceptionSink& xsink, PyObject* ex_value) {
+bool QorePythonProgram::raiseOriginalQoreException(ExceptionSink& xsink, PyObject* ex_value, int max_exceptions) {
     QorePythonReferenceHolder capsule(PyObject_GetAttrString(ex_value, QORE_PYTHON_EXCEPTION_CAPSULE_ATTR));
     if (!capsule || !PyCapsule_IsValid(*capsule, QORE_PYTHON_EXCEPTION_CAPSULE_NAME)) {
         // a QoreException created in Python
@@ -4239,7 +4335,7 @@ bool QorePythonProgram::raiseOriginalQoreException(ExceptionSink& xsink, PyObjec
     }
     size_t current_size = current_stack ? current_stack->size() : 0;
 
-    for (int depth = 0; info && depth < QORE_PYTHON_MAX_CHAINED_EXCEPTIONS; ++depth) {
+    for (int depth = 0; info && depth < max_exceptions; ++depth) {
         QoreCallStack callstack;
         QoreValue cs_val = info->getKeyValue("callstack");
         if (cs_val.getType() == NT_LIST) {
@@ -4376,7 +4472,7 @@ static int qore_python_get_exception_location(PyObject* traceback, QoreExternalP
 }
 
 void QorePythonProgram::raiseQoreException(ExceptionSink& xsink, PyObject* ex_type, PyObject* ex_value,
-        PyObject* traceback, pyobj_set_t& seen) {
+        PyObject* traceback, pyobj_set_t& seen, const QoreExternalProgramLocationWrapper* chained_loc) {
     seen.insert(ex_value);
 
     // the qoreloader.QoreException type of the current interpreter
@@ -4389,13 +4485,18 @@ void QorePythonProgram::raiseQoreException(ExceptionSink& xsink, PyObject* ex_ty
         && PyObject_TypeCheck(ex_value, reinterpret_cast<PyTypeObject*>(*qore_ex_type));
 
     // a Qore exception raised in Python is raised again as it was raised in Qore
-    if (is_qore_exception && raiseOriginalQoreException(xsink, ex_value)) {
+    // the exceptions of its chain are part of the chain of the Python exception, which is limited
+    if (is_qore_exception && raiseOriginalQoreException(xsink, ex_value,
+            QORE_PYTHON_MAX_CHAINED_EXCEPTIONS - static_cast<int>(seen.size()) + 1)) {
         return;
     }
 
     QoreExternalProgramLocationWrapper loc;
     QoreCallStack callstack;
-    bool use_loc = !qore_python_get_exception_location(traceback, loc, callstack);
+    // a chained exception that was never raised has no traceback: it gets the Python location of the exception that
+    // it is chained to, not the location of the Qore code that called Python
+    const QoreExternalProgramLocationWrapper* ex_loc = !qore_python_get_exception_location(traceback, loc, callstack)
+        ? &loc : chained_loc;
 
     // a value that cannot be converted to Qore: the exception is raised without it, and the reason is added to its
     // description
@@ -4468,8 +4569,8 @@ void QorePythonProgram::raiseQoreException(ExceptionSink& xsink, PyObject* ex_ty
 
     // each exception is raised in its own sink, as the call stack given is added to all exceptions in a sink
     ExceptionSink xsink2;
-    if (use_loc) {
-        xsink2.raiseExceptionArg(loc.get(), err.c_str(), arg.release(), desc.release(), callstack);
+    if (ex_loc) {
+        xsink2.raiseExceptionArg(ex_loc->get(), err.c_str(), arg.release(), desc.release(), callstack);
     } else {
         xsink2.raiseExceptionArg(err.c_str(), arg.release(), desc.release(), callstack);
     }
@@ -4495,7 +4596,7 @@ void QorePythonProgram::raiseQoreException(ExceptionSink& xsink, PyObject* ex_ty
     }
     QorePythonReferenceHolder cause_tb(PyException_GetTraceback(*cause));
     raiseQoreException(xsink, reinterpret_cast<PyObject*>(Py_TYPE(*cause)), *cause, cause_tb ? *cause_tb : Py_None,
-        seen);
+        seen, ex_loc);
 }
 
 QoreClass* QorePythonProgram::getCreateQorePythonClass(ExceptionSink* xsink, PyTypeObject* type, int flags) {
@@ -4985,7 +5086,7 @@ PyObject* QorePythonProgram::callQoreOverride(PyObject* name, PyObject* args) {
         return nullptr;
     }
     // the thread state that Python called us with; it must be current again before returning
-    PyThreadState* entry_tstate = _qore_safe_thread_state_get();
+    PyThreadState* entry_tstate = qore_python_attached_thread_state();
 
     QorePythonProgram* pypgm = QorePythonProgram::getExecutionContext();
     // the object is kept while its method runs, also if its slot is changed meanwhile; a deleted object raises
@@ -5030,7 +5131,7 @@ PyObject* QorePythonProgram::callQoreOverride(PyObject* name, PyObject* args) {
     }
 
     // the exception must be raised in the thread state that Python called us with
-    PyThreadState* exit_tstate = _qore_safe_thread_state_get();
+    PyThreadState* exit_tstate = qore_python_attached_thread_state();
     if (exit_tstate != entry_tstate) {
         PyThreadState_Swap(entry_tstate);
     }
@@ -5547,13 +5648,20 @@ int QorePythonProgram::importModule(ExceptionSink* xsink, PyObject* mod, const c
         if (all_seq) {
             Py_ssize_t len = PySequence_Fast_GET_SIZE(*all_seq);
             for (Py_ssize_t i = 0; i < len; ++i) {
-                // returns a borrowed reference
-                PyObject* sv = PySequence_Fast_GET_ITEM(*all_seq, i);
-                if (!sv || !PyUnicode_Check(sv)) {
+                // referenced while the symbol is imported, which runs Python code that can change __all__
+                QorePythonReferenceHolder sv(PySequence_Fast_GET_ITEM(*all_seq, i));
+                sv.py_ref();
+                if (!PyUnicode_Check(*sv)) {
                     throw QoreStandardException("PYTHON-IMPORT-ERROR", "module '%s' __all__ has an invalid " \
-                        "element with type '%s'; expecting 'str'", module, sv ? Py_TYPE(sv)->tp_name : "null");
+                        "element with type '%s'; expecting 'str'", module, Py_TYPE(*sv)->tp_name);
                 }
-                if (checkImportSymbol(xsink, module, mod, is_package, PyUnicode_AsUTF8(sv), filter, true)) {
+                // ex: a name with a lone surrogate, which cannot be encoded in UTF-8 (UnicodeEncodeError)
+                const char* symbol = PyUnicode_AsUTF8(*sv);
+                if (!symbol) {
+                    checkPythonException(xsink);
+                    return -1;
+                }
+                if (checkImportSymbol(xsink, module, mod, is_package, symbol, filter, true)) {
                     return -1;
                 }
             }
@@ -5567,14 +5675,20 @@ int QorePythonProgram::importModule(ExceptionSink* xsink, PyObject* mod, const c
     if (dir && PyList_Check(*dir)) {
         Py_ssize_t len = PyList_Size(*dir);
         for (Py_ssize_t i = 0; i < len; ++i) {
-            // returns a borrowed reference
-            PyObject* sv = PyList_GetItem(*dir, i);
-            if (!sv || !PyUnicode_Check(sv)) {
-                throw QoreStandardException("PYTHON-IMPORT-ERROR", "module '%s' __all__ has an invalid " \
-                    "element with type '%s'; expecting 'str'", module, sv ? Py_TYPE(sv)->tp_name : "null");
+            // the list is not referenced elsewhere; an item is referenced while the symbol is imported
+            QorePythonReferenceHolder sv(PyList_GET_ITEM(*dir, i));
+            sv.py_ref();
+            if (!PyUnicode_Check(*sv)) {
+                throw QoreStandardException("PYTHON-IMPORT-ERROR", "module '%s' dir() has an invalid " \
+                    "element with type '%s'; expecting 'str'", module, Py_TYPE(*sv)->tp_name);
             }
-
-            if (checkImportSymbol(xsink, module, mod, is_package, PyUnicode_AsUTF8(sv), filter, true)) {
+            // a name that cannot be encoded in UTF-8 (ex: with a lone surrogate) cannot be a Qore symbol: skipped
+            const char* symbol = PyUnicode_AsUTF8(*sv);
+            if (!symbol) {
+                PyErr_Clear();
+                continue;
+            }
+            if (checkImportSymbol(xsink, module, mod, is_package, symbol, filter, true)) {
                 return -1;
             }
         }

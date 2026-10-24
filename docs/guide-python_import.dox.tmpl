@@ -130,7 +130,9 @@ printf("%s\n", pgm.callFunction("render"));
     @note The %Python object of such a %Qore object holds a weak reference to it: calling an override after the
     %Qore object was deleted raises an \c OBJECT-ALREADY-DELETED exception.  Before %Python 3.15, a %Python class whose
     objects cannot have an attribute slot (ex: a subclass of \c tuple) cannot be inherited by a %Qore class that
-    overrides its methods.
+    overrides its methods.  When the %Python class itself inherits a %Qore class (ex:
+    <tt>class PyCounter(Counter)</tt>), %Qore constructs that %Qore base class with the object of the %Qore subclass,
+    so the %Python class's \c __init__() cannot pass arguments to it (a \c TypeError is raised).
 
     @par Example:
     @code{.py}

@@ -596,7 +596,7 @@ PyObject* PythonQoreClass::wrap(QoreObject* obj) {
 
 PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* args) {
     // Save the thread state Python had when calling us - must restore before returning
-    PyThreadState* entry_tstate = _qore_safe_thread_state_get();
+    PyThreadState* entry_tstate = qore_python_attached_thread_state();
 
     // get method
     const QoreMethod* m = get_capsule_method(method_capsule);
@@ -691,7 +691,7 @@ PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* 
     // IMPORTANT: Restore the entry thread state before setting the exception.
     // QorePythonHelper may have changed thread states, but Python expects the
     // exception to be on the thread state it passed when calling us.
-    PyThreadState* exit_tstate = _qore_safe_thread_state_get();
+    PyThreadState* exit_tstate = qore_python_attached_thread_state();
     if (exit_tstate != entry_tstate) {
         PyThreadState_Swap(entry_tstate);
     }
@@ -730,7 +730,7 @@ PyObject* PythonQoreClass::exec_qore_static_method(PyObject* method_capsule, PyO
 
 PyObject* PythonQoreClass::exec_qore_static_method(const QoreMethod& m, PyObject* args, size_t offset) {
     // Save the thread state Python had when calling us - must restore before returning
-    PyThreadState* entry_tstate = _qore_safe_thread_state_get();
+    PyThreadState* entry_tstate = qore_python_attached_thread_state();
 
     ExceptionSink xsink;
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
@@ -775,7 +775,7 @@ PyObject* PythonQoreClass::exec_qore_static_method(const QoreMethod& m, PyObject
     // IMPORTANT: Restore the entry thread state before setting the exception.
     // QorePythonHelper may have changed thread states, but Python expects the
     // exception to be on the thread state it passed when calling us.
-    PyThreadState* exit_tstate = _qore_safe_thread_state_get();
+    PyThreadState* exit_tstate = qore_python_attached_thread_state();
     if (exit_tstate != entry_tstate) {
         PyThreadState_Swap(entry_tstate);
     }
@@ -800,6 +800,31 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
         return -1;
     }
 
+    PyQoreObject* pyself = reinterpret_cast<PyQoreObject*>(self);
+    // the Qore object of a Python object is created once: calling __init__() again would create another one
+    if (pyself->qobj) {
+        PyErr_Format(PyExc_RuntimeError, "the '%s' object has already been initialized", Py_TYPE(self)->tp_name);
+        return -1;
+    }
+
+    // the Python object of a Qore object whose class inherits a Python subclass of this Qore class (an object of the
+    // generated subclass, see QorePythonProgram::getQoreSubclassType()): it is the Qore object, whose Qore base class
+    // Qore has already constructed with the object; no other Qore object is created
+    {
+        QoreObject* sub_obj = QorePythonProgram::getQoreSubclassObject(self);
+        if (sub_obj) {
+            if (PyTuple_GET_SIZE(args)) {
+                PyErr_Format(PyExc_TypeError, "the Qore base class of '%s' is constructed by Qore with the object of "
+                    "the Qore subclass: no arguments can be given to its __init__() (got %d)", Py_TYPE(self)->tp_name,
+                    (int)PyTuple_GET_SIZE(args));
+                return -1;
+            }
+            sub_obj->tRef();
+            pyself->qobj = sub_obj;
+            return 0;
+        }
+    }
+
     QorePythonQoreEntryHelper qeh;
     if (!qeh.check()) {
         return -1;
@@ -822,16 +847,23 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
     PyTypeObject* type = Py_TYPE(self);
     if (!PyQoreObjectType_Check(type)) {
         constructor_cls = findQoreClass(self);
+        if (!constructor_cls) {
+            // a Python exception is set
+            return -1;
+        }
         assert(type->tp_base);
         // create Qore type for Python type
         qcls = qore_python_pgm->getCreateQorePythonClass(&xsink, type);
+        if (!qcls) {
+            qore_python_pgm->raisePythonException(xsink);
+            return -1;
+        }
         printd(5, "PythonQoreClass::py_init() self: %p type: %s got context pypgm: %p\n", self, type->tp_name,
             qore_python_pgm);
     } else {
         constructor_cls = qcls = getQoreClass(type);
     }
 
-    PyQoreObject* pyself = reinterpret_cast<PyQoreObject*>(self);
     // returns a borrowed reference
     QoreObject* qobj = QorePythonImplicitQoreArgHelper::getQoreObject();
     //printd(5, "PythonQoreClass::py_init() self: %p py_cls: '%s' qcls: '%s' (%d) cq: '%s' (%d) qobj: %p args: %p\n",
@@ -882,6 +914,20 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
 
 int PythonQoreClass::newQoreObject(ExceptionSink& xsink, PyQoreObject* pyself, QoreObject* qobj,
         const QoreClass* qcls, QorePythonProgram* qore_python_pgm) {
+    // another thread initialized the object while the constructor ran without the GIL: the new Qore object is
+    // released (without the GIL, as this can run its destructor)
+    if (pyself->qobj) {
+        {
+            QorePythonReleaseGilHelper prgh;
+            qobj->deref(&xsink);
+        }
+        if (xsink) {
+            qore_python_pgm->raisePythonException(xsink);
+        } else {
+            PyErr_Format(PyExc_RuntimeError, "the '%s' object has already been initialized", Py_TYPE(pyself)->tp_name);
+        }
+        return -1;
+    }
     // the Python object takes over the reference returned by the constructor: the Qore object exists as long as Qore
     // or Python references it
     pyself->qobj = qobj;
@@ -1259,6 +1305,9 @@ void PythonQoreClass::releaseQoreObject(PyQoreObject* self) {
 void PythonQoreClass::py_dealloc(PyQoreObject* self) {
     PyObject_GC_UnTrack(self);
     PyTypeObject* type = Py_TYPE(self);
+    // removed from the map of Python objects first: the callbacks of weak references are Python code, which can
+    // release the GIL and convert the Qore object to Python again, which must not find this object
+    deregisterProxy(self);
     if (self->weakreflist) {
         PyObject_ClearWeakRefs(reinterpret_cast<PyObject*>(self));
     }

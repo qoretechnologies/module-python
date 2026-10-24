@@ -100,6 +100,9 @@
       a \c PYTHON-VALUE-ERROR exception; a container referenced more than once without a cycle is converted each time
     - a string (or a \c dict key) with lone surrogates, which cannot be encoded in UTF-8, raises the %Python
       \c UnicodeEncodeError exception (\c builtins.UnicodeEncodeError)
+    - a value nested too deeply for the stack of the thread (in either direction) raises a
+      \c STACK-LIMIT-EXCEEDED exception (%Qore's limit of the thread's stack) or a \c PYTHON-VALUE-ERROR exception
+      (%Python's recursion limit), whichever is reached first, instead of overflowing the stack
     - an \c int with more significant bits than the maximum precision of a %Qore \c number (8192 bits, about 2466
       decimal digits) raises a \c PYTHON-VALUE-ERROR exception, as it cannot be converted exactly
 */

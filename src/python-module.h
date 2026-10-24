@@ -136,6 +136,19 @@ DLLLOCAL bool _qore_has_gil(PyThreadState* t_state);
 #endif
 #endif
 
+//! returns the thread state that the current thread has attached, if any
+/** This is the state that Python calls the module's C functions with, which must be attached again before they
+    return: the state that the thread is bound to for the GIL state API (PyGILState_GetThisThreadState()) can be
+    another one (ex: a state of the module for the thread in Python 3.12, which binds a state when it is attached)
+*/
+DLLLOCAL static inline PyThreadState* qore_python_attached_thread_state() {
+#if PY_VERSION_HEX >= 0x030D0000
+    return PyThreadState_GetUnchecked();
+#else
+    return _PyThreadState_UncheckedGet();
+#endif
+}
+
 // Safe thread state access: avoids PyThreadState_Get() when the GIL is not held
 DLLLOCAL static inline PyThreadState* _qore_safe_thread_state_get() {
 #ifdef Py_GIL_DISABLED
@@ -355,7 +368,7 @@ protected:
 
     //! the state of the interrupt of the Python code that the thread runs, shared with the cancel callback
     struct InterruptState {
-        //! held by the cancel callback while it runs; the helper waits for it before it is destroyed
+        //! held by the cancel callback while it runs, and by the helper when it deactivates the callback
         std::mutex lck;
         //! true while the thread can run Python code of the helper (set and cleared with the GIL held)
         std::atomic<bool> active{true};
@@ -365,6 +378,8 @@ protected:
         unsigned long thread_id;
         //! the program whose interpreter the thread runs in
         const QorePythonProgram* pypgm;
+        //! the fork generation of the process when the state was created (see deactivateInterrupt())
+        unsigned fork_generation;
     };
     //! set if the Program has a sandbox manager, so that SandboxManager::requestInterrupt() interrupts the Python
     //! code (see registerInterrupt())
@@ -380,6 +395,9 @@ protected:
     //! KeyboardInterrupt in the thread (PyThreadState_SetAsyncExc()); only for the first helper of the program in the
     //! thread
     DLLLOCAL void registerInterrupt();
+
+    //! registers the cancel callback of the interrupt state
+    DLLLOCAL void registerCancelCallback();
 
     //! clears an undelivered interrupt (with the GIL held) before the context is released
     DLLLOCAL void deactivateInterrupt();

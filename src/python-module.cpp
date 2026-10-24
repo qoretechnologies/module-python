@@ -823,7 +823,23 @@ static void python_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink)
 // defined in the generated ql_python.cpp (from ql_python.qpp)
 DLLLOCAL void init_python_functions(QoreNamespace& ns);
 
+// called before a Program's data is cleared: the Python program created for the Program (its external data) is
+// deleted while the Program is still valid, so that the Qore objects that its Python objects hold (ex: objects of
+// Python subclasses of the Program's classes) are released, and their destructors run, in a valid Program; the
+// external data is deleted later, when the Program can no longer run code
+static void python_program_cleanup(QoreProgram* pgm) {
+    QorePythonProgram* pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
+    if (!pypgm || pypgm->getQoreProgram() != pgm) {
+        return;
+    }
+    // the callback cannot report errors: they are printed as unhandled exceptions, as when the external data is
+    // deleted
+    ExceptionSink xsink;
+    pypgm->destructor(&xsink);
+}
+
 static QoreStringNode* python_module_init_intern(bool repeat) {
+    qore_register_program_cleanup_callback(python_program_cleanup);
     if (!PNS) {
         PNS = new QoreNamespace("Python");
         PNS->addSystemClass(initPythonProgramClass(*PNS));
@@ -1110,6 +1126,7 @@ static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, Except
 }
 
 static void python_module_delete() {
+    qore_deregister_program_cleanup_callback(python_program_cleanup);
     if (qore_python_pgm) {
         qore_python_pgm->doDeref();
         qore_python_pgm = nullptr;
@@ -1338,15 +1355,6 @@ extern "C" int python_module_import(ExceptionSink* xsink, QoreProgram* pgm, cons
 
 thread_local const QorePythonHelper* QorePythonHelper::current = nullptr;
 
-// returns the thread state that the current thread has attached, if any
-static inline PyThreadState* qore_python_attached_thread_state() {
-#if PY_VERSION_HEX >= 0x030D0000
-    return PyThreadState_GetUnchecked();
-#else
-    return _PyThreadState_UncheckedGet();
-#endif
-}
-
 bool QorePythonHelper::canNest(const QorePythonProgram* pypgm, ExceptionSink* xsink) {
     const QorePythonHelper* outer = current;
     // the thread state that the outer helper attached is still attached: the GIL (or the attachment in free-threaded
@@ -1418,17 +1426,31 @@ void QorePythonHelper::registerInterrupt() {
         interrupt_smh.reset();
         return;
     }
-    interrupt = std::make_shared<InterruptState>();
-    interrupt->thread_id = PyThread_get_thread_ident();
-    interrupt->pypgm = new_pypgm;
+    // called from the constructor, which has acquired the context: an exception (std::bad_alloc) must not leave it,
+    // as the destructor would not release the context; the code is then not interruptible
+    try {
+        interrupt = std::make_shared<InterruptState>();
+        interrupt->thread_id = PyThread_get_thread_ident();
+        interrupt->pypgm = new_pypgm;
+        interrupt->fork_generation = QorePythonProgram::getForkGeneration();
+        registerCancelCallback();
+    } catch (...) {
+        interrupt.reset();
+        interrupt_smh.reset();
+    }
+}
+
+void QorePythonHelper::registerCancelCallback() {
     std::shared_ptr<InterruptState> state = interrupt;
-    // the callback is called on the thread that requests the interrupt, possibly after it was removed
+    // the callback is called on the thread that requests the interrupt, possibly after it was removed; it takes the
+    // mutex before the GIL, and does nothing once the helper has deactivated it (with the mutex held), so it does not
+    // use the program after the helper is destroyed
     (*interrupt_smh)->registerCancelCallback(interrupt.get(), [state]() -> bool {
         std::lock_guard<std::mutex> al(state->lck);
         if (!state->active.load()) {
             return false;
         }
-        // the interpreter's context on the calling thread; the program exists while the callback is registered
+        // the interpreter's context on the calling thread; the program exists while the callback is active
         QorePythonHelper qph(state->pypgm);
         if (!qph.isValid() || !state->active.load()) {
             return false;
@@ -1447,7 +1469,17 @@ void QorePythonHelper::deactivateInterrupt() {
     if (!interrupt) {
         return;
     }
-    // with the GIL held, so the callback cannot raise the interrupt after this
+    // the mutex is taken without the GIL (the thread is detached): a running callback holds it while it waits for the
+    // GIL; then the thread is attached again with the mutex held, which a callback cannot hold while it holds the GIL
+    // (it takes the mutex first).  With the mutex, no callback raises the interrupt after this, also in free-threaded
+    // builds, where attaching does not exclude the callback
+    std::unique_lock<std::mutex> al(interrupt->lck, std::defer_lock);
+    // in a child of fork(), the mutex can be held by a callback of a thread that does not exist, and the thread can
+    // have lost the GIL: no other thread of the child has run the callback of this state
+    if (interrupt->fork_generation == QorePythonProgram::getForkGeneration()) {
+        QorePythonReleaseGilHelper prgh;
+        al.lock();
+    }
     interrupt->active.store(false);
     // an interrupt that was not delivered must not be raised in other Python code that the thread runs later
     if (interrupt->raised.load()) {
@@ -1459,10 +1491,8 @@ void QorePythonHelper::deregisterInterrupt() {
     if (!interrupt) {
         return;
     }
-    // without the GIL: waits for a callback that is running, which can be waiting for the GIL
-    {
-        std::lock_guard<std::mutex> al(interrupt->lck);
-    }
+    // a callback that runs after deactivateInterrupt() does nothing, so it is not waited for (the thread can hold the
+    // GIL here, ex: a nested helper, which a callback that waits for the GIL would deadlock with)
     (*interrupt_smh)->unregisterCancelCallback(interrupt.get());
 }
 

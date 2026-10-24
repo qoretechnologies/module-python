@@ -147,7 +147,11 @@ PyObject* QoreMetaPathFinder::find_spec(PyObject* self, PyObject* args) {
     // returns a borrowed reference
     PyObject* fullname = PyTuple_GetItem(args, 0);
     assert(PyUnicode_Check(fullname));
+    // nullptr with UnicodeEncodeError for a name that cannot be encoded in UTF-8 (ex: with a lone surrogate)
     const char* fname = PyUnicode_AsUTF8(fullname);
+    if (!fname) {
+        return nullptr;
+    }
     PyObject* path = PyTuple_GetItem(args, 1);
 
     // return qore top-level package module spec
