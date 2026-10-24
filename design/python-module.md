@@ -163,6 +163,34 @@ arguments and results of calls from Python to Qore, member values read from Pyth
 is); other values are released with the GIL, which avoids releasing and acquiring the GIL in every call.
 `PythonQoreClass::releaseQoreObject()` and the save object callback always release the GIL.  Test: `gilReleaseTest()`.
 
+## Exceptions Between Qore and Python
+
+Each interpreter has its own `qoreloader.QoreException` class (a subclass of `RuntimeError` created with
+`PyErr_NewExceptionWithDoc()` in `slot_qoreloader_exec()`, which runs once for each interpreter), held in the state of
+the `qoreloader` module; `qore_python_get_qore_exception_type()` returns the class of the current interpreter.  A
+static type would be shared by all interpreters, which isolated interpreters (PEP 684, PEP 687) must not share;
+previously the static type was only used in the main interpreter, sub-interpreters raised a `RuntimeError` with the
+Qore exception in its arguments, and a Qore exception was then guessed from a `RuntimeError`'s arguments.
+
+- Qore -> Python (`raisePythonException()`): the Qore exception is consumed as an `ExceptionInfo` hash, whose values
+  become the attributes of a `QoreException` (`next` is the `__cause__`); the hash is kept in a capsule attribute
+  (`_qore_exception`), released without the GIL (it can hold objects whose destructors are Qore code).  If the
+  exception's `arg` wraps a Python exception of the same interpreter and `err` is its class name, the original Python
+  exception object is raised instead (so `SystemExit` and `KeyboardInterrupt` keep their meaning).  The conversion
+  runs in the program of the current interpreter (`getContext()`), as callers pass the global program
+- Python -> Qore (`checkPythonException()` -> `raiseQoreException()`): a `QoreException` with the capsule is raised
+  again from the hash; the new exceptions get the current Qore call stack as their outer frames, so the end of the
+  saved call stack that equals the current call stack is removed (the type `User` is lost: the API only raises system
+  exceptions).  Other exceptions get `err` = `module.qualname`, `desc` = `str()`, `arg` = the converted exception
+  object, and their location and call stack from the traceback (`tb_lineno` for the frames of the traceback, the
+  current lines for the frames calling them).  The cause or context is raised after the exception, which makes it
+  `next`; each exception is raised in its own sink, as the call stack given to `raiseExceptionArg()` is added to all
+  exceptions of a sink.  Chains are limited to 20 exceptions (as Qore's `ExceptionInfo`) and end at an exception that
+  was already raised
+
+`QorePythonStackLocationHelper` adds the Python frames to the Qore call stack of Qore code called from Python (Qore
+methods, callables and functions), starting with the innermost frame (`sys._getframe(0)`).
+
 ## Sub-Interpreter Management
 
 ### Creation Flow

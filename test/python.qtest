@@ -35,6 +35,13 @@ class PythonSandboxTestReader {
     }
 }
 
+#! its destructor throws an exception; used to raise chained Qore exceptions
+class PythonThrowingDestructor {
+    destructor() {
+        throw "DTOR-ERR", "dtor desc";
+    }
+}
+
 #! counts its destructions; used to check the lifetime of Qore objects used from Python
 class PythonLifecycleTracked {
     public {
@@ -119,6 +126,7 @@ class PythonTest inherits Test {
         addTestCase("java date constant test", \javaDateConstantTest());
         addTestCase("exception test", \exceptionTest());
         addTestCase("exception frame ownership", \exceptionFrameOwnershipTest());
+        addTestCase("exception mapping between Qore and Python", \exceptionMappingTest());
         addTestCase("qore test", \qoreTest());
         addTestCase("stack test", \stackTest());
         addTestCase("deep recursion on a thread with a small stack", \smallStackRecursionTest());
@@ -1189,6 +1197,325 @@ def t3():
             assertEq("t2", ex.callstack[1].function);
             assertEq("t1", ex.callstack[2].function);
         }
+    }
+
+    # Qore and Python exceptions are converted in both directions with their type, argument, location and chained
+    # exceptions; an exception that passes through the other language unhandled is raised again as it was raised
+    exceptionMappingTest() {
+        PythonProgram p("
+from qoreloader import QoreException
+class MyErr(Exception):
+    def __init__(self, msg, code):
+        super().__init__(msg)
+        self.code = code
+def custom():
+    raise MyErr('bad', 42)
+def rt():
+    raise RuntimeError('MY-ERR', 'my desc')
+def cause():
+    try:
+        raise KeyError('inner')
+    except KeyError as e:
+        raise ValueError('outer') from e
+def context():
+    try:
+        raise KeyError('inner')
+    except KeyError:
+        raise ValueError('outer')
+def from_none():
+    try:
+        raise KeyError('inner')
+    except KeyError:
+        raise ValueError('outer') from None
+def cycle():
+    a = ValueError('a')
+    b = KeyError('b')
+    a.__cause__ = b
+    b.__cause__ = a
+    raise a
+def long_chain():
+    e = None
+    for i in range(30):
+        try:
+            if e is not None:
+                raise e
+            raise ValueError(0)
+        except ValueError as x:
+            e = ValueError(i + 1)
+            e.__context__ = x
+    raise e
+def raise_qore():
+    raise QoreException('PY-QORE-ERR', 'py desc', {'a': 1})
+def raise_qore_kw():
+    raise QoreException(err='KW-ERR', arg=[1, 2])
+class SubErr(QoreException):
+    def __init__(self, desc):
+        Exception.__init__(self, 'SUB-ERR', desc)
+def raise_sub():
+    raise SubErr('sub desc')
+def raise_surrogate():
+    raise QoreException('S-ERR', 'sdesc', '\\ud800')
+def through(f):
+    return f()
+def info(f):
+    try:
+        f()
+    except QoreException as e:
+        c = e.__cause__
+        return {
+            'type': type(e).__module__ + '.' + type(e).__name__,
+            'runtime_error': isinstance(e, RuntimeError),
+            'err': e.err, 'desc': e.desc, 'arg': e.arg, 'file': e.file, 'line': e.line, 'str': str(e),
+            'functions': [x['function'] for x in e.callstack],
+            'cause': (c.err, c.desc, c.line) if c is not None else None,
+            'cause_cause': c.__cause__ is not None if c is not None else None,
+        }
+class Marker(Exception):
+    pass
+def identity(f):
+    m = Marker('m')
+    def g():
+        raise m
+    try:
+        f(g)
+    except Marker as e:
+        return e is m
+    except QoreException as e:
+        return e.err + ': ' + str(e.arg is m)
+def describe(f):
+    try:
+        f()
+    except QoreException as e:
+        return e.err + ': ' + str(e.arg is None) + ': ' + e.desc
+def catch_runtime_error(f):
+    try:
+        f()
+    except RuntimeError as e:
+        return type(e).__name__ + ': ' + str(e)
+", "exc.py");
+
+        # Python -> Qore: the Python exception object is the argument; its attributes are available
+        try {
+            p.callFunction("custom");
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("exc.py.MyErr", ex.err);
+            assertEq("bad", ex.desc);
+            assertEq(42, ex.arg.code);
+            assertEq("Python", ex.lang);
+            assertEq("exc.py", ex.file);
+            assertEq(8, ex.line);
+            # the outermost Python function is called by native code; there is no internal C++ location
+            assertEq(("function": "custom", "file": "<builtin>", "line": -1, "lang": "Python", "type": "builtin"),
+                ex.callstack[0]{"function", "file", "line", "lang", "type"});
+            assertFalse(exists ex.next);
+        }
+        # a Python RuntimeError is not taken for a Qore exception
+        try {
+            p.callFunction("rt");
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("builtins.RuntimeError", ex.err);
+            assertEq("('MY-ERR', 'my desc')", ex.desc);
+            assertEq(("MY-ERR", "my desc"), ex.arg.args);
+        }
+        # the cause or context of an exception is chained to it
+        foreach string f in ("cause", "context") {
+            try {
+                p.callFunction(f);
+                assertTrue(False);
+            } catch (hash<ExceptionInfo> ex) {
+                assertEq("builtins.ValueError", ex.err, f);
+                assertEq("outer", ex.desc, f);
+                assertEq("builtins.KeyError", ex.next.err, f);
+                assertEq("'inner'", ex.next.desc, f);
+                # the line where the chained exception was raised
+                assertEq(ex.line - 2, ex.next.line, f);
+                assertEq("inner", ex.next.arg.args[0], f);
+                assertFalse(exists ex.next.next, f);
+            }
+        }
+        try {
+            p.callFunction("from_none");
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("builtins.ValueError", ex.err);
+            assertFalse(exists ex.next);
+        }
+        # a cycle of chained exceptions ends
+        try {
+            p.callFunction("cycle");
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("builtins.ValueError", ex.err);
+            assertEq("builtins.KeyError", ex.next.err);
+            assertFalse(exists ex.next.next);
+        }
+        # the chain is limited to 20 exceptions
+        try {
+            p.callFunction("long_chain");
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            int count = 0;
+            for (*hash<auto> h = ex; h; h = h.next) {
+                ++count;
+            }
+            assertEq(20, count);
+            assertEq("30", ex.desc);
+            assertEq("29", ex.next.desc);
+        }
+
+        # a QoreException raised in Python is a Qore exception with its err, desc and arg
+        try {
+            p.callFunction("raise_qore");
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("PY-QORE-ERR", ex.err);
+            assertEq("py desc", ex.desc);
+            assertEq({"a": 1}, ex.arg);
+            assertEq("exc.py", ex.file);
+            assertEq(44, ex.line);
+        }
+        try {
+            p.callFunction("raise_qore_kw");
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("KW-ERR", ex.err);
+            assertEq("", ex.desc);
+            assertEq((1, 2), ex.arg);
+        }
+        # the arguments are used for a subclass whose __init__() does not call QoreException.__init__()
+        try {
+            p.callFunction("raise_sub");
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("SUB-ERR", ex.err);
+            assertEq("sub desc", ex.desc);
+            assertEq(NOTHING, ex.arg);
+        }
+        # an argument that cannot be converted is described
+        try {
+            p.callFunction("raise_surrogate");
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("S-ERR", ex.err);
+            assertRegex("^sdesc \\(the exception argument cannot be converted to Qore: builtins.UnicodeEncodeError: ",
+                ex.desc);
+            assertEq(NOTHING, ex.arg);
+        }
+
+        # Qore -> Python: a qoreloader.QoreException, a RuntimeError, with the exception's attributes and location
+        code thrower = sub () { throw "Q-ERR", "q desc", 5; };
+        # the location of the exception in Qore
+        hash<ExceptionInfo> qore_ex;
+        try {
+            thrower();
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            qore_ex = ex;
+        }
+        hash<auto> info = p.callFunction("info", thrower);
+        assertEq("qoreloader.QoreException", info.type);
+        assertTrue(info.runtime_error);
+        assertEq("Q-ERR", info.err);
+        assertEq("q desc", info.desc);
+        assertEq(5, info.arg);
+        assertEq(qore_ex.file, info.file);
+        assertEq(qore_ex.line, info.line);
+        assertEq("Q-ERR: q desc", info.str);
+        # the Python frames are in the Qore call stack
+        assertEq(("PythonTest::<anonymous closure>", "info", "PythonProgram::callFunction"), info.functions[0..2]);
+        assertEq(NOTHING, info.cause);
+        # the exceptions chained to a Qore exception are its cause
+        code chain = sub () {
+            PythonThrowingDestructor t();
+            throw "MAIN-ERR", "main desc", ("x": 1);
+        };
+        try {
+            chain();
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            qore_ex = ex;
+        }
+        info = p.callFunction("info", chain);
+        assertEq("MAIN-ERR", info.err);
+        assertEq({"x": 1}, info.arg);
+        assertEq(("DTOR-ERR", "dtor desc"), info.cause[0..1]);
+        assertFalse(info.cause_cause);
+
+        # Qore -> Python -> Qore: the Qore exception is raised again with its location, call stack and chain
+        try {
+            p.callFunction("through", chain);
+            assertTrue(False);
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("MAIN-ERR", ex.err);
+            assertEq("main desc", ex.desc);
+            assertEq(("x": 1), ex.arg);
+            assertEq("Qore", ex.lang);
+            assertEq(qore_ex.file, ex.file);
+            assertEq(qore_ex.line, ex.line);
+            # the exception type is not kept: the Qore API raises exceptions as system exceptions
+            assertEq("User", qore_ex.type);
+            assertEq("System", ex.type);
+            list<string> functions = map $1.function, ex.callstack;
+            # the call stack is not repeated
+            assertEq(1, (select functions, $1 == "PythonProgram::callFunction").size());
+            assertEq(("PythonTest::<anonymous closure>", "through", "PythonProgram::callFunction"), functions[0..2]);
+            assertEq(("exc.py", "Python"), ex.callstack[1]{"file", "lang"}.values());
+            assertEq("DTOR-ERR", ex.next.err);
+            assertEq("dtor desc", ex.next.desc);
+            assertFalse(exists ex.next.next);
+        }
+
+        # Python -> Qore -> Python: the Python exception object is raised again
+        assertTrue(p.callFunction("identity", sub (code g) { g(); }));
+        assertTrue(p.callFunction("identity", sub (code g) {
+            try {
+                g();
+            } catch (hash<ExceptionInfo> ex) {
+                throw ex.err, ex.desc, ex.arg;
+            }
+        }));
+        # a Qore exception with another name and the Python exception as its argument is a QoreException
+        assertEq("OTHER: True", p.callFunction("identity", sub (code g) {
+            try {
+                g();
+            } catch (hash<ExceptionInfo> ex) {
+                throw "OTHER", ex.desc, ex.arg;
+            }
+        }));
+
+        # a Python exception object that Qore deleted is not raised again
+        assertEq("exc.py.Marker: False", p.callFunction("identity", sub (code g) {
+            try {
+                g();
+            } catch (hash<ExceptionInfo> ex) {
+                delete ex.arg;
+                throw ex.err, ex.desc, ex.arg;
+            }
+        }));
+        # an argument that cannot be converted to Python is None, and the reason is in the description
+        int i = 1;
+        assertEq("REF: True: ref desc (the exception argument cannot be converted to Python: PYTHON-VALUE-ERROR: "
+            "cannot convert a Qore value of type 'reference<int>' to a Python value)",
+            p.callFunction("describe", sub () { throw "REF", "ref desc", \i; }));
+
+        # Python code cannot exit a Qore thread
+        assertEq("RuntimeError: the thread_exit statement cannot be used in Qore code called from Python",
+            p.callFunction("catch_runtime_error", sub () { thread_exit; }));
+
+        # the main interpreter has its own qoreloader.QoreException
+        PythonProgram::evalStatement("
+from qoreloader import QoreException as QE
+from qore.__root__.Qore.Thread import Mutex
+def exception_mapping_main_check():
+    try:
+        Mutex().unlock()
+    except QE as e:
+        return (type(e).__module__, e.err, e.file)
+", "main.py");
+        assertEq(("qoreloader", "LOCK-ERROR", "main.py"),
+            PythonProgram::evalExpression("exception_mapping_main_check()"));
     }
 
     qoreTest() {

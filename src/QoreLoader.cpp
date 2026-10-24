@@ -2,7 +2,7 @@
 /*
     qore Python module
 
-    Copyright (C) 2020 - 2022 Qore Technologies, s.r.o.
+    Copyright (C) 2020 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -137,10 +137,6 @@ int QoreLoader::init() {
     QorePythonReferenceHolder args(PyTuple_New(0));
     loader = PyObject_CallObject((PyObject*)&QoreLoader_Type, *args);
     //loader = PyObject_CallObject((PyObject*)*loader_cls, *args);
-
-    if (PyType_Ready(&PythonQoreException_Type) < 0) {
-        return -1;
-    }
 
     return 0;
 }

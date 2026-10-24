@@ -4,8 +4,132 @@
 
     @tableofcontents
 
-    %Python exceptions are mapped to Qore exceptions as follows:
-    - \c err: the fully-qualified %Python exception class name (ex: \c "builtins.SyntaxError", \c "socket.timeout")
-    - \c desc: the string description, if none, then the exception arguments converted to a string with \c repr()
-    - \c arg: the %Python exception object itself converted to a Qore value
+    Exceptions are converted in both directions when they pass between %Qore and %Python code: a %Python exception
+    raised in %Python code called from %Qore is a %Qore exception, and a %Qore exception raised in %Qore code called
+    from %Python is a %Python exception.  An exception that passes through code in the other language without being
+    handled there is raised again as it was raised originally.
+
+    @section python_exceptions_to_qore Python Exceptions in Qore
+
+    %Python exceptions are converted to %Qore exceptions as follows:
+    - \c err: the module and qualified name of the %Python exception class (ex: \c "builtins.ValueError",
+      \c "json.decoder.JSONDecodeError", \c "mymodule.Outer.Error")
+    - \c desc: the string of the exception (<tt>str(e)</tt>)
+    - \c arg: the %Python exception object, as a %Qore object whose members are its attributes; if it cannot be
+      converted to %Qore, there is no \c arg, and the reason is added to \c desc
+    - \c file, \c line and \c lang: the location in %Python code where the exception was raised; the location and
+      the function of each %Python frame are in the \c callstack
+    - \c next: the cause of the exception (<tt>raise ... from cause</tt>), or the exception that was being handled
+      when it was raised, unless this context is suppressed (<tt>raise ... from None</tt>); up to 20 exceptions are
+      chained, and a chain that refers to an exception again ends there
+
+    @par Example
+    @code{.py}
+%modern
+%requires python
+
+PythonProgram p("
+class ValidationError(Exception):
+    def __init__(self, msg, field):
+        super().__init__(msg)
+        self.field = field
+
+def validate(order):
+    try:
+        int(order['qty'])
+    except ValueError as e:
+        raise ValidationError('invalid quantity', 'qty') from e
+", "orders.py");
+
+try {
+    p.callFunction("validate", {"qty": "ten"});
+} catch (hash<ExceptionInfo> ex) {
+    # orders.py.ValidationError: invalid quantity (field: qty) at orders.py:11
+    printf("%s: %s (field: %s) at %s:%d\n", ex.err, ex.desc, ex.arg.field, ex.file, ex.line);
+    # caused by builtins.ValueError: invalid literal for int() with base 10: 'ten'
+    printf("caused by %s: %s\n", ex.next.err, ex.next.desc);
+}
+    @endcode
+
+    A \c qoreloader.QoreException raised in %Python code is a %Qore exception with the \c err, \c desc and \c arg of
+    the %Python exception (see @ref python_exceptions_qoreexception), as if %Python code had raised a %Qore exception:
+
+    @code{.py}
+from qoreloader import QoreException
+
+def check(order):
+    if not order.get('id'):
+        raise QoreException('ORDER-ERROR', 'the order has no ID', order)
+    @endcode
+
+    @section python_exceptions_to_python Qore Exceptions in Python
+
+    %Qore exceptions are raised in %Python as \c qoreloader.QoreException objects (see
+    @ref python_exceptions_qoreexception), in %Python code embedded in %Qore and in %Python programs that use %Qore
+    with the @ref python_qoreloader_moduleguide "qoreloader module" alike.  The exceptions chained to a %Qore exception
+    (\c next) are its \c __cause__.
+
+    @par Example
+    @code{.py}
+import qoreloader
+from qoreloader import QoreException
+from qore.__root__.Qore.Thread import Mutex
+
+try:
+    Mutex().unlock()
+except QoreException as e:
+    # LOCK-ERROR: TID 1 called Mutex::unlock() while the lock was already unlocked
+    print(e)
+    print(e.err, e.file, e.line)
+    @endcode
+
+    A %Python exception that was raised in %Python code called from %Qore and that %Qore code did not handle is raised
+    again in %Python as the original %Python exception object; this is also the case when %Qore code catches it and
+    raises it again with the same \c err and \c arg (ex: <tt>throw ex.err, ex.desc, ex.arg;</tt>).  Exceptions that
+    are not subclasses of \c Exception keep their meaning: for example, \c SystemExit raised in a %Python callback of
+    %Qore code exits a %Python program, and \c KeyboardInterrupt interrupts it.
+
+    @code{.py}
+import qoreloader
+from qore import call_function
+
+class Abort(Exception):
+    pass
+
+def step():
+    raise Abort('stop')
+
+try:
+    call_function(step)
+except Abort as e:
+    print('aborted:', e)
+    @endcode
+
+    @note The \c thread_exit statement cannot be used in %Qore code called from %Python: it raises a \c RuntimeError
+    in %Python.
+
+    @section python_exceptions_qoreexception The qoreloader.QoreException Class
+
+    \c qoreloader.QoreException is a subclass of \c RuntimeError; each %Python interpreter has its own class, which
+    is imported with <tt>from qoreloader import QoreException</tt>.  It is created as
+    <tt>QoreException(err, desc=None, arg=None)</tt>, and <tt>str()</tt> of it is <tt>"err: desc"</tt> (\c "err"
+    without a description).
+
+    A \c QoreException raised for a %Qore exception has the following attributes:
+    - \c err, \c desc, \c arg: the %Qore exception's \c err, \c desc and \c arg converted to %Python; an \c arg that
+      cannot be converted to %Python (ex: a reference) is \c None, and the reason is added to \c desc
+    - \c file, \c line, \c endline, \c source, \c offset, \c lang: the location of the %Qore exception
+    - \c callstack: the %Qore call stack of the exception, a list of dicts as in the %Qore \c callstack, which
+      includes the %Python frames of the calls from %Python to %Qore
+    - \c __cause__: the exception chained to the %Qore exception (\c next), if any
+
+    @section python_exceptions_round_trip Exceptions Passing Through the Other Language
+
+    When a \c QoreException raised for a %Qore exception passes through %Python code without being handled (or is
+    raised again in %Python with \c raise), the original %Qore exception is raised again in %Qore with its \c err,
+    \c desc, \c arg, location, call stack and chained exceptions; the call stack is not repeated.  The type of the
+    exception (\c "User" for exceptions raised with \c throw) is not kept: the exception is a \c "System" exception.
+
+    Likewise, a %Python exception that passes through %Qore code is raised again in %Python as the original exception
+    object (see @ref python_exceptions_to_python).
 */

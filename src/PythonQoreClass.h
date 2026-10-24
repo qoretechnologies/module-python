@@ -143,6 +143,4 @@ DLLLOCAL bool PyQoreObject_Check(PyObject* obj);
 
 DLLLOCAL bool PyQoreObjectType_Check(PyTypeObject* type);
 
-DLLLOCAL extern PyTypeObject PythonQoreException_Type;
-
 #endif

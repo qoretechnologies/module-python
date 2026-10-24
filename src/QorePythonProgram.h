@@ -590,7 +590,32 @@ protected:
     //! for weak refs
     QoreReferenceCounter weak_refs;
 
-    //! Saves Qore objects in thread-local data
+    //! Raises the Qore exception for the Python exception given and for the exceptions chained to it
+    /** @param xsink the exception is added to the exceptions in the sink
+        @param ex_type the type of the exception
+        @param ex_value the normalized exception
+        @param traceback the traceback of the exception or Py_None
+        @param seen the exceptions already raised, so that a cycle of chained exceptions ends
+    */
+    DLLLOCAL void raiseQoreException(ExceptionSink& xsink, PyObject* ex_type, PyObject* ex_value,
+        PyObject* traceback, pyobj_set_t& seen);
+
+    //! Raises a Qore exception raised in Python again with its location, call stack and chained exceptions
+    /** @return true if the Python exception was raised for a Qore exception, which was raised again in \a xsink,
+        false if not
+    */
+    DLLLOCAL bool raiseOriginalQoreException(ExceptionSink& xsink, PyObject* ex_value);
+
+    //! Returns a new qoreloader.QoreException object for the Qore exception given and the exceptions chained to it
+    /** @return the exception or nullptr with a Python exception set
+    */
+    DLLLOCAL PyObject* getPythonQoreException(const QoreHashNode* info, int depth);
+
+    //! Returns a new reference to the Python exception raised in Qore as the argument of the Qore exception
+    /** @return the exception, or nullptr if the Qore exception was not raised for a Python exception in the same
+        interpreter
+    */
+    DLLLOCAL PyObject* getOriginalPythonException(ExceptionSink& xsink);
 
     DLLLOCAL int importQoreNamespaceToPython(PyObject* mod, const QoreNamespace& ns);
 

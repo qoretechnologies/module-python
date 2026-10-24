@@ -139,7 +139,34 @@ PyTypeObject PythonQoreObjectBase_Type = {
 
 static int init_count = 0;
 
+//! the state of the qoreloader module in an interpreter
+struct qoreloader_state {
+    //! the qoreloader.QoreException type of the interpreter
+    PyObject* qore_exception_type;
+};
+
+static qoreloader_state* qoreloader_get_state(PyObject* m) {
+    return static_cast<qoreloader_state*>(PyModule_GetState(m));
+}
+
+static int qoreloader_traverse(PyObject* m, visitproc visit, void* arg) {
+    qoreloader_state* st = qoreloader_get_state(m);
+    if (st) {
+        Py_VISIT(st->qore_exception_type);
+    }
+    return 0;
+}
+
+static int qoreloader_clear(PyObject* m) {
+    qoreloader_state* st = qoreloader_get_state(m);
+    if (st) {
+        Py_CLEAR(st->qore_exception_type);
+    }
+    return 0;
+}
+
 void qoreloader_free(void* obj) {
+    qoreloader_clear(static_cast<PyObject*>(obj));
     if (!--init_count) {
         printd(5, "qoreloader_free() obj: %p qore_needs_shutdown: %d\n", obj, qore_needs_shutdown);
 
@@ -174,11 +201,11 @@ static struct PyModuleDef qoreloadermodule = {
     PyModuleDef_HEAD_INIT,
     "qoreloader",        // m_name
     module_doc,          // m_doc
-    0,                   // m_size
+    sizeof(qoreloader_state), // m_size
     qoreloader_methods,  // m_methods
     qoreloader_slots,    // m_slots
-    nullptr,             // m_traverse
-    nullptr,             // m_clear
+    qoreloader_traverse, // m_traverse
+    qoreloader_clear,    // m_clear
     qoreloader_free,     // m_free
 };
 
@@ -301,6 +328,133 @@ static PyMethodDef atexit_md = {
     "qoreloader cleanup function",
 };
 
+// QoreException.__init__(self, err, desc=None, arg=None)
+static PyObject* qore_exception_init(PyObject* /* unused */, PyObject* args, PyObject* kwargs) {
+    static const char* kwlist[] = {"", "err", "desc", "arg", nullptr};
+    PyObject* self;
+    PyObject* err;
+    PyObject* desc = Py_None;
+    PyObject* arg = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|OO:QoreException", const_cast<char**>(kwlist), &self, &err,
+        &desc, &arg)) {
+        return nullptr;
+    }
+    // the arguments are (err, desc[, arg]) as for a Qore exception, also when given as keyword arguments
+    Py_ssize_t size = arg != Py_None ? 3 : (desc != Py_None ? 2 : 1);
+    QorePythonReferenceHolder ex_args(PyTuple_New(size));
+    if (!ex_args) {
+        return nullptr;
+    }
+    PyObject* vals[] = {err, desc, arg};
+    for (Py_ssize_t i = 0; i < size; ++i) {
+        Py_INCREF(vals[i]);
+        PyTuple_SET_ITEM(*ex_args, i, vals[i]);
+    }
+    if (PyObject_SetAttrString(self, "args", *ex_args) < 0
+        || PyObject_SetAttrString(self, "err", err) < 0
+        || PyObject_SetAttrString(self, "desc", desc) < 0
+        || PyObject_SetAttrString(self, "arg", arg) < 0) {
+        return nullptr;
+    }
+    Py_RETURN_NONE;
+}
+
+// QoreException.__str__(self): "err: desc", or "err" without a description
+static PyObject* qore_exception_str(PyObject* /* unused */, PyObject* self) {
+    QorePythonReferenceHolder err(PyObject_GetAttrString(self, "err"));
+    if (!err) {
+        // ex: a subclass whose __init__() does not call QoreException.__init__()
+        if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            return nullptr;
+        }
+        PyErr_Clear();
+        return reinterpret_cast<PyTypeObject*>(PyExc_BaseException)->tp_str(self);
+    }
+    QorePythonReferenceHolder desc(PyObject_GetAttrString(self, "desc"));
+    if (!desc) {
+        if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            return nullptr;
+        }
+        PyErr_Clear();
+    }
+    if (!desc || *desc == Py_None) {
+        return PyObject_Str(*err);
+    }
+    return PyUnicode_FromFormat("%S: %S", *err, *desc);
+}
+
+static PyMethodDef qore_exception_init_def = {"__init__", reinterpret_cast<PyCFunction>(
+    reinterpret_cast<void(*)(void)>(qore_exception_init)), METH_VARARGS | METH_KEYWORDS,
+    "QoreException(err, desc=None, arg=None): sets the err, desc and arg attributes"};
+
+static PyMethodDef qore_exception_str_def = {"__str__", qore_exception_str, METH_O,
+    "returns \"err: desc\", or \"err\" without a description"};
+
+PyDoc_STRVAR(qore_exception_doc, "A Qore exception\n\n"
+    "Qore exceptions are raised in Python as QoreException objects with the attributes err, desc and arg; "
+    "exceptions raised by Qore code also have the attributes file, line, endline, source, offset, lang and "
+    "callstack, and the exceptions chained to them are set as __cause__.  A QoreException raised in Python is a "
+    "Qore exception with its err, desc and arg in Qore.");
+
+// adds a method implemented in C to the class dictionary given
+static int qore_exception_add_method(PyObject* dict, PyMethodDef* def) {
+    QorePythonReferenceHolder func(PyCFunction_NewEx(def, nullptr, nullptr));
+    if (!func) {
+        return -1;
+    }
+    // an instance method: the object is passed as the first argument
+    QorePythonReferenceHolder meth(PyInstanceMethod_New(*func));
+    if (!meth) {
+        return -1;
+    }
+    return PyDict_SetItemString(dict, def->ml_name, *meth);
+}
+
+// creates the qoreloader.QoreException type of the interpreter executing the module; a subclass of RuntimeError
+static int qoreloader_init_exception_type(PyObject* m) {
+    qoreloader_state* st = qoreloader_get_state(m);
+    assert(st && !st->qore_exception_type);
+    QorePythonReferenceHolder dict(PyDict_New());
+    if (!dict || qore_exception_add_method(*dict, &qore_exception_init_def)
+        || qore_exception_add_method(*dict, &qore_exception_str_def)) {
+        return -1;
+    }
+    st->qore_exception_type = PyErr_NewExceptionWithDoc("qoreloader.QoreException", qore_exception_doc,
+        PyExc_RuntimeError, *dict);
+    if (!st->qore_exception_type) {
+        return -1;
+    }
+    return PyModule_AddObjectRef(m, "QoreException", st->qore_exception_type);
+}
+
+PyObject* qore_python_get_qore_exception_type() {
+    QorePythonReferenceHolder name(PyUnicode_FromString("qoreloader"));
+    if (!name) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder mod(PyImport_GetModule(*name));
+    if (!mod) {
+        if (PyErr_Occurred()) {
+            return nullptr;
+        }
+        mod = PyImport_Import(*name);
+        if (!mod) {
+            return nullptr;
+        }
+    }
+    if (!PyModule_Check(*mod) || PyModule_GetDef(*mod) != &qoreloadermodule) {
+        PyErr_SetString(PyExc_ImportError, "sys.modules['qoreloader'] is not the qoreloader module");
+        return nullptr;
+    }
+    qoreloader_state* st = qoreloader_get_state(*mod);
+    if (!st || !st->qore_exception_type) {
+        PyErr_SetString(PyExc_ImportError, "the qoreloader module has not been initialized");
+        return nullptr;
+    }
+    Py_INCREF(st->qore_exception_type);
+    return st->qore_exception_type;
+}
+
 static int slot_qoreloader_exec(PyObject *m) {
     ++init_count;
     printd(5, "slot_qoreloader_exec() ic: %d\n", init_count);
@@ -371,6 +525,10 @@ static int slot_qoreloader_exec(PyObject *m) {
             PyTuple_SET_ITEM(*args, 0, func.release());
             QorePythonReferenceHolder rv_ignored(PyObject_CallObject(*register_func, *args));
         }
+    }
+
+    if (qoreloader_init_exception_type(m)) {
+        return -1;
     }
 
     QoreMetaPathFinder::setupModules();

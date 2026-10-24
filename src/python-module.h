@@ -775,6 +775,18 @@ DLLLOCAL extern QorePythonProgram* qore_python_pgm;
 //! Python module definition function for the qoreloader module
 DLLLOCAL PyMODINIT_FUNC PyInit_qoreloader();
 
+//! the name of the capsule that holds the ExceptionInfo hash of a Qore exception raised in Python
+#define QORE_PYTHON_EXCEPTION_CAPSULE_NAME "qoreloader.QoreException._qore_exception"
+
+//! the attribute of a qoreloader.QoreException object raised for a Qore exception that holds its capsule
+#define QORE_PYTHON_EXCEPTION_CAPSULE_ATTR "_qore_exception"
+
+//! returns a new reference to the qoreloader.QoreException type of the current interpreter
+/** Each interpreter has its own type, created when the qoreloader module is executed in it; the module is imported if
+    necessary.  Returns nullptr with a Python exception set on error.
+*/
+DLLLOCAL PyObject* qore_python_get_qore_exception_type();
+
 //! Creates the global QOre Python program object
 DLLLOCAL int init_global_qore_python_pgm();
 

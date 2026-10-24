@@ -26,6 +26,23 @@
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
 
     <b>Bug Fixes:</b>
+    - exceptions are converted consistently and without losing information between %Qore and %Python (see
+      @ref python_exceptionsguide): %Qore exceptions are raised in %Python as \c qoreloader.QoreException (a
+      \c RuntimeError that can be imported with <tt>from qoreloader import QoreException</tt>, one for each
+      interpreter) with \c err, \c desc, \c arg, location and call stack attributes, and their chained exceptions as
+      \c __cause__; previously embedded %Python code got a \c RuntimeError without these attributes, and the class
+      could not be imported.  A \c QoreException raised in %Python is a %Qore exception with its \c err, \c desc and
+      \c arg, while a %Python \c RuntimeError with two or three arguments is no longer taken for one.  The \c arg of
+      the %Qore exception for a %Python exception is the exception object (it was always empty), the cause or
+      context of a %Python exception is chained to it as \c next, and the internal C++ entry is no longer in the call
+      stack.  A %Python exception that passes through %Qore code is raised again in %Python as the original object
+      (\c SystemExit raised in a %Python callback of %Qore code now exits the program instead of becoming a
+      \c QoreException), and a %Qore exception that passes through %Python code is raised again in %Qore with its
+      location, call stack and chained exceptions.  The \c err of an exception of a class defined in C uses the
+      class's module and qualified name (ex: \c "decimal.InvalidOperation"), and the %Qore call stack of %Qore code
+      called from %Python includes all %Python frames of the call: the innermost frame was missing, and calls of
+      %Qore functions imported into %Python had none
+      (<a href="https://github.com/qoretechnologies/qore/issues/5497">issue 5497</a>)
     - the destructor of a %Qore class runs for the objects of its %Python subclasses (also through other %Python
       classes); previously it never ran, not even with @ref delete "delete", as the %Qore class was a virtual base
       class of the class created for the %Python subclass

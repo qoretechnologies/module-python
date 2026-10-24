@@ -100,10 +100,6 @@ int JavaLoader::init() {
     loader = PyObject_CallObject((PyObject*)&JavaLoader_Type, *args);
     //loader = PyObject_CallObject((PyObject*)*loader_cls, *args);
 
-    if (PyType_Ready(&PythonQoreException_Type) < 0) {
-        return -1;
-    }
-
     return 0;
 }
 

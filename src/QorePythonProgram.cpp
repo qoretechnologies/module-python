@@ -44,11 +44,10 @@
 #include <frameobject.h>
 #include <datetime.h>
 
+#include <algorithm>
 #include <climits>
 #include <vector>
 #include <string>
-
-static const char* this_file = q_basenameptr(__FILE__);
 
 // type used for imported Qore namespaces in Python; a plan type with only a dictionary
 struct PythonQoreNs {
@@ -1937,123 +1936,243 @@ int QorePythonProgram::saveQoreObjectFromPython(const QoreValue& rv, ExceptionSi
     return 0;
 }
 
-void QorePythonProgram::raisePythonException(ExceptionSink& xsink) {
-    assert(xsink);
-    QoreValue err(xsink.getExceptionErr());
-    QoreValue desc(xsink.getExceptionDesc());
-    QoreValue arg(xsink.getExceptionArg());
+// the maximum number of chained exceptions converted between Qore and Python, as for the ExceptionInfo hash in Qore
+static constexpr int QORE_PYTHON_MAX_CHAINED_EXCEPTIONS = 20;
 
-    if (err.getType() == NT_STRING) {
-        QoreStringValueHelper err_str(err);
-        printd(5, "QorePythonProgram::raisePythonException() this: %p owns_interpreter: %d err: %s\n",
-            this, owns_interpreter, err_str->c_str());
-    } else {
-        printd(5, "QorePythonProgram::raisePythonException() this: %p owns_interpreter: %d err: N/A\n",
-            this, owns_interpreter);
+// returns the name of a Python exception class as the "err" of its Qore exception: "<module>.<qualified name>"
+static std::string qore_python_get_exception_name(PyTypeObject* cls) {
+    PyObject* cls_obj = reinterpret_cast<PyObject*>(cls);
+    std::string name;
+    QorePythonReferenceHolder mod(PyObject_GetAttrString(cls_obj, "__module__"));
+    const char* str = mod && PyUnicode_Check(*mod) ? PyUnicode_AsUTF8(*mod) : nullptr;
+    if (str) {
+        name = str;
+        name += '.';
+    }
+    QorePythonReferenceHolder qualname(PyObject_GetAttrString(cls_obj, "__qualname__"));
+    str = qualname && PyUnicode_Check(*qualname) ? PyUnicode_AsUTF8(*qualname) : nullptr;
+    // the class name is used if the attributes are not available
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+    }
+    name += str ? str : cls->tp_name;
+    return name;
+}
+
+// returns str() of the Python object as a Qore string
+static QoreStringNode* qore_python_get_string(PyObject* obj) {
+    QorePythonReferenceHolder str(PyObject_Str(obj));
+    Py_ssize_t size;
+    // ex: a string with lone surrogates, which cannot be encoded in UTF-8
+    const char* cstr = str ? PyUnicode_AsUTF8AndSize(*str, &size) : nullptr;
+    if (!cstr) {
+        PyErr_Clear();
+        return new QoreStringNodeMaker("<%s object>", Py_TYPE(obj)->tp_name);
+    }
+    return new QoreStringNode(cstr, size, QCS_UTF8);
+}
+
+// holds the ExceptionInfo hash of a Qore exception raised in Python in a capsule
+static void qore_python_exception_capsule_destructor(PyObject* capsule) {
+    QoreHashNode* info = static_cast<QoreHashNode*>(PyCapsule_GetPointer(capsule,
+        QORE_PYTHON_EXCEPTION_CAPSULE_NAME));
+    assert(info);
+    // releasing the exception can run Qore code (the destructors of objects in it), which needs a thread registered
+    // with Qore and runs without the GIL; if the thread cannot be registered, the reference is not released
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.ok()) {
+        return;
+    }
+    ExceptionSink xsink;
+    ValueHolder holder(info, &xsink);
+    qore_python_release(holder);
+}
+
+PyObject* QorePythonProgram::getOriginalPythonException(ExceptionSink& xsink) {
+    QoreValue arg(xsink.getExceptionArg());
+    if (arg.getType() != NT_OBJECT) {
+        return nullptr;
+    }
+    QoreObject* obj = const_cast<QoreObject*>(arg.get<const QoreObject>());
+    // the private data of an object that has been deleted is not available: the exception is not raised again
+    ExceptionSink xsink2;
+    TryPrivateDataRefHolder<QorePythonPrivateData> pypd(obj, CID_PYTHONBASEOBJECT, &xsink2);
+    if (!pypd || !sharesInterpreter(pypd->getOwner())) {
+        xsink2.clear();
+        return nullptr;
+    }
+    PyObject* ex = pypd->get();
+    if (!PyExceptionInstance_Check(ex)) {
+        return nullptr;
+    }
+    // the exception is raised again only if the Qore exception has the name of its class: Qore code can raise
+    // another exception with a Python exception as its argument
+    QoreValue err(xsink.getExceptionErr());
+    if (err.getType() != NT_STRING
+        || qore_python_get_exception_name(Py_TYPE(ex)) != err.get<const QoreStringNode>()->c_str()) {
+        return nullptr;
+    }
+    Py_INCREF(ex);
+    return ex;
+}
+
+PyObject* QorePythonProgram::getPythonQoreException(const QoreHashNode* info, int depth) {
+    QorePythonReferenceHolder type(qore_python_get_qore_exception_type());
+    if (!type) {
+        return nullptr;
     }
 
-    // In sub-interpreters (owns_interpreter == true), we cannot use PythonQoreException_Type
-    // because it's a custom type initialized in the main interpreter. Using it in a sub-interpreter
-    // causes crashes in Python 3.12+ when the exception handling machinery tries to access
-    // type-specific data structures that aren't properly set up for the sub-interpreter.
-    //
-    // IMPORTANT: In Python 3.12+, each interpreter has its own builtin types. Using the global
-    // PyExc_RuntimeError (which is the main interpreter's type) in a sub-interpreter can cause
-    // crashes when Python's internal machinery tries to process the exception.
-    // We must get the RuntimeError type from the current interpreter's builtins.
-    if (owns_interpreter) {
-        // Convert values to Python objects for the exception args
-        // This matches the PythonQoreException behavior where args[0] is err, args[1] is desc, etc.
-        //
-        // NOTE: "err", "desc", and "arg" are owned by the exception in "xsink", so the exception must not be
-        // cleared until all of them have been converted; the error string is used in the fallback path below
-        // after the exception has been cleared, so it is copied here
-        ExceptionSink xsink2;
-        QorePythonReferenceHolder py_err(getPythonValue(err, &xsink2));
-        QorePythonReferenceHolder py_desc(getPythonValue(desc, &xsink2));
-
-        std::string err_msg;
-        {
-            QoreStringValueHelper err_str(err);
-            err_msg = err_str->c_str();
+    // converts a value to Python; returns nullptr with the reason in "error" if it cannot be converted
+    auto get_value = [this](QoreValue v, std::string& error) -> PyObject* {
+        ExceptionSink xsink;
+        PyObject* rv = getPythonValue(v, &xsink);
+        if (!rv) {
+            PyErr_Clear();
+            QoreStringValueHelper err(xsink.getExceptionErr());
+            QoreStringValueHelper desc(xsink.getExceptionDesc());
+            error = err->c_str();
+            error += ": ";
+            error += desc->c_str();
+            xsink.clear();
         }
+        return rv;
+    };
+    // converts err or desc to Python; a value that cannot be converted is passed as its string
+    auto get_string_value = [&get_value](QoreValue v) -> PyObject* {
+        std::string error;
+        PyObject* rv = get_value(v, error);
+        if (!rv) {
+            QoreStringValueHelper str(v);
+            rv = PyUnicode_FromStringAndSize(str->c_str(), str->size());
+        }
+        return rv;
+    };
 
-        // Create args tuple: (err, desc) or (err, desc, arg)
-        QorePythonReferenceHolder tuple(PyTuple_New(arg ? 3 : 2));
-        if (py_err) {
-            PyTuple_SET_ITEM(*tuple, 0, py_err.release());
-        } else {
+    // the argument; if it cannot be converted, it is None, and the reason is added to the description
+    std::string arg_error;
+    QorePythonReferenceHolder py_arg;
+    QoreValue arg = info->getKeyValue("arg");
+    if (arg) {
+        py_arg = get_value(arg, arg_error);
+        if (!py_arg) {
             Py_INCREF(Py_None);
-            PyTuple_SET_ITEM(*tuple, 0, Py_None);
+            py_arg = Py_None;
         }
-        if (py_desc) {
-            PyTuple_SET_ITEM(*tuple, 1, py_desc.release());
-        } else {
-            Py_INCREF(Py_None);
-            PyTuple_SET_ITEM(*tuple, 1, Py_None);
-        }
-        if (arg) {
-            QorePythonReferenceHolder py_arg(getPythonValue(arg, &xsink2));
-            if (py_arg) {
-                PyTuple_SET_ITEM(*tuple, 2, py_arg.release());
-            } else {
-                Py_INCREF(Py_None);
-                PyTuple_SET_ITEM(*tuple, 2, Py_None);
-            }
-        }
+    }
 
-        // all values owned by the exception have been converted; "err", "desc", and "arg" are invalid after this
+    QorePythonReferenceHolder args(PyTuple_New(arg ? 3 : 2));
+    if (!args) {
+        return nullptr;
+    }
+    PyObject* val = get_string_value(info->getKeyValue("err"));
+    if (!val) {
+        return nullptr;
+    }
+    PyTuple_SET_ITEM(*args, 0, val);
+    QoreValue desc = info->getKeyValue("desc");
+    if (!arg_error.empty()) {
+        QoreStringValueHelper desc_str(desc);
+        std::string str = desc_str->c_str();
+        str += " (the exception argument cannot be converted to Python: " + arg_error + ")";
+        val = PyUnicode_FromStringAndSize(str.c_str(), str.size());
+    } else if (desc) {
+        val = get_string_value(desc);
+    } else {
+        Py_INCREF(Py_None);
+        val = Py_None;
+    }
+    if (!val) {
+        return nullptr;
+    }
+    PyTuple_SET_ITEM(*args, 1, val);
+    if (arg) {
+        PyTuple_SET_ITEM(*args, 2, py_arg.release());
+    }
+
+    QorePythonReferenceHolder ex(PyObject_Call(*type, *args, nullptr));
+    if (!ex) {
+        return nullptr;
+    }
+
+    // the location of the exception and its call stack
+    for (const char* key : {"file", "line", "endline", "source", "offset", "lang", "callstack"}) {
+        QoreValue v = info->getKeyValue(key);
+        if (!v) {
+            continue;
+        }
+        // the values of the location and the call stack are strings, integers, and lists of hashes of them
+        std::string error;
+        QorePythonReferenceHolder pyval(get_value(v, error));
+        if (!pyval) {
+            PyErr_Format(PyExc_RuntimeError, "cannot convert the Qore exception's '%s' to Python: %s", key,
+                error.c_str());
+            return nullptr;
+        }
+        if (PyObject_SetAttrString(*ex, key, *pyval) < 0) {
+            return nullptr;
+        }
+    }
+
+    // the Qore exception is raised again in Qore when the Python exception is
+    QorePythonReferenceHolder capsule(PyCapsule_New(info->refSelf(), QORE_PYTHON_EXCEPTION_CAPSULE_NAME,
+        qore_python_exception_capsule_destructor));
+    if (!capsule) {
+        // the capsule does not own the reference
+        ExceptionSink xsink;
+        ValueHolder holder(const_cast<QoreHashNode*>(info), &xsink);
+        qore_python_release(holder);
+        return nullptr;
+    }
+    if (PyObject_SetAttrString(*ex, QORE_PYTHON_EXCEPTION_CAPSULE_ATTR, *capsule) < 0) {
+        return nullptr;
+    }
+
+    // the exception chained to the Qore exception is the cause of the Python exception
+    QoreValue next = info->getKeyValue("next");
+    if (next.getType() == NT_HASH && depth < QORE_PYTHON_MAX_CHAINED_EXCEPTIONS) {
+        PyObject* cause = getPythonQoreException(next.get<const QoreHashNode>(), depth + 1);
+        if (!cause) {
+            return nullptr;
+        }
+        // steals the reference
+        PyException_SetCause(*ex, cause);
+    }
+    return ex.release();
+}
+
+void QorePythonProgram::raisePythonException(ExceptionSink& xsink) {
+    assert(xsink);
+    // the exception is raised in the interpreter of the current thread, whose program converts the values
+    QorePythonProgram* pypgm = getContext();
+    if (!pypgm || !pypgm->interpreter || pypgm->interpreter != qore_python_get_interpreter(PyThreadState_Get())) {
+        pypgm = this;
+    }
+
+    // the thread_exit statement in Qore code called from Python leaves no exception; Python code cannot exit the Qore
+    // thread
+    if (!xsink.isException()) {
+        assert(xsink.isThreadExit());
         xsink.clear();
-
-        // Get RuntimeError from the current interpreter's builtins
-        PyObject* builtins = PyEval_GetBuiltins();
-        if (builtins) {
-            PyObject* runtime_error = PyDict_GetItemString(builtins, "RuntimeError");
-            if (runtime_error && PyType_Check(runtime_error)) {
-                // Create the exception with args tuple
-                QorePythonReferenceHolder exc(PyObject_Call(runtime_error, *tuple, nullptr));
-                if (exc) {
-                    PyErr_SetObject(runtime_error, *exc);
-                    return;
-                }
-            }
-        }
-
-        // Fallback - use error string as message
-        PyErr_SetString(PyExc_RuntimeError, err_msg.c_str());
+        PyErr_SetString(PyExc_RuntimeError, "the thread_exit statement cannot be used in Qore code called from "
+            "Python");
         return;
     }
 
+    // a Python exception that was raised in Qore is raised again
+    QorePythonReferenceHolder ex(pypgm->getOriginalPythonException(xsink));
     ExceptionSink xsink2;
-    QorePythonReferenceHolder tuple(PyTuple_New(arg ? 3 : 2));
-    QorePythonReferenceHolder ex_arg(getPythonValue(err, &xsink2));
-    if (ex_arg) {
-        PyTuple_SET_ITEM(*tuple, 0, ex_arg.release());
-    } else {
-        Py_INCREF(Py_None);
-        PyTuple_SET_ITEM(*tuple, 0, Py_None);
+    // the Qore exception is consumed; releasing it can run Qore code, which runs without the GIL
+    ValueHolder info(xsink.getExceptionInfo(), &xsink2);
+    if (!ex) {
+        assert(info->getType() == NT_HASH);
+        ex = pypgm->getPythonQoreException(info->get<const QoreHashNode>(), 0);
     }
-    ex_arg = getPythonValue(desc, &xsink2);
-    if (ex_arg) {
-        PyTuple_SET_ITEM(*tuple, 1, ex_arg.release());
-    } else {
-        Py_INCREF(Py_None);
-        PyTuple_SET_ITEM(*tuple, 1, Py_None);
+    qore_python_release(info);
+    // if the exception could not be created, the Python exception that describes the error is raised
+    if (ex) {
+        PyErr_SetObject(reinterpret_cast<PyObject*>(Py_TYPE(*ex)), *ex);
     }
-    if (arg) {
-        ex_arg = getPythonValue(arg, &xsink2);
-        if (ex_arg) {
-            PyTuple_SET_ITEM(*tuple, 2, ex_arg.release());
-        } else {
-            Py_INCREF(Py_None);
-            PyTuple_SET_ITEM(*tuple, 2, Py_None);
-        }
-    }
-    xsink.clear();
-
-    ex_arg = PyObject_CallObject((PyObject*)&PythonQoreException_Type, *tuple);
-    //printd(5,  "QorePythonProgram::raisePythonException() py_ex: %p %s\n", *ex_arg, Py_TYPE(*ex_arg)->tp_name);
-    PyErr_SetObject((PyObject*)&PythonQoreException_Type, *ex_arg);
+    assert(PyErr_Occurred());
 }
 
 // import Qore definitions to Python
@@ -3653,10 +3772,6 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
     PyErr_Fetch(ex_type.getRef(), ex_value.getRef(), traceback.getRef());
     assert(ex_type);
 
-    // get location
-    QoreExternalProgramLocationWrapper loc;
-    QoreCallStack callstack;
-
     printd(5, "QorePythonProgram::checkPythonException() type: %s val: %s (%p) traceback: %s\n",
         Py_TYPE(*ex_type)->tp_name, ex_value ? Py_TYPE(*ex_value)->tp_name : "(null)", *ex_value,
         traceback ? Py_TYPE(*traceback)->tp_name : "(null)");
@@ -3674,186 +3789,296 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
     printd(5, "QorePythonProgram::checkPythonException() type: %s val: %s (%p) traceback: %s\n",
         Py_TYPE(*ex_type)->tp_name, Py_TYPE(*ex_value)->tp_name, *ex_value, Py_TYPE(*traceback)->tp_name);
 
-    bool use_loc;
-    if (PyTraceBack_Check(*traceback)) {
-        PyTracebackObject* tb = reinterpret_cast<PyTracebackObject*>(*traceback);
-
-        int depth = 0;
-        PyTracebackObject* tb1 = tb;
-        while (tb1) {
-            ++depth;
-            tb1 = tb1->tb_next;
-        }
-        while (tb->tb_next && depth > 0) {
-            --depth;
-            tb = tb->tb_next;
-        }
-
-        PyFrameObject* frame = tb->tb_frame;
-        const char* funcname = nullptr;
-        QorePythonReferenceHolder owned_frame;
-        QoreString function_name;
-        while (frame) {
-            // get line number
-            QorePythonReferenceHolder code((PyObject*)PyFrame_GetCode(frame));
-            int line = PyCode_Addr2Line((PyCodeObject*)*code, PyFrame_GetLasti(frame));
-            QorePythonReferenceHolder filename_obj(PyObject_GetAttrString(*code, "co_filename"));
-            const char* filename;
-            Py_INCREF(*filename_obj);
-            QorePythonReferenceHolder np_obj(QorePythonStackLocationHelper::normalizePath(*filename_obj));
-            if (np_obj) {
-                filename = getCString(*np_obj);
-            } else {
-                filename = PyUnicode_AsUTF8(*filename_obj);
-            }
-
-            if (frame == tb->tb_frame) {
-                loc.set(filename, line, line, nullptr, 0, QORE_PYTHON_LANG_NAME);
-            } else {
-                callstack.add(CT_USER, filename, line, line, funcname, QORE_PYTHON_LANG_NAME);
-            }
-            QorePythonReferenceHolder funcname_obj(PyObject_GetAttrString(*code, "co_qualname"));
-            function_name = PyUnicode_AsUTF8(*funcname_obj);
-            funcname = function_name.c_str();
-
-            // PyFrame_GetBack returns a new reference; keep it owned while walking
-            // the stack so the frame and its entire module graph can be collected.
-            PyFrameObject* next = PyFrame_GetBack(frame);
-            owned_frame = reinterpret_cast<PyObject*>(next);
-            frame = next;
-        }
-        if (funcname) {
-            callstack.add(CT_BUILTIN, this_file, __LINE__, __LINE__, funcname, "c++");
-        }
-        use_loc = true;
-    } else {
-        use_loc = false;
-    }
-
-    // check if it's a QoreException (either PythonQoreException or RuntimeError with our tuple format)
-    bool is_qore_exception = false;
-    if (*ex_type == (PyObject*)&PythonQoreException_Type) {
-        is_qore_exception = true;
-    } else if (PyExceptionInstance_Check(*ex_value) && PyErr_GivenExceptionMatches(*ex_type, PyExc_RuntimeError)) {
-        // Check if it's a RuntimeError with our tuple format (err, desc[, arg])
-        // This is used for exceptions from sub-interpreters.
-        // NOTE: Only check RuntimeError specifically, not all exceptions, because other exceptions
-        // like SyntaxError also have 2 args but in a different format.
-        //
-        // Qore exception format: (err, desc[, arg]) where:
-        //   - err: can be int or string (error code like 1 or "ERROR-NAME")
-        //   - desc: can be None or string (description)
-        //   - arg: optional, any type
-        //
-        // SyntaxError format: ('invalid syntax', ('<string>', 1, 14, ...))
-        //   - Second arg is a tuple (location info), not None or string
-        //
-        // So we validate that the second element is NOT a tuple to distinguish from SyntaxError.
-        QorePythonReferenceHolder args(PyObject_GetAttrString(*ex_value, "args"));
-        if (args && PyTuple_Check(*args)) {
-            Py_ssize_t size = PyTuple_Size(*args);
-            if (size >= 2 && size <= 3) {
-                // Validate: second element should be None or string, not a tuple
-                PyObject* py_desc = PyTuple_GetItem(*args, 1);  // borrowed ref
-                if (!PyTuple_Check(py_desc)) {
-                    // Looks like our tuple format - treat as a Qore exception
-                    is_qore_exception = true;
-                }
-            }
-        }
-    }
-
-    if (is_qore_exception) {
-        QorePythonReferenceHolder pyval;
-        ValueHolder err(xsink);
-        ValueHolder desc(xsink);
-        ValueHolder arg(xsink);
-
-        if (*ex_type == (PyObject*)&PythonQoreException_Type) {
-            // PythonQoreException has err, desc, arg attributes
-            assert(PyObject_HasAttrString(*ex_value, "err"));
-            pyval = PyObject_GetAttrString(*ex_value, "err");
-            err = getQoreValue(xsink, *pyval);
-            if (!*xsink && PyObject_HasAttrString(*ex_value, "desc")) {
-                pyval = PyObject_GetAttrString(*ex_value, "desc");
-                desc = getQoreValue(xsink, *pyval);
-            }
-            if (!*xsink && PyObject_HasAttrString(*ex_value, "arg")) {
-                pyval = PyObject_GetAttrString(*ex_value, "arg");
-                arg = getQoreValue(xsink, *pyval);
-            }
-        } else {
-            // RuntimeError with tuple args: (err, desc[, arg])
-            QorePythonReferenceHolder args(PyObject_GetAttrString(*ex_value, "args"));
-            if (args && PyTuple_Check(*args)) {
-                Py_ssize_t size = PyTuple_Size(*args);
-                if (size >= 1) {
-                    PyObject* py_err = PyTuple_GetItem(*args, 0);  // borrowed ref
-                    err = getQoreValue(xsink, py_err);
-                }
-                if (!*xsink && size >= 2) {
-                    PyObject* py_desc = PyTuple_GetItem(*args, 1);  // borrowed ref
-                    desc = getQoreValue(xsink, py_desc);
-                }
-                if (!*xsink && size >= 3) {
-                    PyObject* py_arg = PyTuple_GetItem(*args, 2);  // borrowed ref
-                    arg = getQoreValue(xsink, py_arg);
-                }
-            }
-        }
-
-        if (!*xsink) {
-            QoreStringValueHelper errstr(*err);
-            QoreStringNodeValueHelper descstr(*desc);
-            if (use_loc) {
-                xsink->raiseExceptionArg(loc.get(), errstr->c_str(), arg->refSelf(),
-                    descstr.getReferencedValue(), callstack);
-            } else {
-                xsink->raiseExceptionArg(errstr->c_str(), arg->refSelf(), descstr.getReferencedValue(),
-                    callstack);
-            }
-            return -1;
-        }
-    }
-
-    if (!*xsink) {
-        // get full exception class name
-        // NOTE: Use ex_type directly instead of Py_TYPE(*ex_value) because after PyErr_NormalizeException,
-        // ex_value might still be the exception class itself (not an instance) in some cases like SyntaxError.
-        // In such cases, Py_TYPE(*ex_value) returns 'type' (the metaclass), not the actual exception class.
-        PyTypeObject* py_cls = PyExceptionInstance_Check(*ex_value)
-            ? Py_TYPE(*ex_value)
-            : reinterpret_cast<PyTypeObject*>(*ex_type);
-        QoreString ex_name(py_cls->tp_name);
-        if (PyObject_HasAttrString(reinterpret_cast<PyObject*>(py_cls), "__module__")) {
-            QorePythonReferenceHolder ex_mod(PyObject_GetAttrString(reinterpret_cast<PyObject*>(py_cls),
-                "__module__"));
-            if (PyUnicode_Check(*ex_mod)) {
-                ex_name.prepend(".");
-                ex_name.prepend(PyUnicode_AsUTF8(*ex_mod));
-            }
-        }
-
-        // get description
-        QorePythonReferenceHolder desc(PyObject_Str(*ex_value));
-        ValueHolder qore_desc(getQoreValue(xsink, *desc), xsink);
-        if (!*xsink) {
-            QoreStringNodeValueHelper descstr(*qore_desc);
-            if (use_loc) {
-                // check if we have a Qore exception
-                xsink->raiseExceptionArg(loc.get(), ex_name.c_str(), QoreValue(),
-                    descstr.getReferencedValue(), callstack);
-            } else {
-                // check if we have a Qore exception
-                xsink->raiseExceptionArg(ex_name.c_str(), QoreValue(), descstr.getReferencedValue(), callstack);
-            }
-            return -1;
-        }
-    }
-
-    xsink->appendLastDescription(" (while trying to convert Python exception arguments to Qore)");
-
+    pyobj_set_t seen;
+    raiseQoreException(*xsink, *ex_type, *ex_value, *traceback, seen);
+    assert(*xsink);
     return -1;
+}
+
+bool QorePythonProgram::raiseOriginalQoreException(ExceptionSink& xsink, PyObject* ex_value) {
+    QorePythonReferenceHolder capsule(PyObject_GetAttrString(ex_value, QORE_PYTHON_EXCEPTION_CAPSULE_ATTR));
+    if (!capsule || !PyCapsule_IsValid(*capsule, QORE_PYTHON_EXCEPTION_CAPSULE_NAME)) {
+        // a QoreException created in Python
+        PyErr_Clear();
+        return false;
+    }
+    const QoreHashNode* info = static_cast<const QoreHashNode*>(PyCapsule_GetPointer(*capsule,
+        QORE_PYTHON_EXCEPTION_CAPSULE_NAME));
+    assert(info);
+
+    // the exceptions get the current call stack as the outer part of their call stacks, which is removed from the
+    // call stacks of the exceptions if they end with it (when the exception passes through Python code on the thread
+    // that raised it)
+    ReferenceHolder<QoreListNode> current_stack(&xsink);
+    {
+        ExceptionSink xsink2;
+        xsink2.raiseException("CALL-STACK", "the current call stack");
+        ReferenceHolder<QoreHashNode> h(xsink2.getExceptionInfo(), &xsink2);
+        assert(h);
+        QoreValue cs = h->getKeyValue("callstack");
+        if (cs.getType() == NT_LIST) {
+            current_stack = cs.get<QoreListNode>()->listRefSelf();
+        }
+    }
+    size_t current_size = current_stack ? current_stack->size() : 0;
+
+    for (int depth = 0; info && depth < QORE_PYTHON_MAX_CHAINED_EXCEPTIONS; ++depth) {
+        QoreCallStack callstack;
+        QoreValue cs_val = info->getKeyValue("callstack");
+        if (cs_val.getType() == NT_LIST) {
+            const QoreListNode* cs = cs_val.get<const QoreListNode>();
+            size_t size = cs->size();
+            if (current_size && current_size <= size) {
+                ExceptionSink xsink2;
+                bool suffix = true;
+                for (size_t i = 0; i < current_size; ++i) {
+                    QoreValue v0 = cs->retrieveEntry(size - current_size + i);
+                    QoreValue v1 = current_stack->retrieveEntry(i);
+                    if (v0.getType() != NT_HASH || v1.getType() != NT_HASH
+                        || !v0.get<const QoreHashNode>()->is_equal_hard(v1.get<const QoreHashNode>(), &xsink2)) {
+                        suffix = false;
+                        break;
+                    }
+                }
+                // comparing the hashes of call stack entries raises no exceptions
+                assert(!xsink2);
+                if (suffix) {
+                    size -= current_size;
+                }
+            }
+            for (size_t i = 0; i < size; ++i) {
+                QoreValue v = cs->retrieveEntry(i);
+                if (v.getType() != NT_HASH) {
+                    continue;
+                }
+                const QoreHashNode* e = v.get<const QoreHashNode>();
+                QoreStringValueHelper file(e->getKeyValue("file"));
+                QoreStringValueHelper source(e->getKeyValue("source"));
+                QoreStringValueHelper function(e->getKeyValue("function"));
+                QoreStringValueHelper lang(e->getKeyValue("lang"));
+                callstack.add(static_cast<qore_call_t>(e->getKeyValue("typecode").getAsBigInt()), file->c_str(),
+                    static_cast<int>(e->getKeyValue("line").getAsBigInt()),
+                    static_cast<int>(e->getKeyValue("endline").getAsBigInt()), source->c_str(),
+                    static_cast<unsigned>(e->getKeyValue("offset").getAsBigInt()), function->c_str(),
+                    lang->c_str());
+            }
+        }
+
+        QoreStringValueHelper file(info->getKeyValue("file"));
+        QoreStringValueHelper source(info->getKeyValue("source"));
+        QoreStringValueHelper lang(info->getKeyValue("lang"));
+        QoreExternalProgramLocationWrapper loc(file->c_str(), static_cast<int>(info->getKeyValue("line").getAsBigInt()),
+            static_cast<int>(info->getKeyValue("endline").getAsBigInt()), source->c_str(),
+            static_cast<int>(info->getKeyValue("offset").getAsBigInt()), lang->c_str());
+        QoreStringValueHelper err(info->getKeyValue("err"));
+        QoreStringNodeValueHelper desc(info->getKeyValue("desc"));
+
+        // each exception is raised in its own sink, as the call stack given is added to all exceptions in a sink
+        ExceptionSink xsink2;
+        xsink2.raiseExceptionArg(loc.get(), err->c_str(), info->getKeyValue("arg").refSelf(),
+            desc.getReferencedValue(), callstack);
+        xsink.assimilate(xsink2);
+
+        QoreValue next = info->getKeyValue("next");
+        info = next.getType() == NT_HASH ? next.get<const QoreHashNode>() : nullptr;
+    }
+    return true;
+}
+
+// gets the location of a Python exception and its call stack from its traceback; returns -1 if there is none
+static int qore_python_get_exception_location(PyObject* traceback, QoreExternalProgramLocationWrapper& loc,
+        QoreCallStack& callstack) {
+    if (!PyTraceBack_Check(traceback)) {
+        return -1;
+    }
+    // the frames from the innermost frame, where the exception was raised, with the line executed in each frame: the
+    // frames of the traceback with their lines in the traceback, then the frames that called the outermost frame of
+    // the traceback with their current lines
+    std::vector<std::pair<PyFrameObject*, int>> frames;
+    // the traceback holds references to its frames
+    for (PyObject* tb = traceback; tb && PyTraceBack_Check(tb);
+        tb = reinterpret_cast<PyObject*>(reinterpret_cast<PyTracebackObject*>(tb)->tb_next)) {
+        QorePythonReferenceHolder lineno(PyObject_GetAttrString(tb, "tb_lineno"));
+        int line = lineno && PyLong_Check(*lineno) ? static_cast<int>(PyLong_AsLong(*lineno)) : -1;
+        if (!lineno || PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        frames.emplace_back(reinterpret_cast<PyTracebackObject*>(tb)->tb_frame, line);
+    }
+    std::reverse(frames.begin(), frames.end());
+    // the frames that called the outermost frame of the traceback; PyFrame_GetBack() returns a new reference
+    std::vector<QorePythonReferenceHolder> callers;
+    for (PyFrameObject* frame = PyFrame_GetBack(frames.back().first); frame; frame = PyFrame_GetBack(frame)) {
+        callers.emplace_back(reinterpret_cast<PyObject*>(frame));
+        frames.emplace_back(frame, PyFrame_GetLineNumber(frame));
+    }
+
+    // each call stack entry gives the function called and the location of the call in the calling frame
+    std::string funcname;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        PyFrameObject* frame = frames[i].first;
+        int line = frames[i].second;
+        QorePythonReferenceHolder code(reinterpret_cast<PyObject*>(PyFrame_GetCode(frame)));
+        QorePythonReferenceHolder filename_obj(PyObject_GetAttrString(*code, "co_filename"));
+        if (!filename_obj) {
+            PyErr_Clear();
+        }
+        QorePythonReferenceHolder np_obj;
+        if (filename_obj) {
+            // normalizePath() takes the reference
+            filename_obj.py_ref();
+            np_obj = QorePythonStackLocationHelper::normalizePath(*filename_obj);
+        }
+        const char* filename = nullptr;
+        if (np_obj) {
+            filename = QorePythonProgram::getCString(*np_obj);
+        } else if (filename_obj) {
+            filename = PyUnicode_AsUTF8(*filename_obj);
+        }
+        if (!filename) {
+            PyErr_Clear();
+            filename = "<unknown>";
+        }
+
+        if (!i) {
+            loc.set(filename, line, line, nullptr, 0, QORE_PYTHON_LANG_NAME);
+        } else {
+            callstack.add(CT_USER, filename, line, line, funcname.c_str(), QORE_PYTHON_LANG_NAME);
+        }
+        QorePythonReferenceHolder funcname_obj(PyObject_GetAttrString(*code, "co_qualname"));
+        const char* str = funcname_obj && PyUnicode_Check(*funcname_obj) ? PyUnicode_AsUTF8(*funcname_obj) : nullptr;
+        if (!str) {
+            PyErr_Clear();
+            str = "<unknown>";
+        }
+        funcname = str;
+    }
+    // the outermost Python function was called by native code
+    callstack.add(CT_BUILTIN, "<builtin>", -1, -1, funcname.c_str(), QORE_PYTHON_LANG_NAME);
+    return 0;
+}
+
+void QorePythonProgram::raiseQoreException(ExceptionSink& xsink, PyObject* ex_type, PyObject* ex_value,
+        PyObject* traceback, pyobj_set_t& seen) {
+    seen.insert(ex_value);
+
+    // the qoreloader.QoreException type of the current interpreter
+    QorePythonReferenceHolder qore_ex_type(qore_python_get_qore_exception_type());
+    if (!qore_ex_type) {
+        // without the type, no exception is a Qore exception
+        PyErr_Clear();
+    }
+    bool is_qore_exception = qore_ex_type && PyExceptionInstance_Check(ex_value)
+        && PyObject_TypeCheck(ex_value, reinterpret_cast<PyTypeObject*>(*qore_ex_type));
+
+    // a Qore exception raised in Python is raised again as it was raised in Qore
+    if (is_qore_exception && raiseOriginalQoreException(xsink, ex_value)) {
+        return;
+    }
+
+    QoreExternalProgramLocationWrapper loc;
+    QoreCallStack callstack;
+    bool use_loc = !qore_python_get_exception_location(traceback, loc, callstack);
+
+    // a value that cannot be converted to Qore: the exception is raised without it, and the reason is added to its
+    // description
+    auto get_arg = [this](PyObject* val, QoreStringNode& desc) -> QoreValue {
+        ExceptionSink xsink2;
+        ValueHolder rv(getQoreValue(&xsink2, val), &xsink2);
+        if (xsink2) {
+            PyErr_Clear();
+            QoreValue err(xsink2.getExceptionErr());
+            QoreValue edesc(xsink2.getExceptionDesc());
+            QoreStringValueHelper err_str(err);
+            QoreStringValueHelper edesc_str(edesc);
+            desc.sprintf(" (the exception argument cannot be converted to Qore: %s: %s)", err_str->c_str(),
+                edesc_str->c_str());
+            xsink2.clear();
+            return QoreValue();
+        }
+        return rv.release();
+    };
+
+    std::string err;
+    QoreStringNodeHolder desc;
+    ValueHolder arg(&xsink);
+    if (is_qore_exception) {
+        // a QoreException created in Python: its err, desc and arg are the Qore exception's; the arguments are used
+        // if the attributes are not set, ex: by a subclass whose __init__() does not call QoreException.__init__()
+        QorePythonReferenceHolder args(PyObject_GetAttrString(ex_value, "args"));
+        if (!args || !PyTuple_Check(*args)) {
+            PyErr_Clear();
+            args = PyTuple_New(0);
+        }
+        auto get_attr = [&](const char* name, Py_ssize_t i) -> PyObject* {
+            PyObject* rv = PyObject_GetAttrString(ex_value, name);
+            if (!rv) {
+                PyErr_Clear();
+                if (*args && i < PyTuple_Size(*args)) {
+                    rv = PyTuple_GetItem(*args, i);
+                    Py_INCREF(rv);
+                }
+            }
+            return rv;
+        };
+        QorePythonReferenceHolder py_err(get_attr("err", 0));
+        if (py_err) {
+            SimpleRefHolder<QoreStringNode> err_str(qore_python_get_string(*py_err));
+            err = err_str->c_str();
+        } else {
+            err = qore_python_get_exception_name(Py_TYPE(ex_value));
+        }
+        QorePythonReferenceHolder py_desc(get_attr("desc", 1));
+        desc = py_desc && *py_desc != Py_None ? qore_python_get_string(*py_desc) : new QoreStringNode;
+        QorePythonReferenceHolder py_arg(get_attr("arg", 2));
+        if (py_arg) {
+            arg = get_arg(*py_arg, **desc);
+        }
+    } else {
+        // get full exception class name
+        // NOTE: Use ex_type directly instead of Py_TYPE(ex_value) because after PyErr_NormalizeException,
+        // ex_value might still be the exception class itself (not an instance) in some cases like SyntaxError.
+        // In such cases, Py_TYPE(ex_value) returns 'type' (the metaclass), not the actual exception class.
+        bool is_instance = PyExceptionInstance_Check(ex_value);
+        PyTypeObject* py_cls = is_instance ? Py_TYPE(ex_value) : reinterpret_cast<PyTypeObject*>(ex_type);
+        err = qore_python_get_exception_name(py_cls);
+        desc = qore_python_get_string(ex_value);
+        // the argument is the Python exception object
+        if (is_instance) {
+            arg = get_arg(ex_value, **desc);
+        }
+    }
+
+    // each exception is raised in its own sink, as the call stack given is added to all exceptions in a sink
+    ExceptionSink xsink2;
+    if (use_loc) {
+        xsink2.raiseExceptionArg(loc.get(), err.c_str(), arg.release(), desc.release(), callstack);
+    } else {
+        xsink2.raiseExceptionArg(err.c_str(), arg.release(), desc.release(), callstack);
+    }
+    xsink.assimilate(xsink2);
+
+    // the exception that caused this exception, or that was being handled when it was raised, is chained to it
+    if (!PyExceptionInstance_Check(ex_value) || seen.size() >= QORE_PYTHON_MAX_CHAINED_EXCEPTIONS) {
+        return;
+    }
+    QorePythonReferenceHolder cause(PyException_GetCause(ex_value));
+    if (!cause) {
+        QorePythonReferenceHolder suppress(PyObject_GetAttrString(ex_value, "__suppress_context__"));
+        int suppress_context = suppress ? PyObject_IsTrue(*suppress) : 0;
+        if (suppress_context < 0 || !suppress) {
+            PyErr_Clear();
+        }
+        if (suppress_context <= 0) {
+            cause = PyException_GetContext(ex_value);
+        }
+    }
+    if (!cause || seen.find(*cause) != seen.end()) {
+        return;
+    }
+    QorePythonReferenceHolder cause_tb(PyException_GetTraceback(*cause));
+    raiseQoreException(xsink, reinterpret_cast<PyObject*>(Py_TYPE(*cause)), *cause, cause_tb ? *cause_tb : Py_None,
+        seen);
 }
 
 QoreValue QorePythonProgram::callPythonMethod(ExceptionSink* xsink, PyObject* attr, PyObject* obj,
@@ -4746,6 +4971,8 @@ PyObject* QorePythonProgram::callQoreFunction(PyObject* self, PyObject* args) {
         {
             QorePythonReleaseGilHelper prgh;
             QorePythonForkProtocolHelper fph(fork_tstate);
+            // the Python frames of the call are part of the Qore call stack
+            QorePythonStackLocationHelper slh(fc->py_pgm);
             rv = fc->func.evalFunction(nullptr, *qargs, fc->py_pgm->getQoreProgram(), &xsink);
         }
         QorePythonReferenceHolder py_rv;

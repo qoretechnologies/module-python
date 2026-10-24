@@ -101,8 +101,8 @@ void QorePythonStackLocationHelper::checkInit() const {
     if (!getframe) {
         PyErr_Clear();
     }
-    // start at depth = 1 or the first two entries will be identical
-    int depth = 1;
+    // start with the innermost frame (depth 0): the Python frame that called Qore
+    int depth = 0;
     while (getframe) {
         QorePythonReferenceHolder args(PyTuple_New(1));
         PyTuple_SET_ITEM(*args, 0, PyLong_FromLong(depth));
