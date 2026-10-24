@@ -24,17 +24,6 @@
 #ifndef _QORE_PYTHON_MODULE_H
 #define _QORE_PYTHON_MODULE_H
 
-// For Python with internal includes, we need Py_BUILD_CORE defined before
-// including Python.h to access internal headers. However, for Python 3.13+,
-// we also define Py_BUILD_CORE_MODULE to ensure that _PyThreadState_GET() uses
-// _PyThreadState_GetCurrent() instead of the non-exported _Py_tss_tstate variable.
-#ifdef HAVE_PYTHON_INTERNAL_INCLUDES
-#define Py_BUILD_CORE
-// For Python 3.13+, define Py_BUILD_CORE_MODULE to avoid using _Py_tss_tstate
-// which is not exported from the Python library
-#define Py_BUILD_CORE_MODULE
-#endif
-
 #define PY_SSIZE_T_CLEAN
 // Python 3.16 deprecates PyStatus::exitcode, a member of a structure that the API passes by value (ex:
 // PyStatus_Exception()); the implicit copy constructor of PyStatus then uses the deprecated member, which clang reports
@@ -132,129 +121,6 @@ DLLLOCAL bool _qore_has_gil(PyThreadState* t_state);
 /** NOTE: depends on Python internals to work around limitations with the GIL and multiple thread states with multiple
           interpreters
 */
-#ifdef HAVE_PYTHON_INTERNAL_INCLUDES
-// Py_BUILD_CORE is already defined at the top of this file before Python.h
-#include <internal/pycore_pystate.h>
-#if PY_VERSION_HEX >= 0x030D0000
-#include <internal/pycore_ceval.h>
-#include <internal/pycore_gil.h>
-#include <internal/pycore_pylifecycle.h>
-#endif
-
-// Define QORE macros when using Python internal includes
-// In GIL-enabled mode, use standard PyThreadState_Swap
-#define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
-
-// Thread-local GIL ownership tracking
-// CRITICAL: This flag tracks whether the CURRENT THREAD holds the GIL, independent of
-// Python's internal tstate_current tracking. This is needed because:
-// 1. After PyInterpreterState_Clear/Delete, tstate_current can be NULL but GIL is still held
-// 2. With sub-interpreters, PyGILState_Check() can be unreliable
-// When using internal includes, _PyRuntime.ceval.gil.locked is reliable but we still need
-// this for consistent API with the non-internal path.
-inline thread_local bool _qore_gil_held = false;
-
-// gilstate_counter access macros - these are available in GIL-enabled Python
-#define _QORE_GILSTATE_COUNTER_INC(tstate) (++(tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_DEC(tstate) (--(tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_GET(tstate) ((tstate)->gilstate_counter)
-#define _QORE_GILSTATE_COUNTER_ASSERT_ONE(tstate) assert((tstate)->gilstate_counter == 1)
-
-// Python 3.14+: _PyRuntime.gilstate.check_enabled doesn't exist - GIL check is always enabled
-#if PY_VERSION_HEX >= 0x030E0000
-#define _QORE_PYTHON_REENABLE_GIL_CHECK /* no-op in Python 3.14+ */
-#else
-#define _QORE_PYTHON_REENABLE_GIL_CHECK { assert(!_PyRuntime.gilstate.check_enabled); _PyRuntime.gilstate.check_enabled = 1; }
-#endif
-
-// Thread state functions using internal Python APIs
-DLLLOCAL static inline PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
-    return _PyThreadState_GET();
-}
-
-DLLLOCAL static inline void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
-#if PY_VERSION_HEX >= 0x030D0000
-    // Python 3.13+: the thread-local state (_Py_tss_tstate) is not exported,
-    // so we cannot set it directly. The Python runtime handles TSS synchronization
-    // automatically through PyThreadState_Swap, PyEval_RestoreThread, etc.
-    // This function becomes a no-op for Python 3.13+.
-    (void)state;
-#else
-    _PyGILState_SetThisThreadState(state);
-#endif
-}
-
-#if PY_VERSION_HEX >= 0x030D0000
-// Python 3.13+: GIL is per-interpreter, accessed via tstate->interp->ceval.gil
-DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
-    PyThreadState* tstate = _PyThreadState_GET();
-    if (!tstate || !tstate->interp || !tstate->interp->ceval.gil) {
-        return false;
-    }
-    return (bool)(tstate->interp->ceval.gil->locked);
-}
-
-DLLLOCAL static inline PyThreadState* _qore_PyCeval_GetThreadState() {
-    PyThreadState* tstate = _PyThreadState_GET();
-    if (!tstate || !tstate->interp || !tstate->interp->ceval.gil) {
-        return nullptr;
-    }
-    return tstate->interp->ceval.gil->last_holder;
-}
-
-DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* gil_state) {
-    PyThreadState* tstate = _PyThreadState_GET();
-    if (!tstate || !tstate->interp || !tstate->interp->ceval.gil) {
-        return nullptr;
-    }
-    PyThreadState* old = tstate->interp->ceval.gil->last_holder;
-    if (old != gil_state) {
-        tstate->interp->ceval.gil->last_holder = gil_state;
-    }
-    return old;
-}
-#else
-// Python < 3.13: GIL is global, accessed via _PyRuntime.ceval.gil
-DLLLOCAL static inline bool _qore_PyCeval_GetGilLockedStatus() {
-    return (bool)(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.locked));
-}
-
-DLLLOCAL static inline PyThreadState* _qore_PyCeval_GetThreadState() {
-    return reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.last_holder));
-}
-
-DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadState* gil_state) {
-    PyThreadState* old = reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.last_holder));
-    if (old != gil_state) {
-        _Py_atomic_store_relaxed(&_PyRuntime.ceval.gil.last_holder, (uintptr_t)gil_state);
-    }
-    return old;
-}
-#endif // PY_VERSION_HEX >= 0x030D0000
-
-DLLLOCAL static inline bool _qore_has_thread_state_attached() {
-    return PyGILState_Check();
-}
-
-DLLLOCAL static inline void _qore_acquire_thread_state(PyThreadState* tstate) {
-    PyEval_AcquireThread(tstate);
-    _qore_gil_held = true;  // Track that we now hold the GIL
-}
-
-DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
-    PyEval_ReleaseThread(tstate);
-    _qore_gil_held = false;  // Track that we no longer hold the GIL
-}
-
-// Check if this might be a Python-created thread that already has the GIL.
-// When using Python internal includes, the GIL detection through
-// _qore_PyCeval_GetGilLockedStatus() works correctly even for Python-created
-// threads, so this function just returns nullptr.
-DLLLOCAL static inline PyThreadState* _qore_check_python_created_thread_gil() {
-    return nullptr;
-}
-
-#else
 #if PY_MAJOR_VERSION >= 3
 #if PY_MINOR_VERSION >= 14
 // Python 3.14+ (GIL or free-threading)
@@ -267,7 +133,6 @@ DLLLOCAL static inline PyThreadState* _qore_check_python_created_thread_gil() {
 #include "python311_internals.h"
 #else
 #error unsupported python version: the minimum Python version is 3.11
-#endif
 #endif
 #endif
 
@@ -283,28 +148,6 @@ DLLLOCAL static inline PyThreadState* _qore_safe_thread_state_get() {
     return _qore_PyCeval_GetThreadState();
 #endif
 }
-
-// CPython 3.13+ recursion-limit compatibility for internal-header builds.
-#if PY_VERSION_HEX >= 0x030D0000
-
-// Recursion limit APIs - removed in Python 3.13+
-// Only define when using Python internal includes (not bundled internals)
-// Bundled internals files define their own versions
-#ifdef HAVE_PYTHON_INTERNAL_INCLUDES
-#ifndef Py_GIL_DISABLED
-inline int PyThreadState_GetRecursionLimit(PyThreadState* state) {
-    (void)state;  // unused in Python 3.13+
-    return Py_GetRecursionLimit();
-}
-
-inline void PyThreadState_UpdateRecursionLimit(PyThreadState* state, int new_limit) {
-    (void)state;  // unused in Python 3.13+
-    Py_SetRecursionLimit(new_limit);
-}
-#endif // !Py_GIL_DISABLED
-#endif // HAVE_PYTHON_INTERNAL_INCLUDES
-
-#endif // PY_VERSION_HEX >= 0x030D0000
 
 // whether the state is bound to its thread for the GIL state API (Python 3.12 and later; checked by CMake, see
 // QORE_PYTHON_HAVE_TSTATE_BOUND_GILSTATE)
@@ -757,9 +600,12 @@ public:
                         check_interp = PyInterpreterState_Next(check_interp);
                     }
                     if (!interp_valid) {
-                        // The TSS points to a thread state with a freed interpreter.
-                        // The Python object was part of a deleted sub-interpreter and is
-                        // already freed along with it - just clear our reference.
+                        // The TSS points to a thread state of a deleted interpreter, so the GIL state API cannot be
+                        // used.  The interpreter of the object cannot be determined: an object of the deleted
+                        // interpreter has been freed with it, so the reference is not released (a deliberate leak
+                        // instead of a use after free).  A thread binds its idle state of the main interpreter before
+                        // it releases the GIL (see qore_python_release_context()), and deleting an interpreter waits
+                        // for the threads that use it, so this is not expected.
                         obj = nullptr;
                         return;
                     }

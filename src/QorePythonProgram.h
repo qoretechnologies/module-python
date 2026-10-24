@@ -73,12 +73,15 @@ public:
     //! Python context using the main interpreter
     DLLLOCAL QorePythonProgram();
 
-    //! Default Qore Python context; does not own the QoreProgram reference
-    DLLLOCAL QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns);
+    //! Creates the Python program of a Qore Program that loads the module; does not own the QoreProgram reference
+    /** @param xsink errors are raised here, and the program is then invalid; if nullptr, they are printed (the API
+        that copies the external data of a Program has no ExceptionSink)
+    */
+    DLLLOCAL QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns, ExceptionSink* xsink);
 
     //! New Qore Python context; does not own the QoreProgram reference
     DLLLOCAL QorePythonProgram(const QorePythonProgram& old, QoreProgram* qpgm)
-            : QorePythonProgram(qpgm, qpgm->findNamespace(QORE_PYTHON_NS_NAME)) {
+            : QorePythonProgram(qpgm, qpgm->findNamespace(QORE_PYTHON_NS_NAME), nullptr) {
         if (!pyns) {
             pyns = PNS->copy();
             qpgm->getRootNS()->addNamespace(pyns);

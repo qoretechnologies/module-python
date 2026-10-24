@@ -86,55 +86,11 @@ static PyMethodDef qoreloader_methods[] = {
 
 bool qore_needs_shutdown = false;
 
-thread_local QoreThreadAttacher qoreThreadAttacher;
-
 PyTypeObject PythonQoreObjectBase_Type = {
-#if !defined(__clang__) && __GNUC__ < 8
-    PyVarObject_HEAD_INIT(nullptr, 0)
-    // g++ 5.4.0 does not accept the short-form initialization below :(
-    "PythonQoreObjectBase",         // tp_name
-    0,                              // tp_basicsize
-    0,                              // tp_itemsize
-    nullptr,                        // tp_dealloc
-    0,                              // tp_vectorcall_offset/
-    0,                              // tp_getattr
-    0,                              // tp_setattr
-    0,                              // tp_as_async
-    nullptr,                        // tp_repr
-    0,                              // tp_as_number
-    0,                              // tp_as_sequence
-    0,                              // tp_as_mapping
-    0,                              // tp_hash
-    0,                              // tp_call
-    0,                              // tp_str
-    0,                              // tp_getattro
-    0,                              // tp_setattro
-    0,                              // tp_as_buffer
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,              // tp_flags
-    "base class for Python objects based on Qore classes", // tp_doc
-    0,                              // tp_traverse
-    0,                              // tp_clear
-    0,                              // tp_richcompare
-    0,                              // tp_weaklistoffset
-    0,                              // tp_iter
-    0,                              // tp_iternext
-    0,                              // tp_methods
-    0,                              // tp_members
-    0,                              // tp_getset
-    0,                              // tp_base
-    0,                              // tp_dict
-    0,                              // tp_descr_get
-    0,                              // tp_descr_set
-    0,                              // tp_dictoffset
-    0,                              // tp_init
-    0,                              // tp_alloc
-    0,                              // tp_new
-#else
     .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
     .tp_name = "PythonQoreObjectBase",
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
     .tp_doc = "base class for Python objects based on Qore classes",
-#endif
 };
 
 static int init_count = 0;
@@ -563,11 +519,20 @@ static int slot_qoreloader_exec(PyObject *m) {
             ExceptionSink xsink;
             MM.runTimeLoadModule(&xsink, "python", nullptr, python_qore_module_desc);
             if (xsink) {
+                QoreValue err(xsink.getExceptionErr());
+                QoreValue desc(xsink.getExceptionDesc());
+                QoreStringValueHelper errstr(err);
+                QoreStringValueHelper descstr(desc);
+                PyErr_Format(PyExc_ImportError, "cannot load the Qore \"python\" module: %s: %s", errstr->c_str(),
+                    descstr->c_str());
+                xsink.clear();
                 return -1;
             }
         }
 
-        init_global_qore_python_pgm();
+        if (init_global_qore_python_pgm()) {
+            return -1;
+        }
 
         if (PyType_Ready(&PythonQoreObjectBase_Type) < 0) {
             return -1;
@@ -646,7 +611,11 @@ int init_global_qore_python_pgm() {
         PythonThreadStateHelper ptsh;
 
         QoreThreadAttachHelper attach_helper;
-        attach_helper.attach();
+        if (attach_helper.attach()) {
+            PyErr_SetString(PyExc_ImportError, "cannot register the thread with Qore: the maximum number of Qore "
+                "threads has been reached");
+            return -1;
+        }
         qore_python_pgm = new QorePythonProgram;
     }
 
@@ -758,7 +727,11 @@ PyObject* qoreloader_load_java(PyObject* self, PyObject* args) {
         PyErr_SetString(PyExc_ValueError, desc.c_str());
         return nullptr;
     }
+    // nullptr with a Python exception (ex: UnicodeEncodeError for a lone surrogate)
     const char* name_str = PyUnicode_AsUTF8(name);
+    if (!name_str) {
+        return nullptr;
+    }
 
     QorePythonQoreEntryHelper qeh;
     if (!qeh.check()) {
@@ -794,8 +767,15 @@ PyObject* qoreloader_issue_module_cmd(PyObject* self, PyObject* args) {
         return nullptr;
     }
 
+    // nullptr with a Python exception (ex: UnicodeEncodeError for a lone surrogate)
     const char* module_str = PyUnicode_AsUTF8(module);
+    if (!module_str) {
+        return nullptr;
+    }
     const char* cmd_str = PyUnicode_AsUTF8(cmd);
+    if (!cmd_str) {
+        return nullptr;
+    }
 
     QorePythonQoreEntryHelper qeh;
     if (!qeh.check()) {

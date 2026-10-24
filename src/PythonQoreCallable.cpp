@@ -31,48 +31,6 @@ static PyObject* qore_callable_call(PyQoreCallable* self, PyObject* args, PyObje
 static void qore_callable_free(PyQoreCallable* self);
 
 PyTypeObject PythonQoreCallable_Type = {
-#if !defined(__clang__) && __GNUC__ < 8
-    PyVarObject_HEAD_INIT(nullptr, 0)
-    // g++ 5.4.0 does not accept the short-form initialization below :(
-    "QoreCallable",                 // tp_name
-    sizeof(PyQoreCallable),         // tp_basicsize
-    0,                              // tp_itemsize
-    (destructor)qore_callable_dealloc, // tp_dealloc
-    0,                              // tp_vectorcall_offset/
-    0,                              // tp_getattr
-    0,                              // tp_setattr
-    0,                              // tp_as_async
-    qore_callable_repr,             // tp_repr
-    0,                              // tp_as_number
-    0,                              // tp_as_sequence
-    0,                              // tp_as_mapping
-    0,                              // tp_hash
-    (ternaryfunc)qore_callable_call, // tp_call
-    0,                              // tp_str
-    0,                              // tp_getattro
-    0,                              // tp_setattro
-    0,                              // tp_as_buffer
-    Py_TPFLAGS_DEFAULT,             // tp_flags
-    "Qore callable type",           // tp_doc
-    0,                              // tp_traverse
-    0,                              // tp_clear
-    0,                              // tp_richcompare
-    0,                              // tp_weaklistoffset
-    0,                              // tp_iter
-    0,                              // tp_iternext
-    0,                              // tp_methods
-    0,                              // tp_members
-    0,                              // tp_getset
-    nullptr,                        // tp_base
-    0,                              // tp_dict
-    0,                              // tp_descr_get
-    0,                              // tp_descr_set
-    0,                              // tp_dictoffset
-    qore_callable_init,             // tp_init
-    0,                              // tp_alloc
-    qore_callable_new,              // tp_new
-    (freefunc)qore_callable_free,   // tp_free
-#else
     .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
     .tp_name = "QoreCallable",
     .tp_basicsize = sizeof(PyQoreCallable),
@@ -84,7 +42,6 @@ PyTypeObject PythonQoreCallable_Type = {
     .tp_init = qore_callable_init,
     .tp_new = qore_callable_new,
     .tp_free = (freefunc)qore_callable_free,
-#endif
 };
 
 bool PyQoreCallable_Check(PyObject* obj) {

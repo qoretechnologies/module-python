@@ -884,8 +884,9 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
         for (int sig : sig_vec) {
             QoreStringNode *err = qore_reassign_signal(sig, QORE_PYTHON_MODULE_NAME);
             if (err) {
-                // ignore errors; already assigned to another module
+                // the signal is managed by another module (ex: jni), which sets its mask
                 err->deref();
+                continue;
             }
             new_sig_vec.push_back(sig);
         }
@@ -985,6 +986,8 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
 #endif
 
     if (init_global_qore_python_pgm()) {
+        // the thread is registered with Qore here, so this is not expected
+        PyErr_Clear();
         throw QoreStandardException("PYTHON-MODULE-ERROR", "failed to initialize \"python\" module");
     }
 
@@ -1087,14 +1090,11 @@ static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, Except
         // QoreProgramContextHelper just sets the current program without triggering
         // thread-local variable instantiation.
         //
-        // Exception handling note: QoreProgramContextHelper doesn't use ExceptionSink because
-        // it only manages program context (save/restore), which doesn't throw. The
-        // QorePythonProgram constructor handles its own exceptions internally - any Python
-        // initialization errors are logged and handled within the constructor. This differs
-        // from QoreExternalProgramContextHelper which needed ExceptionSink for its runtime
-        // thread-local operations, not for the external data setup itself.
+        // QoreProgramContextHelper only manages the program context (save/restore), which raises no exceptions
         QoreProgramContextHelper pch(pgm);
-        pgm->setExternalData(QORE_PYTHON_MODULE_NAME, new QorePythonProgram(pgm, pyns));
+        // an error is raised in the Program that loads the module; the invalid program is kept, so that its
+        // interpreter is released when the Program is deleted
+        pgm->setExternalData(QORE_PYTHON_MODULE_NAME, new QorePythonProgram(pgm, pyns, &xsink));
     }
 
 #ifndef Py_GIL_DISABLED
@@ -1191,9 +1191,12 @@ static void python_module_parse_cmd(const QoreString& cmd, ExceptionSink* xsink)
     if (!pypgm) {
         QoreNamespace* pyns = PNS->copy();
         pgm->getRootNS()->addNamespace(pyns);
-        pypgm = new QorePythonProgram(pgm, pyns);
+        pypgm = new QorePythonProgram(pgm, pyns, xsink);
         pgm->setExternalData(QORE_PYTHON_MODULE_NAME, pypgm);
         pgm->addFeature(QORE_PYTHON_MODULE_NAME);
+        if (*xsink) {
+            return;
+        }
     }
 
     i->second.cmd(xsink, arg, pypgm);
@@ -1318,9 +1321,12 @@ extern "C" int python_module_import(ExceptionSink* xsink, QoreProgram* pgm, cons
     if (!pypgm) {
         QoreNamespace* pyns = PNS->copy();
         pgm->getRootNS()->addNamespace(pyns);
-        pypgm = new QorePythonProgram(pgm, pyns);
+        pypgm = new QorePythonProgram(pgm, pyns, xsink);
         pgm->setExternalData(QORE_PYTHON_MODULE_NAME, pypgm);
         pgm->addFeature(QORE_PYTHON_MODULE_NAME);
+        if (*xsink) {
+            return -1;
+        }
     }
     // the following call adds the class to the current program as well
     QorePythonHelper qph(pypgm, xsink);

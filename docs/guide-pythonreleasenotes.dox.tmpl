@@ -42,6 +42,13 @@
       <a href="https://github.com/qoretechnologies/qore/issues/5503">issue 5503</a>)
 
     <b>Bug Fixes:</b>
+    - \c qoreloader.issue_module_cmd() and \c qoreloader.load_java() raise \c UnicodeEncodeError for strings that
+      cannot be encoded in UTF-8 (ex: a lone surrogate); they crashed; errors initializing the %Python program of a
+      %Qore %Program (ex: when \c qoreloader cannot be imported) are raised in the %Program that loads the module,
+      which then cannot use %Python, and \c import \c qoreloader raises \c ImportError if the %Qore \c python
+      module cannot be loaded or the thread cannot be registered with %Qore (the process was ended with \c exit(1),
+      or the import failed without an exception) (<a href="https://github.com/qoretechnologies/qore/issues/5504">issue
+      5504</a>)
     - \c import \c qoreloader no longer blocks the signals of the %Python process and of the processes that it
       starts (ex: \c Popen.terminate() was ignored and \c SIGINT never arrived): %Qore is initialized without its
       signal handling when %Python is the host; deleting a @ref Python::PythonProgram "PythonProgram" while another

@@ -38,13 +38,15 @@ public:
         }
     }
 
-    // returns 0 = attached, -1 = already attached
+    //! attaches the thread to Qore if it is not registered
+    /** @return QFT_OK if the thread was attached, QFT_REGISTERED if it was already attached or registered, or
+        QFT_ERROR if it could not be registered (ex: the maximum number of threads is reached)
+    */
     DLLLOCAL int attach() {
-        if (!attached) {
-            attachIntern();
-            return 0;
+        if (attached) {
+            return QFT_REGISTERED;
         }
-        return -1;
+        return attachIntern();
     }
 
     DLLLOCAL void detach() {
@@ -60,16 +62,14 @@ public:
 private:
     bool attached;
 
-    DLLLOCAL void attachIntern() {
+    DLLLOCAL int attachIntern() {
         assert(!attached);
         int rc = q_register_foreign_thread();
         if (rc == QFT_OK) {
             attached = true;
             printd(LogLevel, "Thread %ld attached to Qore\n", pthread_self());
-        } else if (rc != QFT_REGISTERED) {
-            printf("unable to register thread to qore; aborting\n");
-            exit(1);
         }
+        return rc;
     }
 
     DLLLOCAL void detachIntern() {
@@ -84,8 +84,13 @@ private:
 // if attached in the constructor, then it will detach in the destructor
 class QoreThreadAttachHelper {
 public:
-    DLLLOCAL void attach() {
-        attached = !attacher.attach();
+    //! attaches the thread to Qore if it is not registered
+    /** @return 0 for OK, -1 if the thread could not be registered
+    */
+    DLLLOCAL int attach() {
+        int rc = attacher.attach();
+        attached = rc == QFT_OK;
+        return rc == QFT_ERROR ? -1 : 0;
     }
 
     DLLLOCAL ~QoreThreadAttachHelper() {
@@ -98,7 +103,5 @@ private:
     QoreThreadAttacher attacher;
     bool attached = false;
 };
-
-extern thread_local QoreThreadAttacher qoreThreadAttacher;
 
 #endif

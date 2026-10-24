@@ -249,7 +249,7 @@ QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
     needs_deregistration = qpy_register(this);
 }
 
-QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
+QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns, ExceptionSink* xsink)
         : qpgm(qpgm), pyns(pyns), save_object_callback(nullptr) {
     // the code of the interpreter on threads that Python creates is governed by the sandbox of the code that creates
     // the interpreter, which runs in the given Program
@@ -266,8 +266,11 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
 
     QorePythonGilHelper qpgh;
 
-    ExceptionSink xsink;
-    if (createInterpreter(qpgh, &xsink)) {
+    ExceptionSink local_xsink;
+    if (!xsink) {
+        xsink = &local_xsink;
+    }
+    if (createInterpreter(qpgh, xsink)) {
         valid = false;
         return;
     }
@@ -280,12 +283,11 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
     // the builtin functions and classes are imported (ex: Python::builtins::len()); its constants are not: they are
     // Python objects (ex: exit and quit, which shadowed Qore's exit() function, and the other helpers of the site
     // module) or values with Qore equivalents (True, False, None)
-    import(&xsink, "builtins", nullptr, IF_ALL | IF_NO_CONSTANTS);
-    if (xsink) {
+    import(xsink, "builtins", nullptr, IF_ALL | IF_NO_CONSTANTS);
+    if (*xsink) {
         valid = false;
         return;
     }
-    //assert(!xsink);
 
     // returns a borrowed reference
     setGlobalDictionary(*module);
@@ -294,9 +296,10 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns)
     // import qoreloader module
     QorePythonReferenceHolder qoreloader(PyImport_ImportModule("qoreloader"));
     if (!qoreloader) {
-        if (!checkPythonException(&xsink)) {
-            xsink.raiseException("PYTHON-COMPILE-ERROR", "cannot load the 'qoreloader' module");
+        if (!checkPythonException(xsink)) {
+            xsink->raiseException("PYTHON-COMPILE-ERROR", "cannot load the 'qoreloader' module");
         }
+        valid = false;
         return;
     }
 
@@ -1484,10 +1487,9 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         // duplicate thread state and deadlock trying to acquire an already-held GIL.
 #ifdef Py_GIL_DISABLED
         PyThreadState* python_thread_state = PyThreadState_GetUnchecked();
-#elif !defined(QORE_PYTHON_INCLUDE_INTERNALS)
+#else
         PyThreadState* python_thread_state = _qore_check_python_created_thread_gil();
 #endif
-#if defined(Py_GIL_DISABLED) || !defined(QORE_PYTHON_INCLUDE_INTERNALS)
         if (python_thread_state && python_thread_state->interp == interpreter) {
             // This is a Python-created thread - use the existing thread state
             // The thread already has the GIL, so we don't need to acquire it
@@ -1496,7 +1498,6 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
             printd(5, "QorePythonProgram::setContext() detected Python-created thread, using existing "
                 "thread state: %p\n", python);
         }
-#endif
 
         if (!python) {
             // This is a Qore-created thread - create a new thread state
@@ -1524,7 +1525,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
             // but WITHOUT setting _qore_tss_tstate. This tells _qore_check_python_created_thread_gil()
             // that this is a Qore-managed thread (not Python-created) that doesn't have the GIL yet.
             // The GIL will be properly acquired later via PyEval_RestoreThread().
-#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000 && !defined(QORE_PYTHON_INCLUDE_INTERNALS)
+#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
             _qore_tss_initialized = true;
             // Keep _qore_tss_tstate = nullptr to indicate we don't have the GIL
             printd(5, "QorePythonProgram::setContext() Python 3.12: marked _qore_tss_initialized=true "

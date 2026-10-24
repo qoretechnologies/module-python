@@ -2,7 +2,7 @@
 /*
     python314_internals.h
 
-    Qore Programming Language - Python 3.14+ free-threading support
+    Qore Programming Language - Python 3.14+ support (GIL-enabled and free-threaded builds)
 
     Copyright 2020 - 2026 Qore Technologies, s.r.o.
 
@@ -27,7 +27,7 @@
 #include <fileobject.h>
 
 /*
-    Python 3.14 free-threading (PEP 703) support
+    Python 3.14 and later, in the default (GIL-enabled) build and in the free-threaded build (PEP 703)
 
     In free-threading mode (Py_GIL_DISABLED), there is no Global Interpreter Lock.
     Thread synchronization is handled differently:
@@ -163,32 +163,7 @@ DLLLOCAL static inline void _qore_release_thread_state(PyThreadState* tstate) {
 }
 
 #else
-// GIL-enabled build of Python 3.14+ - should not normally happen but handle it
-
-#include <dynamic_annotations.h>
-
-typedef struct _Py_atomic_address {
-    uintptr_t _value;
-} _Py_atomic_address;
-
-typedef struct _Py_atomic_int {
-    int _value;
-} _Py_atomic_int;
-
-// Simplified memory order definitions
-typedef enum _Py_memory_order {
-    _Py_memory_order_relaxed,
-    _Py_memory_order_acquire,
-    _Py_memory_order_release,
-    _Py_memory_order_acq_rel,
-    _Py_memory_order_seq_cst
-} _Py_memory_order;
-
-#define _Py_atomic_load_relaxed(ATOMIC_VAL) \
-    __atomic_load_n(&(ATOMIC_VAL)->_value, __ATOMIC_RELAXED)
-
-#define _Py_atomic_store_relaxed(ATOMIC_VAL, NEW_VAL) \
-    __atomic_store_n(&(ATOMIC_VAL)->_value, (NEW_VAL), __ATOMIC_RELAXED)
+// the default (GIL-enabled) build of Python 3.14 and later
 
 // For GIL-enabled Python 3.14, use thread-local state to track current thread state
 // This mirrors the approach used in Python 3.12 internals

@@ -238,6 +238,7 @@ class PythonTest inherits Test {
         addTestCase("import test", \importTest());
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
+        addTestCase("the functions of qoreloader reject strings that cannot be converted", \qoreloaderArgumentTest());
         addTestCase("type conversion test", \typeConversionTest());
         addTestCase("conversion of cyclic, shared and unrepresentable Python values", \unrepresentableValueTest());
         addTestCase("Qore number <-> Python int and decimal.Decimal", \numberConversionTest());
@@ -3814,6 +3815,33 @@ def colliding_keys():
     # or destructor tripped an assertion and could not be called; only copy was renamed); the constants of Python's
     # builtins module are not imported into Python::builtins (its exit and quit objects shadowed Qore's exit(), and
     # reading such a constant aborted the process at exit), while its functions and classes are
+    # strings that cannot be encoded in UTF-8 (lone surrogates) raise UnicodeEncodeError in the functions of the
+    # qoreloader module, which passed nullptr to Qore
+    qoreloaderArgumentTest() {
+        PythonProgram p("import qoreloader
+def cmd_module():
+    qoreloader.issue_module_cmd('\\ud800', 'x')
+def cmd():
+    qoreloader.issue_module_cmd('python', '\\ud800')
+def java():
+    qoreloader.load_java('\\ud800')
+def types():
+    rv = []
+    for args in ((1, 'x'), ('python', 1)):
+        try:
+            qoreloader.issue_module_cmd(*args)
+        except ValueError as e:
+            rv.append(str(e))
+    return rv
+", "qoreloader_args.py");
+        map assertThrows("builtins.UnicodeEncodeError", "surrogates not allowed", \p.callFunction(), $1),
+            ("cmd_module", "cmd", "java");
+        list<string> errs = p.callFunction("types");
+        assertEq(2, errs.size());
+        assertRegex("first agument must be a string", errs[0]);
+        assertRegex("second agument must be a string", errs[1]);
+    }
+
     specialNameTest() {
         PythonProgram p("
 class Special:
