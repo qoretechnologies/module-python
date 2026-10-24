@@ -1924,10 +1924,12 @@ struct func_capsule_t {
     QorePythonProgram* py_pgm;
     const std::string name;
     PyMethodDef definition;
+    //! true if the function is Qore's fork()
+    const bool is_fork;
 
     DLLLOCAL func_capsule_t(const QoreExternalFunction& func, QorePythonProgram* py_pgm, PyCFunction callback)
             : func(func), py_pgm(py_pgm), name(func.getName()),
-              definition{name.c_str(), callback, METH_VARARGS, nullptr} {
+              definition{name.c_str(), callback, METH_VARARGS, nullptr}, is_fork(is_qore_fork_function(func)) {
         py_pgm->weakRef();
     }
 
@@ -2894,18 +2896,23 @@ QoreListNode* QorePythonProgram::getQoreListFromList(ExceptionSink* xsink, PyObj
 QoreListNode* QorePythonProgram::getQoreListFromTuple(ExceptionSink* xsink, PyObject* val, size_t offset,
     bool for_args) {
     pyobj_set_t rset;
-    return getQoreListFromTuple(xsink, val, rset, offset, for_args);
+    return getQoreListFromTupleElements(xsink, val, rset, offset, for_args);
 }
 
 QoreListNode* QorePythonProgram::getQoreListFromTuple(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset,
     size_t offset, bool for_args) {
+    QorePythonConversionPathHelper path(rset, val);
+    if (path.checkCycle(xsink)) {
+        return nullptr;
+    }
+    return getQoreListFromTupleElements(xsink, val, rset, offset, for_args);
+}
+
+QoreListNode* QorePythonProgram::getQoreListFromTupleElements(ExceptionSink* xsink, PyObject* val,
+    pyobj_set_t& rset, size_t offset, bool for_args) {
     assert(PyTuple_Check(val));
     Py_ssize_t len = PyTuple_Size(val);
     if (for_args && !len) {
-        return nullptr;
-    }
-    QorePythonConversionPathHelper path(rset, val);
-    if (path.checkCycle(xsink)) {
         return nullptr;
     }
     ReferenceHolder<QoreListNode> rv(new QoreListNode(autoTypeInfo), xsink);
@@ -3959,7 +3966,7 @@ QoreValue QorePythonProgram::callFunction(ExceptionSink* xsink, const QoreString
         }
 
         //printd(5, "QorePythonProgram::callFunction() this: %p %s()\n", this, func_name.c_str());
-        rv = callInternal(xsink, py_func, args, arg_offset, nullptr, kwargs);
+        rv = callWithContext(xsink, py_func, args, arg_offset, nullptr, kwargs);
     }
     assert(!haveGil());
     return rv.release();
@@ -4072,7 +4079,7 @@ QoreValue QorePythonProgram::callMethod(ExceptionSink* xsink, const char* cname,
 
     //printd(5, "QorePythonProgram::callMethod() %s::%s() args: %d\n", cname, mname, args ? (int)args->size() : 0);
 
-    return callInternal(xsink, *py_method, args, arg_offset, first, kwargs);
+    return callWithContext(xsink, *py_method, args, arg_offset, first, kwargs);
 }
 
 QoreValue QorePythonProgram::callInternal(ExceptionSink* xsink, PyObject* callable, const QoreListNode* args,
@@ -4087,7 +4094,12 @@ QoreValue QorePythonProgram::callInternal(ExceptionSink* xsink, PyObject* callab
     if (*xsink || checkValid(xsink)) {
         return QoreValue();
     }
-    //printd(5, "QorePythonProgram::callInternal() f: %p args: %d (%d) self: %p\n", callable,
+    return callWithContext(xsink, callable, args, arg_offset, first, kwargs);
+}
+
+QoreValue QorePythonProgram::callWithContext(ExceptionSink* xsink, PyObject* callable, const QoreListNode* args,
+    size_t arg_offset, PyObject* first, const QoreHashNode* kwargs) {
+    //printd(5, "QorePythonProgram::callWithContext() f: %p args: %d (%d) self: %p\n", callable,
     //    args ? (int)args->size() : 0, (int)arg_offset, first);
     // the keys of the hash are the names of the keyword arguments
     QorePythonReferenceHolder py_kwargs;
@@ -5730,7 +5742,7 @@ PyObject* QorePythonProgram::callQoreFunction(PyObject* self, PyObject* args) {
     // Qore's fork() called from Python code of the main interpreter runs Python's fork protocol, as os.fork() does
     // (see qore_python_register_fork_protocol())
     PyThreadState* fork_tstate = nullptr;
-    if (is_qore_fork_function(fc->func)) {
+    if (fc->is_fork) {
         PyThreadState* tstate = PyThreadState_Get();
         if (qore_python_get_interpreter(tstate) == PyInterpreterState_Main()) {
             fork_tstate = tstate;

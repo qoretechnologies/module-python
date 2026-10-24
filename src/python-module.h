@@ -498,11 +498,18 @@ public:
     }
 
 protected:
+    //! true if the helper is inside one for the same program whose thread state is attached: it does nothing
+    /** (ex: a helper in callInternal() called with the context of callFunction()); declared first, as the other
+        members depend on it
+    */
+    bool nested;
     void* old_pgm;
     QorePythonThreadInfo old_state;
     const QorePythonProgram* new_pypgm;
     //! the helper created before this one in this thread
     const QorePythonHelper* prev;
+    //! the thread state that the thread has attached for the program while the helper holds the context
+    PyThreadState* attached = nullptr;
 
     //! the state of the interrupt of the Python code that the thread runs, shared with the cancel callback
     struct InterruptState {
@@ -521,7 +528,11 @@ protected:
     //! code (see registerInterrupt())
     std::shared_ptr<InterruptState> interrupt;
     //! the sandbox manager that the cancel callback is registered with
-    std::unique_ptr<QoreSandboxManagerHelper> interrupt_smh;
+    std::optional<QoreSandboxManagerHelper> interrupt_smh;
+
+    //! returns true if the current helper of the thread holds the context of the program with its thread state
+    //! attached, so that a new helper for it can do nothing
+    DLLLOCAL static bool canNest(const QorePythonProgram* pypgm, ExceptionSink* xsink);
 
     //! registers a cancel callback with the sandbox manager of the current Program, if any, which raises
     //! KeyboardInterrupt in the thread (PyThreadState_SetAsyncExc()); only for the first helper of the program in the
@@ -721,6 +732,14 @@ public:
             // through our API. PyGILState_Ensure is safe to call even if we already
             // have the GIL - it just increments the gilstate_counter.
             if (Py_IsInitialized()) {
+                // the thread runs with its bound state attached (it holds the GIL or, in free-threaded builds, is
+                // attached): PyGILState_Ensure() would only count the use of the state
+                PyThreadState* attached = PyThreadState_GetUnchecked();
+                if (attached && attached == PyGILState_GetThisThreadState()) {
+                    py_deref();
+                    obj = nullptr;
+                    return;
+                }
                 // CRITICAL: Before calling PyGILState_Ensure, check if the TSS thread state
                 // (if any) has a valid interpreter. If the interpreter was deleted (sub-interpreter
                 // cleanup), PyGILState_Ensure will crash with "_PyMem_IsPtrFreed(tstate->interp)".

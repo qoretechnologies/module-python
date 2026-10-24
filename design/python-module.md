@@ -116,9 +116,29 @@ These functions manage the Python execution context for Qore threads:
    - Releases the GIL if it was acquired in setContext()
    - Handles cross-interpreter restoration
 
+### Nested Helpers and Call Overhead
+
+A `QorePythonHelper` for the program of the thread's current helper, while the thread state that the current helper
+attached is still attached (`PyThreadState_GetUnchecked()`, `_PyThreadState_UncheckedGet()` before 3.13), is nested:
+it calls neither `setContext()` nor `releaseContext()` and does not swap the thread-local program (ex: the helper of
+`callInternal()` called with the context of `QorePythonClass::callPythonMethod()`).  A helper that releases the GIL
+in between (`QorePythonReleaseGilHelper`) detaches the state, so a helper inside it takes the full path.  A nested
+helper is not counted as a use of the program (`isCounted()`), as it did not increment `pgm_thr_cnt`; it still
+checks for an interrupt and registers the cancel callback if no outer helper of the program did.  `callFunction()`
+and `callMethod()` call `callWithContext()`, which sets no contexts.  `QorePythonReferenceHolder::purge()` (3.13+)
+releases the reference directly when the thread's bound state is attached.  The arguments tuple of a call from
+Python is not added to the cycle-detection path (`getQoreListFromTuple()` without a path): a cycle through it also
+goes through one of its elements.  `test/benchmark-calls.qr` and `test/benchmark-calls.py` report the per-call costs
+(not run in CI).
+
+What remains of a call from Qore is mostly the GIL hand-off: attaching the thread state (`take_gil`) and, before
+releasing it, swapping in the thread's idle state of the main interpreter (`qore_python_release_context()`), which
+detaches and attaches again.  Most of the cost of a call from Python to Qore is Qore's
+`CodeEvaluationHelper`; variant resolution is under 1% (not cached).
+
 ### Key Invariants
 
-1. Every `setContext()` must have a matching `releaseContext()`
+1. Every `setContext()` must have a matching `releaseContext()` (except for nested helpers, which call neither)
 2. `gilstate_counter` must remain >= 1 for active thread states
 3. Thread states must only be used with their owning interpreter
 4. When an interpreter is deleted, all its thread states become invalid

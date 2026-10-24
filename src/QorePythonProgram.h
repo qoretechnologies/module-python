@@ -163,6 +163,11 @@ public:
     DLLLOCAL QoreValue callInternal(ExceptionSink* xsink, PyObject* callable, const QoreListNode* args,
         size_t arg_offset = 0, PyObject* first = nullptr, const QoreHashNode* kwargs = nullptr);
 
+    //! Call a callable and and return the result, with the Qore program context and the Python context of the
+    //! program already set
+    DLLLOCAL QoreValue callWithContext(ExceptionSink* xsink, PyObject* callable, const QoreListNode* args,
+        size_t arg_offset = 0, PyObject* first = nullptr, const QoreHashNode* kwargs = nullptr);
+
     //! Call a callable and and return the result as a Python value
     DLLLOCAL PyObject* callPythonInternal(ExceptionSink* xsink, PyObject* callable, const QoreListNode* args,
         size_t arg_offset = 0, PyObject* first = nullptr, PyObject* kwargs = nullptr);
@@ -212,8 +217,11 @@ public:
     */
     DLLLOCAL QoreListNode* getQoreListFromList(ExceptionSink* xsink, PyObject* val);
 
-    //! Returns a Qore list from a Python tuple
+    //! Returns a Qore list from the Python tuple of the arguments of a call
     /** must already have the Python thread context set
+
+        The tuple is not added to the conversion path that detects cycles: a cycle through it also goes through one
+        of its elements, which are added
     */
     DLLLOCAL QoreListNode* getQoreListFromTuple(ExceptionSink* xsink, PyObject* val, size_t offset = 0,
             bool for_args = false);
@@ -762,6 +770,9 @@ protected:
     //! Returns a Qore list from a Python tuple
     DLLLOCAL QoreListNode* getQoreListFromTuple(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset,
             size_t offset = 0, bool for_args = false);
+    //! Returns a Qore list from the elements of a Python tuple
+    DLLLOCAL QoreListNode* getQoreListFromTupleElements(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset,
+            size_t offset, bool for_args);
     //! Returns a Qore call reference from a Python function
     DLLLOCAL ResolvedCallReferenceNode* getQoreCallRefFromFunc(ExceptionSink* xsink, PyObject* val);
     //! Returns a Qore call reference from a Python method

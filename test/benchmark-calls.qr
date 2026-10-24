@@ -1,0 +1,90 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# SPDX-License-Identifier: MIT
+# Reports the cost of calls between Qore and Python in a Qore process (not run in CI; use release builds):
+#   QORE_MODULE_DIR=<module build> qore test/benchmark-calls.qr [calls]
+
+%requires python
+
+const Rounds = 5;
+
+int sub qid(int x) { return x; }
+
+class Target {
+    int get(int x) { return x; }
+}
+
+int calls = ARGV[0] ? ARGV[0].toInt() : 100000;
+
+Python::PythonProgram pp("
+import time
+from qore.__root__.Qore import abs as qabs
+def f(x):
+    return x
+class P:
+    def m(self, x):
+        return x
+p = P()
+def python_loop(n):
+    t = time.perf_counter()
+    for i in range(n):
+        f(i)
+    return time.perf_counter() - t
+def qore_builtin_loop(n):
+    t = time.perf_counter()
+    for i in range(n):
+        qabs(i)
+    return time.perf_counter() - t
+def qore_callable_loop(cb, n):
+    t = time.perf_counter()
+    for i in range(n):
+        cb(i)
+    return time.perf_counter() - t
+def qore_method_loop(o, n):
+    t = time.perf_counter()
+    for i in range(n):
+        o.get(i)
+    return time.perf_counter() - t
+", "benchmark.py");
+
+#! returns the shortest time of the rounds in seconds
+float sub best(code<float()> measure) {
+    float rv = measure();
+    for (int i = 1; i < Rounds; ++i) {
+        rv = min(rv, measure());
+    }
+    return rv;
+}
+
+sub report(string label, float secs) {
+    printf("%-42s %8.3f us/call\n", label, secs * 1000000.0 / calls);
+}
+
+float sub time_qore(code<auto(int)> call) {
+    date start = now_us();
+    for (int i = 0; i < calls; ++i) {
+        call(i);
+    }
+    return (now_us() - start).durationSecondsFloat();
+}
+
+object py_obj = pp.getAttribute("p");
+Target target();
+
+report("Qore -> Qore user function", best(float sub () { return time_qore(int sub (int i) { return qid(i); }); }));
+report("Qore -> Python callFunction()", best(float sub () {
+    return time_qore(auto sub (int i) { return pp.callFunction("f", i); });
+}));
+report("Qore -> Python callFunctionArgs()", best(float sub () {
+    return time_qore(auto sub (int i) { return pp.callFunctionArgs("f", i); });
+}));
+report("Qore -> Python method", best(float sub () { return time_qore(auto sub (int i) { return py_obj.m(i); }); }));
+report("Python -> Python", best(float sub () { return pp.callFunction("python_loop", calls); }));
+report("Python -> Qore builtin function", best(float sub () { return pp.callFunction("qore_builtin_loop", calls); }));
+report("Python -> Qore closure", best(float sub () {
+    return pp.callFunction("qore_callable_loop", int sub (int x) { return x; }, calls);
+}));
+report("Python -> Qore call reference", best(float sub () {
+    return pp.callFunction("qore_callable_loop", \qid(), calls);
+}));
+report("Python -> Qore method", best(float sub () { return pp.callFunction("qore_method_loop", target, calls); }));

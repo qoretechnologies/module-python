@@ -98,7 +98,7 @@ auto PythonProgram::run() {
     @see @ref python_exceptionsguide
 */
 auto PythonProgram::callFunction(string func_name, ...) {
-    return pp->callFunction(xsink, func_name, args, 1);
+    return pp->callFunction(xsink, *func_name, args, 1);
 }
 
 //! Call the given function and return the result
@@ -127,7 +127,7 @@ list<auto> l = p.callFunctionArgs("send", ("ops@example.com", "disk full"), {"pr
 */
 auto PythonProgram::callFunctionArgs(string function_name, *softlist<auto> arguments, *hash<auto> keyword_arguments)
         [flags=NAMED_ARGS] {
-    return pp->callFunction(xsink, function_name, arguments, 0, keyword_arguments);
+    return pp->callFunction(xsink, *function_name, arguments, 0, keyword_arguments);
 }
 
 //! Call the given method and return the result
@@ -143,7 +143,7 @@ auto PythonProgram::callFunctionArgs(string function_name, *softlist<auto> argum
     @see @ref python_exceptionsguide
 */
 auto PythonProgram::callMethod(string class_name, string method_name, ...) {
-    return pp->callMethod(xsink, class_name, method_name, args, 2);
+    return pp->callMethod(xsink, *class_name, *method_name, args, 2);
 }
 
 //! Call the given method and return the result
@@ -174,7 +174,7 @@ string s = p.callMethodArgs("Report", "render", ((1, 2),), {"fmt": "csv", "title
 */
 auto PythonProgram::callMethodArgs(string class_name, string method_name, *softlist<auto> arguments,
         *hash<auto> keyword_arguments) [flags=NAMED_ARGS] {
-    return pp->callMethod(xsink, class_name, method_name, arguments, 0, keyword_arguments);
+    return pp->callMethod(xsink, *class_name, *method_name, arguments, 0, keyword_arguments);
 }
 
 //! Returns the value of a global variable (an attribute of the module) of the Python program

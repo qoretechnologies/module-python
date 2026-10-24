@@ -1332,11 +1332,45 @@ extern "C" int python_module_import(ExceptionSink* xsink, QoreProgram* pgm, cons
 
 thread_local const QorePythonHelper* QorePythonHelper::current = nullptr;
 
+// returns the thread state that the current thread has attached, if any
+static inline PyThreadState* qore_python_attached_thread_state() {
+#if PY_VERSION_HEX >= 0x030D0000
+    return PyThreadState_GetUnchecked();
+#else
+    return _PyThreadState_UncheckedGet();
+#endif
+}
+
+bool QorePythonHelper::canNest(const QorePythonProgram* pypgm, ExceptionSink* xsink) {
+    const QorePythonHelper* outer = current;
+    // the thread state that the outer helper attached is still attached: the GIL (or the attachment in free-threaded
+    // builds) has not been released since, and no other interpreter's state has been swapped in
+    if (!outer || outer->new_pypgm != pypgm || !outer->attached || python_shutdown || python_fork_lost
+        || !pypgm->isValid() || qore_python_attached_thread_state() != outer->attached) {
+        return false;
+    }
+    // an interrupt is raised by the normal path (setContext())
+    return !xsink || !qore_check_cancel(nullptr, "Python execution");
+}
+
 QorePythonHelper::QorePythonHelper(const QorePythonProgram* pypgm, ExceptionSink* xsink)
-        : old_pgm(q_swap_thread_local_data(python_u_tld_key, (void*)pypgm)),
-            old_state(pypgm->setContext(xsink != nullptr)), new_pypgm(pypgm), prev(current) {
+        : nested(canNest(pypgm, xsink)),
+            old_pgm(nested ? (void*)pypgm : q_swap_thread_local_data(python_u_tld_key, (void*)pypgm)),
+            old_state(nested ? QorePythonThreadInfo{nullptr, nullptr, nullptr, nullptr, PyGILState_UNLOCKED, false}
+                : pypgm->setContext(xsink != nullptr)),
+            new_pypgm(pypgm), prev(current) {
     current = this;
     //printd(5, "QorePythonHelper::QorePythonHelper() new: %p old: %p\n", pypgm, old_pgm);
+    if (nested) {
+        attached = prev->attached;
+        if (xsink) {
+            registerInterrupt();
+        }
+        return;
+    }
+    if (old_state.valid) {
+        attached = qore_python_attached_thread_state();
+    }
     if (xsink) {
         if (python_fork_lost) {
             qore_python_raise_fork_error(xsink);
@@ -1355,8 +1389,10 @@ QorePythonHelper::QorePythonHelper(const QorePythonProgram* pypgm, ExceptionSink
 
 QorePythonHelper::~QorePythonHelper() {
     deactivateInterrupt();
-    new_pypgm->releaseContext(old_state);
-    q_swap_thread_local_data(python_u_tld_key, (void*)old_pgm);
+    if (!nested) {
+        new_pypgm->releaseContext(old_state);
+        q_swap_thread_local_data(python_u_tld_key, (void*)old_pgm);
+    }
     assert(current == this);
     current = prev;
     deregisterInterrupt();
@@ -1370,8 +1406,10 @@ void QorePythonHelper::registerInterrupt() {
             return;
         }
     }
-    std::unique_ptr<QoreSandboxManagerHelper> smh(new QoreSandboxManagerHelper(QoreSandboxManagerHelper::All));
-    if (!*smh) {
+    // constructed in place: most programs have no sandbox manager, and the helper is created for each call
+    interrupt_smh.emplace(QoreSandboxManagerHelper::All);
+    if (!*interrupt_smh) {
+        interrupt_smh.reset();
         return;
     }
     interrupt = std::make_shared<InterruptState>();
@@ -1379,7 +1417,7 @@ void QorePythonHelper::registerInterrupt() {
     interrupt->pypgm = new_pypgm;
     std::shared_ptr<InterruptState> state = interrupt;
     // the callback is called on the thread that requests the interrupt, possibly after it was removed
-    (*smh)->registerCancelCallback(interrupt.get(), [state]() -> bool {
+    (*interrupt_smh)->registerCancelCallback(interrupt.get(), [state]() -> bool {
         std::lock_guard<std::mutex> al(state->lck);
         if (!state->active.load()) {
             return false;
@@ -1397,7 +1435,6 @@ void QorePythonHelper::registerInterrupt() {
         }
         return rv;
     });
-    interrupt_smh = std::move(smh);
 }
 
 void QorePythonHelper::deactivateInterrupt() {
@@ -1424,11 +1461,11 @@ void QorePythonHelper::deregisterInterrupt() {
 }
 
 bool QorePythonHelper::isValid() const {
-    return old_state.valid || !new_pypgm->isValid();
+    return nested || old_state.valid || !new_pypgm->isValid();
 }
 
 bool QorePythonHelper::wasInterrupted() const {
-    return !old_state.valid && new_pypgm->isValid();
+    return !nested && !old_state.valid && new_pypgm->isValid();
 }
 
 bool _qore_has_gil(PyThreadState* t_state) {

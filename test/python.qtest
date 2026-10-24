@@ -3498,10 +3498,32 @@ def big_low_limit(n):
 
 def pow2(n):
     return 2**n
+
+def cyclic_args(cb, star):
+    t = ([],)
+    t[0].append(t)
+    # with *t, CPython passes the tuple itself as the arguments of the call
+    return cb(*t) if star else cb(t)
+
+def cyclic_qore_args(star):
+    from qore.__root__.Qore import type as qtype
+    return cyclic_args(qtype, star)
+
+def nested_args(cb):
+    t = (1, [2, (3,)])
+    return [cb(*t), cb(t)]
 ", "unrepresentable.py");
 
         map assertThrows("PYTHON-VALUE-ERROR", "contains itself", \p.callFunction(), $1), ("list_cycle", "tuple_cycle",
             "dict_cycle");
+        # the arguments of calls from Python to Qore callables and functions
+        code cb = auto sub (auto a) { return a; };
+        foreach bool star in ((False, True)) {
+            assertThrows("PYTHON-VALUE-ERROR", "contains itself", \p.callFunction(), ("cyclic_args", cb, star));
+            assertThrows("PYTHON-VALUE-ERROR", "contains itself", \p.callFunction(), ("cyclic_qore_args", star));
+        }
+        assertEq(((1, (2, (3,))), ((1, (2, (3,))), NOTHING)), p.callFunction("nested_args",
+            list<auto> sub (auto a, auto b) { return (a, b); }));
         assertEq({"x": {"a": 1}, "y": {"a": 1}, "l": ((1, 2), (1, 2)), "d": ({"a": 1}, {"a": 1})},
             p.callFunction("shared"));
         map assertThrows("builtins.UnicodeEncodeError", "surrogates not allowed", \p.callFunction(), $1),

@@ -34,6 +34,13 @@
       @ref Python::PythonProgram::callMethodArgs() "PythonProgram::callMethodArgs()" (see
       @ref python_keyword_arguments; <a href="https://github.com/qoretechnologies/qore/issues/5498">issue 5498</a>)
 
+    - Calls between %Qore and %Python have less overhead: a call from %Qore to a %Python function acquires the
+      %Python context once (it was acquired twice), calls from %Python to %Qore do not track the argument tuple for
+      cycle detection, and releasing %Python references with the GIL held does not acquire the GIL state again
+      (\c PythonProgram::callFunction() about 18% faster, calls from %Python to %Qore methods and call references
+      about 12-15% faster; see \c test/benchmark-calls.qr;
+      <a href="https://github.com/qoretechnologies/qore/issues/5503">issue 5503</a>)
+
     <b>Bug Fixes:</b>
     - \c import \c qoreloader no longer blocks the signals of the %Python process and of the processes that it
       starts (ex: \c Popen.terminate() was ignored and \c SIGINT never arrived): %Qore is initialized without its
