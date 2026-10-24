@@ -42,6 +42,13 @@
       <a href="https://github.com/qoretechnologies/qore/issues/5503">issue 5503</a>)
 
     <b>Bug Fixes:</b>
+    - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
+      run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
+      the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static
+      methods that they use the %Python program of the current %Program, the type guide \c None, objects, enums and
+      hashdecls; the \c export-class and \c export-func examples work, and the errors of the \c parse and \c alias
+      module commands give their syntax (\c parse gave the syntax of \c alias)
+      (<a href="https://github.com/qoretechnologies/qore/issues/5505">issue 5505</a>)
     - \c qoreloader.issue_module_cmd() and \c qoreloader.load_java() raise \c UnicodeEncodeError for strings that
       cannot be encoded in UTF-8 (ex: a lone surrogate); they crashed; errors initializing the %Python program of a
       %Qore %Program (ex: when \c qoreloader cannot be imported) are raised in the %Program that loads the module,

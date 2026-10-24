@@ -75,9 +75,13 @@ PythonProgram::destructor() {
     pp->deref(xsink);
 }
 
-//! Runs the program
-/**
-    @note Exceptions parsing or compiling the Python code are thrown according to @ref python_exceptionsguide
+//! Runs the code of the program again
+/** The constructor already runs the code; running it again executes all its statements again in the globals of the
+    program (ex: assignments reset the values of global variables, and functions and classes are defined again)
+
+    @return no value
+
+    @note Exceptions running the Python code are thrown according to @ref python_exceptionsguide
 */
 auto PythonProgram::run() {
     return pp->run(xsink);
@@ -214,11 +218,24 @@ nothing PythonProgram::setAttribute(string name, auto value) [flags=NAMED_ARGS] 
     pp->setAttribute(xsink, *name, value);
 }
 
-//! Parse, compile, and evaluate the given statement and return any result; declarations are not persistent
-/** @param source_code the Python source to parse and compile
+//! Parses, compiles and runs the given statements in the \c __main__ module of the interpreter
+/** The statements do not see the globals of the program, and their declarations are not globals of the program:
+    they are kept in the \c __main__ module of the interpreter, where later calls of this method see them.
+
+    @param source_code the Python source to parse and compile
     @param source_label the label or file name of the source
 
+    @return no value (statements have no value; use evalExpression() for a value)
+
     @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
+
+    @par Example:
+    @code{.py}
+PythonProgram p("rate = 0.2", "tax.py");
+p.evalStatement("import math\ncache = {}");
+# "rate" is not visible in __main__: raises builtins.NameError
+p.evalStatement("x = rate");
+    @endcode
 
     @see evalStatementKeep()
  */
@@ -226,11 +243,24 @@ auto PythonProgram::evalStatement(string source_code, string source_label = "stm
     return pp->eval(xsink, *source_code, *source_label, Py_file_input, true);
 }
 
-//! Parse, compile, and evaluate the given statement and return any result; declarations are persistent
-/** @param source_code the Python source to parse and compile
+//! Parses, compiles and runs the given statements in the globals of the program
+/** The statements see the globals of the program, and their declarations are globals of the program (ex: a function
+    defined here can be called with callFunction()).
+
+    @param source_code the Python source to parse and compile
     @param source_label the label or file name of the source
 
+    @return no value (statements have no value; use evalExpression() for a value)
+
     @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
+
+    @par Example:
+    @code{.py}
+PythonProgram p("rate = 0.2", "tax.py");
+p.evalStatementKeep("def tax(amount):\n    return amount * rate");
+# 20.0
+float tax = p.callFunction("tax", 100);
+    @endcode
 
     @see evalStatement()
  */
@@ -242,9 +272,11 @@ auto PythonProgram::evalStatementKeep(string source_code, string source_label = 
 /** @param source_code the Python source to parse and compile
     @param source_label the label or file name of the source
 
+    @return the value of the expression, converted to Qore as per @ref python_python_to_qore
+
     @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
 
-    @note This method uses a shared static PythonProgram object to parse, compile, and evaluate the input string
+    @note The expression is evaluated in the globals of the program
  */
 auto PythonProgram::evalExpression(string source_code, string source_label = "exp") [flags=NAMED_ARGS] {
     return pp->eval(xsink, *source_code, *source_label, Py_eval_input, false);
@@ -320,16 +352,17 @@ PythonProgram::aliasDefinition(string python_source_path, string python_target_p
     }
 }
 
-//! Parse, compile, and evaluate one or more Python statements and return any result
-/** @param source_code the Python source to parse and compile
+//! Parses, compiles and runs the given statements in the \c __main__ module of the interpreter of the current Program
+/** The %Python program of the current %Qore Program (the one that the \c python module commands and imports use)
+    runs the statements, as with the method evalStatement().
+
+    @param source_code the Python source to parse and compile
     @param source_label the label or file name of the source
 
-    @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
+    @return no value
 
-    @note
-    - This method uses the PythonProgram context in the current program to parse, compile, and evaluate the input
-      string
-    - Is parsed in a "standalone" mode without being able to access existing symbols in the program
+    @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
+    @throw PYTHON-ERROR there is no Python program context in the current Program
 
     @see evalStatementKeep()
  */
@@ -342,15 +375,17 @@ static auto PythonProgram::evalStatement(string source_code, string source_label
     return pypgm->eval(xsink, *source_code, *source_label, Py_file_input, true);
 }
 
-//! Parse, compile, and evaluate the given code and leave declarations in the Python program object
-/** @param source_code the Python source to parse and compile
+//! Parses, compiles and runs the given statements in the globals of the %Python program of the current Program
+/** The %Python program of the current %Qore Program (the one that the \c python module commands and imports use)
+    runs the statements, as with the method evalStatementKeep(): their declarations are globals of that program.
+
+    @param source_code the Python source to parse and compile
     @param source_label the label or file name of the source
+
+    @return no value
 
     @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
     @throw PYTHON-ERROR there is no Python program context in the current Program
-
-    @note This method uses the PythonProgram context in the current program to parse, compile, and evaluate the input
-    string
 
     @see evalStatement()
  */
@@ -367,9 +402,13 @@ static auto PythonProgram::evalStatementKeep(string source_code, string source_l
 /** @param source_code the Python source to parse and compile
     @param source_label the label or file name of the source
 
-    @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
+    @return the value of the expression, converted to Qore as per @ref python_python_to_qore
 
-    @note This method uses a shared static PythonProgram object to parse, compile, and evaluate the input string
+    @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
+    @throw PYTHON-ERROR there is no Python program context in the current Program
+
+    @note The expression is evaluated in the globals of the %Python program of the current %Qore Program (the one
+    that the \c python module commands and imports use)
  */
 static auto PythonProgram::evalExpression(string source_code, string source_label = "exp") [flags=NAMED_ARGS] {
     QorePythonProgram* pypgm = QorePythonProgram::getContext();

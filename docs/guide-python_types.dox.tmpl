@@ -17,6 +17,10 @@
     |\c list|\c list
     |\c string|\c str
     |\c code (closure or call reference)|\c callable
+    |\c nothing (NOTHING), \c null (NULL)|\c None
+    |\c object|the %Python object of the %Qore object (see @ref python_objects_conversion)
+    |enum value|the member of the %Python enum class of the %Qore enum
+    |typed hash (\c hash<HashDeclName>)|an object of the \c dict subclass of the hashdecl
 
     A %Qore \c number outside the 64-bit signed integer range with an integral value that it holds exactly (as it holds
     the %Python \c int values that it is converted from) is a %Python \c int; all other numbers, including NaN and
@@ -56,6 +60,10 @@
     |\c set, \c frozenset|\c list (in iteration order)
     |\c memoryview|\c binary
     |\c function, \c method|\c code
+    |\c None|\c nothing (NOTHING)
+    |the %Python object of a %Qore object|the %Qore object
+    |member of the %Python enum class of a %Qore enum|the %Qore enum value
+    |object of the \c dict subclass of a %Qore hashdecl|typed hash of the hashdecl
 
     Subclasses of these types are converted as their base types (ex: \c enum.IntEnum is an \c int, a \c str enum is a
     \c string, \c collections.OrderedDict and \c collections.defaultdict are hashes).  All other %Python types (ex:
@@ -70,6 +78,22 @@
     %Qore's database drivers, in the time zone of its UTC offset or in the current time zone; it is converted back to
     %Python as a \c datetime.datetime.  A \c datetime.timedelta is a relative date/time value whose components all
     have the sign of the value, so that it compares equal to the same value made from other units.
+
+    @section python_objects_conversion Objects
+
+    A %Qore object is converted to the object of a %Python class created for its %Qore class (see
+    @ref python_qore_objects); each %Qore object has one %Python object in each interpreter, so it is the same %Python
+    object each time it is passed to %Python, and it is converted back to the same %Qore object.  The %Python object
+    holds a strong reference to the %Qore object.
+
+    An object of a %Python class (other than the types above) is converted to a %Qore object of a %Qore class created
+    for its %Python class (see @ref python_classes_in_qore), which holds a reference to the %Python object; a %Python
+    object passed to %Qore more than once gives a new %Qore object each time.  The %Python object of a %Qore object
+    whose class inherits a %Python class is converted back to that %Qore object.
+
+    The enum classes and the \c dict subclasses of hashdecls are described in @ref python_qore_declarations.
+
+    @section python_unrepresentable_values Values Without a Qore Representation
 
     Values that a %Qore value cannot represent raise an exception:
     - a container (\c list, \c tuple or \c dict) that contains itself, directly or through other containers, raises

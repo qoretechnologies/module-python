@@ -239,6 +239,8 @@ class PythonTest inherits Test {
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
         addTestCase("the functions of qoreloader reject strings that cannot be converted", \qoreloaderArgumentTest());
+        addTestCase("the scopes of evalStatement(), evalStatementKeep(), evalExpression() and run()", \evalScopeTest());
+        addTestCase("module command syntax errors", \moduleCommandSyntaxTest());
         addTestCase("type conversion test", \typeConversionTest());
         addTestCase("conversion of cyclic, shared and unrepresentable Python values", \unrepresentableValueTest());
         addTestCase("Qore number <-> Python int and decimal.Decimal", \numberConversionTest());
@@ -3815,6 +3817,42 @@ def colliding_keys():
     # or destructor tripped an assertion and could not be called; only copy was renamed); the constants of Python's
     # builtins module are not imported into Python::builtins (its exit and quit objects shadowed Qore's exit(), and
     # reading such a constant aborted the process at exit), while its functions and classes are
+    # evalStatement() runs in the __main__ module of the interpreter, evalStatementKeep() and evalExpression() in the
+    # globals of the program; statements have no value, and run() runs the code of the program again
+    evalScopeTest() {
+        PythonProgram p("x = 1\ndef get(name):\n    return globals().get(name, 'missing')\n", "scope.py");
+        assertEq(NOTHING, p.evalStatement("y = 2\n42"));
+        assertEq(NOTHING, p.evalStatementKeep("z = 3\n43"));
+        # declarations of evalStatement() are kept in __main__, not in the globals of the program
+        assertEq("missing", p.callFunction("get", "y"));
+        assertEq(NOTHING, p.evalStatement("assert y == 2"));
+        # evalStatement() does not see the globals of the program
+        assertThrows("builtins.NameError", "'x' is not defined", \p.evalStatement(), "w = x");
+        # declarations of evalStatementKeep() are globals of the program
+        assertEq(3, p.callFunction("get", "z"));
+        assertEq(3, p.evalExpression("z"));
+        p.evalStatementKeep("def tax(amount):\n    return amount * rate\nrate = 0.2");
+        assertEq(20.0, p.callFunction("tax", 100));
+
+        # run() runs the code of the program again
+        p.evalStatementKeep("x = 5");
+        assertEq(5, p.evalExpression("x"));
+        assertEq(NOTHING, p.run());
+        assertEq(1, p.evalExpression("x"));
+        # globals that the code does not set are kept
+        assertEq(3, p.evalExpression("z"));
+    }
+
+    # the errors of the module commands give their syntax
+    moduleCommandSyntaxTest() {
+        Program pgm(PO_NEW_STYLE);
+        pgm.loadModule("python");
+        assertThrows("PYTHON-MODULE-ERROR", "syntax: parse <label> <source code>: missing source code argument",
+            \pgm.issueModuleCmd(), ("python", "parse label-only"));
+        assertThrows("PYTHON-MODULE-ERROR", "syntax: alias <python-source-path> <python-target-path>: missing "
+            "python target path argument", \pgm.issueModuleCmd(), ("python", "alias source-only"));
+    }
+
     # strings that cannot be encoded in UTF-8 (lone surrogates) raise UnicodeEncodeError in the functions of the
     # qoreloader module, which passed nullptr to Qore
     qoreloaderArgumentTest() {

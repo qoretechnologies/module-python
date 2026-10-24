@@ -1262,8 +1262,8 @@ static void py_mc_alias(ExceptionSink* xsink, QoreString& arg, QorePythonProgram
     // find end of qore namespace
     qore_offset_t end = arg.find(' ');
     if (end == -1 || (size_t)end == (arg.size() - 1)) {
-        throw QoreStandardException("PYTHON-MODULE-ERROR", "syntax: alias <python-source-path> " \
-            "<python-target-path: python target path argument; value given: '%s'", arg.c_str());
+        throw QoreStandardException("PYTHON-MODULE-ERROR", "syntax: alias <python-source-path> "
+            "<python-target-path>: missing python target path argument; value given: '%s'", arg.c_str());
     }
 
     QoreString source_path(&arg, end);
@@ -1277,8 +1277,8 @@ static void py_mc_parse(ExceptionSink* xsink, QoreString& arg, QorePythonProgram
     // find end of qore namespace
     qore_offset_t end = arg.find(' ');
     if (end == -1 || (size_t)end == (arg.size() - 1)) {
-        throw QoreStandardException("PYTHON-MODULE-ERROR", "syntax: alias <python-source-path> " \
-            "<python-target-path: python target path argument; value given: '%s'", arg.c_str());
+        throw QoreStandardException("PYTHON-MODULE-ERROR", "syntax: parse <label> <source code>: missing source "
+            "code argument; value given: '%s'", arg.c_str());
     }
 
     QoreString source_label(&arg, end);

@@ -190,10 +190,14 @@ p.issueModuleCmd("python", "import my-python-module");
     @par Example:
     @code{.py}
 Program p(PO_NEW_STYLE);
+p.loadModule("python");
 string src = "
 class PyTest:
     def get(self):
         return 3
+
+def py_test():
+    return 'from python'
 ";
 p.issueModuleCmd("python", "parse pytest.py " + src);
     @endcode
@@ -205,7 +209,8 @@ p.issueModuleCmd("python", "parse pytest.py " + src);
 
     @par Example:
     @code{.py}
-Program p(PO_NEW_STYLE);
+%requires reflection
+# p is the Program of the example above, where PyTest was parsed
 p.issueModuleCmd("python", "export-class PyTest");
 Class cls = Class::forName(p, "PyTest");
 object obj = cls.newObject();
@@ -219,9 +224,11 @@ printf("get(): %y\n", obj.get());
 
     @par Example:
     @code{.py}
-Program p(PO_NEW_STYLE);
-p.issueModuleCmd("python", "export-func PyTest");
+%requires reflection
+# p is the Program of the example above, where py_test() was parsed
+p.issueModuleCmd("python", "export-func py_test");
 Function f = Function::forName(p, "py_test");
-printf("py_test(): %y\n", obj.call());
+# "from python"
+printf("py_test(): %y\n", f.call());
     @endcode
 */
