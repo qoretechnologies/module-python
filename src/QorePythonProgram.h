@@ -358,6 +358,34 @@ public:
     //! Adds the methods and members of the dict of the given Python type to the Qore class
     /** @param names the names already added, which are skipped (names defined by subclasses); updated
     */
+    //! Returns the Python type of the objects of a Qore class that inherits the Python class given
+    /** The type is a generated subclass of the Python class whose methods that the Qore class overrides call the Qore
+        methods, so that Python code calling them (ex: self.hook()) calls the Qore overrides; its objects hold their
+        Qore object in a slot (see getQoreSubclassObject()).
+
+        @return a borrowed reference to the type, the Python class itself if the Qore class overrides none of its
+        methods, or nullptr with a Qore exception in \a xsink
+    */
+    DLLLOCAL PyObject* getQoreSubclassType(ExceptionSink* xsink, const QoreClass& qcls, PyTypeObject* pycls);
+
+    //! Creates the Python object of a Qore object of a Qore class that inherits a Python class
+    /** The Python object is set as the private data of the Qore object for the Qore class of the Python class before
+        it is initialized.
+
+        @param type the type returned by getQoreSubclassType()
+        @param cid the class ID of the Qore class of the Python class
+
+        @return 0 for OK, -1 for error with a Qore exception in \a xsink
+    */
+    DLLLOCAL int newQoreSubclassObject(ExceptionSink* xsink, PyTypeObject* type, QoreObject* self,
+        qore_classid_t cid, const QoreListNode* args);
+
+    //! Calls the Qore method that overrides a method of a Python class; the function of the generated type
+    /** @param name the name of the Qore method
+        @param args the arguments of the Python call; the first is the Python object
+    */
+    DLLLOCAL static PyObject* callQoreOverride(PyObject* name, PyObject* args);
+
     //! Adds the class methods of the type and its base classes as static methods bound to the type
     DLLLOCAL void addPythonClassMethods(PyTypeObject* type, QorePythonClass* cls);
 
@@ -468,6 +496,12 @@ public:
 
     DLLLOCAL static QorePythonProgram* getExecutionContext();
 
+    //! Returns the Qore object of the Python object of a Qore object whose class inherits a Python class
+    /** @return the Qore object (no reference is added: the Python object holds a weak reference to it), or nullptr if
+        the object is not the Python object of such a Qore object
+    */
+    DLLLOCAL static QoreObject* getQoreSubclassObject(PyObject* pyobj);
+
     DLLLOCAL static QorePythonProgram* getContext();
 
     //! Static initialization
@@ -527,6 +561,12 @@ protected:
     //! maps types to classes
     typedef std::map<PyTypeObject*, QorePythonClass*> clmap_t;
     clmap_t clmap;
+
+    //! the Python types of the objects of Qore classes that inherit Python classes: (Qore class ID, Python class) ->
+    //! a generated subclass of the Python class, or the Python class if the Qore class overrides no method of it;
+    //! holds references (released in deleteIntern()); guarded by qpy_subclass_type_lock
+    typedef std::map<std::pair<qore_classid_t, PyTypeObject*>, PyObject*> subclass_type_map_t;
+    subclass_type_map_t subclass_type_map;
 
     //! maps python functions to Qore functions
     typedef std::map<PyObject*, QoreExternalFunction*> flmap_t;

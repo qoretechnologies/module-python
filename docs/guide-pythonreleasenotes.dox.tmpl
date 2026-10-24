@@ -37,6 +37,10 @@
       their first argument, which was dropped; all the base classes of a %Python class are parent classes of its
       %Qore class (only the first was) (see @ref python_classes_in_qore;
       <a href="https://github.com/qoretechnologies/qore/issues/5499">issue 5499</a>)
+    - %Python code calls the %Qore overrides of the methods of a %Python class that a %Qore class inherits (ex:
+      \c self.hook() in a method of the %Python class called the %Python method), also from \c __init__(), and the
+      %Python object of such a %Qore object is the %Qore object when it is returned to %Qore (see
+      @ref python_qore_overrides; <a href="https://github.com/qoretechnologies/qore/issues/5499">issue 5499</a>)
     - keyword arguments in calls from %Python to %Qore callables and constructors raise a \c TypeError, as they do for
       %Qore functions and methods, instead of being ignored (ex: <tt>Mutex(bogus=1)</tt> created a \c Mutex)
       (<a href="https://github.com/qoretechnologies/qore/issues/5498">issue 5498</a>)

@@ -535,6 +535,10 @@ DLLLOCAL int qpy_register_fork_handlers();
 //! Removes the fork handlers registered with qpy_register_fork_handlers()
 DLLLOCAL void qpy_unregister_fork_handlers();
 
+//! Serializes the cache of the Python types of Qore subclasses of Python classes (a leaf lock; see
+//! QorePythonProgram::getQoreSubclassType())
+DLLLOCAL extern QoreThreadLock qpy_subclass_type_lock;
+
 //! Initializes the type used to deregister threads that Python created; called once in the main interpreter
 DLLLOCAL int qore_python_thread_registration_init();
 

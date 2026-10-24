@@ -709,6 +709,17 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
             }
             obj_sink.clear();
 
+            {
+                subclass_type_map_t types;
+                {
+                    AutoLocker al(qpy_subclass_type_lock);
+                    types.swap(subclass_type_map);
+                }
+                for (auto& i : types) {
+                    Py_DECREF(i.second);
+                }
+            }
+
             module.purge();
             python_code.purge();
 
@@ -3212,6 +3223,14 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
         }
     }
 
+    // the Python object of a Qore object whose class inherits a Python class is the Qore object
+    {
+        QoreObject* qobj = getQoreSubclassObject(val);
+        if (qobj && qobj->isValid()) {
+            return qobj->refSelf();
+        }
+    }
+
     QoreClass* cls = getCreateQorePythonClass(xsink, type);
     if (!cls) {
         assert(*xsink);
@@ -4364,6 +4383,256 @@ void QorePythonProgram::addPythonClassMethods(PyTypeObject* type, QorePythonClas
     }
 }
 
+// the slot of the Python objects of Qore objects whose classes inherit Python classes that holds the Qore object
+static constexpr const char* QORE_PYTHON_QORE_OBJECT_SLOT = "_qore_object_";
+// the name of the capsule in the slot
+static constexpr const char* QORE_PYTHON_QORE_OBJECT_CAPSULE_NAME = "qoreloader.qore_object";
+
+// the capsule holds a weak reference to the Qore object (the Qore object holds the Python object)
+static void qore_python_qore_object_capsule_destructor(PyObject* capsule) {
+    QoreObject* obj = static_cast<QoreObject*>(PyCapsule_GetPointer(capsule, QORE_PYTHON_QORE_OBJECT_CAPSULE_NAME));
+    assert(obj);
+    // releases only the memory of a deleted object: no Qore code runs
+    obj->tDeref();
+}
+
+static PyMethodDef qore_override_def = {"qore_override", QorePythonProgram::callQoreOverride, METH_VARARGS,
+    "calls the Qore method that overrides the Python method"};
+
+QoreObject* QorePythonProgram::getQoreSubclassObject(PyObject* pyobj) {
+    // only the objects of the generated types have the slot (a member descriptor in the dict of the type)
+    PyTypeObject* type = Py_TYPE(pyobj);
+    PyObject* descr = type->tp_dict ? PyDict_GetItemString(type->tp_dict, QORE_PYTHON_QORE_OBJECT_SLOT) : nullptr;
+    if (!descr || Py_TYPE(descr) != &PyMemberDescr_Type) {
+        return nullptr;
+    }
+    QorePythonReferenceHolder capsule(PyObject_GetAttrString(pyobj, QORE_PYTHON_QORE_OBJECT_SLOT));
+    if (!capsule || !PyCapsule_IsValid(*capsule, QORE_PYTHON_QORE_OBJECT_CAPSULE_NAME)) {
+        PyErr_Clear();
+        return nullptr;
+    }
+    return static_cast<QoreObject*>(PyCapsule_GetPointer(*capsule, QORE_PYTHON_QORE_OBJECT_CAPSULE_NAME));
+}
+
+PyObject* QorePythonProgram::getQoreSubclassType(ExceptionSink* xsink, const QoreClass& qcls, PyTypeObject* pycls) {
+    subclass_type_map_t::key_type key(qcls.getID(), pycls);
+    {
+        AutoLocker al(qpy_subclass_type_lock);
+        subclass_type_map_t::iterator i = subclass_type_map.find(key);
+        if (i != subclass_type_map.end()) {
+            return i->second;
+        }
+    }
+
+    // the methods of the Python class that the Qore class overrides call the Qore methods: the public normal methods
+    // with the names of the methods of the Python class (in method resolution order) that are not implemented by
+    // the Qore classes of Python classes
+    QorePythonReferenceHolder dict(PyDict_New());
+    if (!dict) {
+        checkPythonException(xsink);
+        return nullptr;
+    }
+    bool overrides = false;
+    PyObject* mro = pycls->tp_mro;
+    Py_ssize_t mro_size = mro && PyTuple_Check(mro) ? PyTuple_GET_SIZE(mro) : 0;
+    strset_t names;
+    for (Py_ssize_t i = 0; i < mro_size; ++i) {
+        PyTypeObject* t = reinterpret_cast<PyTypeObject*>(PyTuple_GET_ITEM(mro, i));
+        if (!t->tp_dict) {
+            continue;
+        }
+        PyObject* name, * value;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(t->tp_dict, &pos, &name, &value)) {
+            const char* namestr = PyUnicode_Check(name) ? PyUnicode_AsUTF8(name) : nullptr;
+            if (!namestr) {
+                PyErr_Clear();
+                continue;
+            }
+            if (!names.insert(namestr).second) {
+                continue;
+            }
+            // only methods: static methods and class methods are static methods in Qore
+            PyTypeObject* vtype = Py_TYPE(value);
+            if (vtype == &PyStaticMethod_Type || vtype == &PyClassMethod_Type || !PyCallable_Check(value)) {
+                continue;
+            }
+            QoreString qname;
+            if (qore_python_is_special_method_name(namestr)) {
+                qname.sprintf("_%s", namestr);
+            } else {
+                qname.set(namestr);
+            }
+            ClassAccess access;
+            const QoreMethod* m = qcls.findMethod(qname.c_str(), access);
+            if (!m || m->isStatic() || access != Public
+                || dynamic_cast<const QorePythonClass*>(m->getClass())
+                || m->getClass()->getID() == QC_PYTHONBASEOBJECT->getID()) {
+                continue;
+            }
+            QorePythonReferenceHolder qname_obj(PyUnicode_FromStringAndSize(qname.c_str(), qname.size()));
+            QorePythonReferenceHolder func(qname_obj ? PyCFunction_NewEx(&qore_override_def, *qname_obj, nullptr)
+                : nullptr);
+            // an instance method: the object is passed as the first argument
+            QorePythonReferenceHolder meth(func ? PyInstanceMethod_New(*func) : nullptr);
+            if (!meth || PyDict_SetItem(*dict, name, *meth) < 0) {
+                checkPythonException(xsink);
+                return nullptr;
+            }
+            overrides = true;
+        }
+    }
+
+    QorePythonReferenceHolder type;
+    if (overrides) {
+        QorePythonReferenceHolder slots(Py_BuildValue("(s)", QORE_PYTHON_QORE_OBJECT_SLOT));
+        QorePythonReferenceHolder module_name(PyObject_GetAttrString(reinterpret_cast<PyObject*>(pycls),
+            "__module__"));
+        if (!module_name) {
+            PyErr_Clear();
+        }
+        QorePythonReferenceHolder qualname(PyUnicode_FromString(qcls.getName()));
+        if (!slots || !qualname || PyDict_SetItemString(*dict, "__slots__", *slots) < 0
+            || PyDict_SetItemString(*dict, "__qualname__", *qualname) < 0
+            || (module_name && PyDict_SetItemString(*dict, "__module__", *module_name) < 0)) {
+            checkPythonException(xsink);
+            return nullptr;
+        }
+        type = PyObject_CallFunction(reinterpret_cast<PyObject*>(&PyType_Type), "s(O)O", qcls.getName(), pycls,
+            *dict);
+        if (!type) {
+            if (!checkPythonException(xsink)) {
+                xsink->raiseException("PYTHON-ERROR", "cannot create the Python type of Qore class '%s'",
+                    qcls.getName());
+            }
+            xsink->appendLastDescription(" (while creating the Python type of Qore class '%s', which overrides "
+                "methods of Python class '%s')", qcls.getName(), pycls->tp_name);
+            return nullptr;
+        }
+    } else {
+        Py_INCREF(pycls);
+        type = reinterpret_cast<PyObject*>(pycls);
+    }
+
+    AutoLocker al(qpy_subclass_type_lock);
+    // another thread can have created the type meanwhile; the map keeps the first one
+    std::pair<subclass_type_map_t::iterator, bool> rv = subclass_type_map.insert(
+        subclass_type_map_t::value_type(key, *type));
+    if (rv.second) {
+        type.release();
+    }
+    return rv.first->second;
+}
+
+int QorePythonProgram::newQoreSubclassObject(ExceptionSink* xsink, PyTypeObject* type, QoreObject* self,
+        qore_classid_t cid, const QoreListNode* args) {
+    QorePythonReferenceHolder py_args(getPythonTupleValue(xsink, args));
+    if (*xsink) {
+        return -1;
+    }
+    // the object holds its Qore object, and is the private data of the Qore object, before it is initialized, so that
+    // the Qore overrides, and the methods of the Python class that they call, can be called from its __init__()
+    // method as well
+    QorePythonReferenceHolder pyobj(type->tp_new(type, *py_args, nullptr));
+    if (!pyobj) {
+        checkPythonException(xsink);
+        return -1;
+    }
+    self->tRef();
+    QorePythonReferenceHolder capsule(PyCapsule_New(self, QORE_PYTHON_QORE_OBJECT_CAPSULE_NAME,
+        qore_python_qore_object_capsule_destructor));
+    if (!capsule) {
+        self->tDeref();
+        checkPythonException(xsink);
+        return -1;
+    }
+    if (PyObject_SetAttrString(*pyobj, QORE_PYTHON_QORE_OBJECT_SLOT, *capsule) < 0) {
+        checkPythonException(xsink);
+        return -1;
+    }
+    PyObject* obj = *pyobj;
+    // the private data owns the reference; if the initialization fails, it is released with the object
+    self->setPrivate(cid, new QorePythonPrivateData(this, pyobj.release()));
+    if (type->tp_init && type->tp_init(obj, *py_args, nullptr) < 0) {
+        checkPythonException(xsink);
+        return -1;
+    }
+    return 0;
+}
+
+PyObject* QorePythonProgram::callQoreOverride(PyObject* name, PyObject* args) {
+    assert(PyUnicode_Check(name));
+    assert(PyTuple_Check(args));
+    const char* mname = PyUnicode_AsUTF8(name);
+    if (!mname) {
+        return nullptr;
+    }
+    QoreObject* obj = PyTuple_GET_SIZE(args) ? getQoreSubclassObject(PyTuple_GET_ITEM(args, 0)) : nullptr;
+    if (!obj) {
+        PyErr_Format(PyExc_TypeError, "the Qore method %s() must be called on the Python object of a Qore object",
+            mname);
+        return nullptr;
+    }
+
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
+    // the thread state that Python called us with; it must be current again before returning
+    PyThreadState* entry_tstate = _qore_safe_thread_state_get();
+
+    QorePythonProgram* pypgm = QorePythonProgram::getExecutionContext();
+    // the object is kept while its method runs, also if its slot is changed meanwhile; a deleted object raises
+    // OBJECT-ALREADY-DELETED, as with Qore's weak references
+    struct WeakObjectHolder {
+        QoreObject* obj;
+        DLLLOCAL WeakObjectHolder(QoreObject* obj) : obj(obj) {
+            obj->tRef();
+        }
+        DLLLOCAL ~WeakObjectHolder() {
+            obj->tDeref();
+        }
+    } weak_holder(obj);
+
+    ExceptionSink xsink;
+    {
+        QorePythonHelper qph(pypgm, &xsink);
+        if (!xsink) {
+            ReferenceHolder<QoreListNode> qargs(pypgm->getQoreListFromTuple(&xsink, args, 1), &xsink);
+            if (!xsink) {
+                ValueHolder rv(&xsink);
+                {
+                    // the method is Qore code, which runs without the GIL, as other Qore code called from Python
+                    QorePythonReleaseGilHelper prgh;
+                    // the Python frames of the call are part of the Qore call stack
+                    QorePythonStackLocationHelper slh(qph.getOldProgram());
+                    rv = obj->evalMethod(mname, *qargs, &xsink);
+                }
+                QorePythonReferenceHolder py_rv;
+                if (!xsink) {
+                    py_rv = pypgm->getPythonValue(*rv, &xsink);
+                }
+                // the arguments and the result of the call are released without the GIL if this can run Qore code
+                qore_python_release(rv);
+                qore_python_release(qargs);
+                if (!xsink) {
+                    assert(py_rv);
+                    return py_rv.release();
+                }
+            }
+        }
+    }
+
+    // the exception must be raised in the thread state that Python called us with
+    PyThreadState* exit_tstate = _qore_safe_thread_state_get();
+    if (exit_tstate != entry_tstate) {
+        PyThreadState_Swap(entry_tstate);
+    }
+    assert(xsink);
+    pypgm->raisePythonException(xsink);
+    return nullptr;
+}
+
 void QorePythonProgram::addPythonTypeAttributes(PyTypeObject* type, QorePythonClass* cls, strset_t& names) {
     if (type->tp_dict) {
         PyObject* key, * value;
@@ -4544,6 +4813,22 @@ void QorePythonProgram::execPythonConstructor(const QoreMethod& meth, PyObject* 
 
     // save Qore object for any Python class that needs it
     QorePythonImplicitQoreArgHelper qpiqoh(self);
+    // the object of a Qore class that inherits the Python class is an object of a generated subclass whose methods
+    // that the Qore class overrides call the Qore methods
+    PyObject* type = pycls;
+    const QoreClass* qcls = self->getClass();
+    if (qcls != meth.getClass() && !dynamic_cast<const QorePythonClass*>(qcls)) {
+        type = pypgm->getQoreSubclassType(xsink, *qcls, reinterpret_cast<PyTypeObject*>(pycls));
+        if (!type) {
+            assert(*xsink);
+            return;
+        }
+    }
+    if (type != pycls) {
+        pypgm->newQoreSubclassObject(xsink, reinterpret_cast<PyTypeObject*>(type), self, meth.getClass()->getID(),
+            args);
+        return;
+    }
     QorePythonReferenceHolder pyobj(pypgm->callPythonInternal(xsink, pycls, args));
     if (*xsink) {
         return;

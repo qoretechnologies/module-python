@@ -191,6 +191,25 @@ Qore exception in its arguments, and a Qore exception was then guessed from a `R
 `QorePythonStackLocationHelper` adds the Python frames to the Qore call stack of Qore code called from Python (Qore
 methods, callables and functions), starting with the innermost frame (`sys._getframe(0)`).
 
+## Qore Classes Inheriting Python Classes
+
+`execPythonConstructor()` runs for the Qore class of the Python class; when the object's class is a Qore class (not a
+`QorePythonClass`), `getQoreSubclassType()` returns a generated Python subclass for the pair (Qore class, Python
+class), cached in `subclass_type_map` (references released in `deleteIntern()`; guarded by the leaf lock
+`qpy_subclass_type_lock`, which has fork handlers), or the Python class itself if the Qore class overrides none of its
+methods.  For each method name in the Python class's MRO whose `findMethod()` result is a public normal method of a
+class that is not a `QorePythonClass`, the subclass has an instance method (`PyInstanceMethod` of a `PyCFunction`
+whose self is the Qore method name) calling `callQoreOverride()`, which runs the Qore method with `evalMethod()`
+without the GIL, as other Qore calls from Python.
+
+The subclass has `__slots__ = ('_qore_object_',)`: `newQoreSubclassObject()` creates the object with `tp_new`, sets
+the slot to a capsule holding a weak (`tRef()`) reference to the Qore object (the Qore object owns the Python object
+through its private data, so a strong reference would be a cycle), sets the private data, and then runs `tp_init`, so
+the overrides (and the Python methods they call through the Qore class of the Python class) work from `__init__()`.
+A call on a deleted Qore object raises `OBJECT-ALREADY-DELETED`, as with Qore's weak references.  `getQoreValue()`
+returns the Qore object for such a Python object (`getQoreSubclassObject()`, which checks for the slot descriptor in
+the type's dict first).
+
 ## Sub-Interpreter Management
 
 ### Creation Flow

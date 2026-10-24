@@ -50,6 +50,52 @@ p.issueModuleCmd("python", "import math");
     after its %Qore class was created are called with all the arguments; calling an attribute that is not callable
     raises a \c METHOD-DOES-NOT-EXIST exception.
 
+    @subsection python_qore_overrides Qore Classes Inheriting Python Classes
+
+    When a %Qore class inherits a %Python class and overrides its methods, %Python code calls the %Qore overrides:
+    the %Python object of a %Qore object of such a class is an object of a %Python subclass of the %Python class,
+    created for the %Qore class, whose methods that the %Qore class overrides (with public normal methods) call the
+    %Qore methods.  The overrides are called also from the \c __init__() method of the %Python class, and a %Qore
+    override can call the %Python method with the name of the parent class (ex: \c Base::hook()).  When the %Python
+    object is returned to %Qore, it is the %Qore object.  A %Qore exception raised by an override is raised in the
+    %Python code that called it (see @ref python_exceptionsguide).
+
+    @par Example:
+    @code{.py}
+%modern
+%requires python
+
+Program pgm(PO_NEW_STYLE);
+pgm.issueModuleCmd("python", "parse report.py #
+class Report:
+    def render(self):
+        return '[' + self.title() + ']'
+    def title(self):
+        return 'report'
+");
+pgm.issueModuleCmd("python", "export-class Report");
+pgm.parse("
+class SalesReport inherits Report {
+    string title() {
+        return 'sales';
+    }
+}
+string sub render() {
+    return (new SalesReport()).render();
+}
+", "sales");
+
+# "[sales]": Report.render() in Python calls the Qore override
+printf("%s\n", pgm.callFunction("render"));
+    @endcode
+
+    @note The %Python object of such a %Qore object holds a weak reference to it: calling an override after the
+    %Qore object was deleted raises an \c OBJECT-ALREADY-DELETED exception.  Before %Python 3.15, a %Python class whose
+    objects cannot have an attribute slot (ex: a subclass of \c tuple) cannot be inherited by a %Qore class that
+    overrides its methods.
+    The attributes of the %Python object cannot be read or set as members of the %Qore object of a %Qore subclass
+    yet (see <a href="https://github.com/qoretechnologies/qore/issues/5511">issue 5511</a>).
+
     @par Example:
     @code{.py}
 %modern

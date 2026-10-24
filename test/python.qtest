@@ -148,6 +148,7 @@ class PythonTest inherits Test {
         addTestCase("named argument calls", \namedArgumentTest());
         addTestCase("keyword arguments between Qore and Python", \keywordArgumentTest());
         addTestCase("class methods, callable attributes and base classes of Python classes", \pythonClassTest());
+        addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
         addTestCase("import test", \importTest());
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
@@ -2765,6 +2766,138 @@ string sub made_name() { return Sub::make().name(); }
         assertEq("Base", pgm.callFunction("base_name"));
         assertEq("Sub", pgm.callFunction("sub_name"));
         assertEq("Sub", pgm.callFunction("made_name"));
+    }
+
+    # the Python object of a Qore object whose class inherits a Python class is an object of a generated subclass
+    # whose methods that the Qore class overrides call the Qore methods, so that Python code calls the Qore overrides
+    qoreOverrideTest() {
+        Program pgm(PO_NEW_STYLE);
+        pgm.issueModuleCmd("python", "parse override_test.py #
+class Base:
+    def __init__(self, tag='base'):
+        self.tag = tag
+        self.init_hook = self.hook()
+    def run(self, x):
+        return 'run:' + self.hook() + ':' + str(self.calc(x))
+    def hook(self):
+        return 'python-hook'
+    def calc(self, x):
+        return x
+    def fail(self):
+        return self.raising()
+    def raising(self):
+        return 'python'
+    def copy(self):
+        return 'python-copy'
+    def use_copy(self):
+        return self.copy()
+    def secret(self):
+        return 'python-secret'
+    def use_secret(self):
+        return self.secret()
+    def me(self):
+        return self
+    def get(self, name):
+        return getattr(self, name)
+
+class Slotted:
+    __slots__ = ('a',)
+    def run(self):
+        return 'slotted:' + self.hook()
+    def hook(self):
+        return 'python'
+
+class Tup(tuple):
+    __slots__ = ()
+    def run(self):
+        return self.hook()
+    def hook(self):
+        return 'python'
+
+saved = []
+def save(obj):
+    saved.append(obj)
+def call_saved():
+    return saved.pop().hook()
+");
+        foreach string c in (("Base", "Slotted", "Tup")) {
+            pgm.issueModuleCmd("python", "export-class " + c);
+        }
+        pgm.issueModuleCmd("python", "export-func save");
+        pgm.issueModuleCmd("python", "export-func call_saved");
+        pgm.parse("
+class Q inherits Base {
+    string hook() { return 'qore-hook'; }
+    int calc(int x) { return x * 10; }
+    string raising() { throw 'QORE-ERR', 'from qore'; }
+    string _copy() { return 'qore-copy'; }
+    private string secret() { return 'qore-secret'; }
+}
+class R inherits Q {
+    string hook() { return 'r-hook:' + Q::hook(); }
+}
+class Super inherits Base {
+    string hook() { return 'super:' + Base::hook(); }
+}
+class S inherits Slotted {
+    string hook() { return 'qore'; }
+}
+class T inherits Tup {
+    string hook() { return 'qore'; }
+}
+object sub new_q() { return new Q(); }
+object sub new_r() { return new R(); }
+object sub new_super() { return new Super(); }
+object sub new_s() { return new S(); }
+object sub new_t() { return new T(); }
+", "override_test");
+
+        object q = pgm.callFunction("new_q");
+        assertEq("qore-hook", q.hook());
+        # Python code calls the Qore overrides, with arguments and results converted
+        assertEq("run:qore-hook:50", q.run(5));
+        # also from __init__()
+        # (Python attributes are read with a Python method: the member gate is not inherited by Qore subclasses; see
+        # qoretechnologies/qore#5511)
+        assertEq("qore-hook", q.get("init_hook"));
+        assertEq("base", q.get("tag"));
+        # a Qore exception raised by an override passes through the Python code
+        assertThrows("QORE-ERR", "from qore", \q.fail());
+        # methods with special names in Qore (copy() is _copy() in Qore)
+        assertEq("qore-copy", q.use_copy());
+        # private Qore methods do not override Python methods
+        assertEq("python-secret", q.use_secret());
+        # the Python object is the Qore object in Qore
+        assertTrue(q.me() == q);
+
+        # a subclass of the Qore class: its own overrides
+        object r = pgm.callFunction("new_r");
+        assertEq("run:r-hook:qore-hook:30", r.run(3));
+        # an override calling the Python method of the base class
+        object sup = pgm.callFunction("new_super");
+        assertEq("run:super:python-hook:1", sup.run(1));
+
+        # a Python class with __slots__
+        object s = pgm.callFunction("new_s");
+        assertEq("slotted:qore", s.run());
+
+        # a Python class whose objects cannot have the slot before Python 3.15 (a subclass of tuple, a variable-size
+        # type)
+        if (PythonProgram::evalExpression("__import__('sys').version_info >= (3, 15)")) {
+            object t = pgm.callFunction("new_t");
+            assertEq("qore", t.run());
+        } else {
+            assertThrows("builtins.TypeError", "while creating the Python type of Qore class 'T'",
+                \pgm.callFunction(), "new_t");
+        }
+
+        # an override called on a Qore object that was deleted
+        {
+            object q1 = pgm.callFunction("new_q");
+            pgm.callFunction("save", q1);
+            delete q1;
+        }
+        assertThrows("OBJECT-ALREADY-DELETED", \pgm.callFunction(), "call_saved");
     }
 
     # Python values that a Qore value cannot represent raise an exception instead of crashing the process: containers
