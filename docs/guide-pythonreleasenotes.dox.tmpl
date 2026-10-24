@@ -26,6 +26,12 @@
     - Added the @ref Python::PythonVersion "PythonVersion" constant providing the Python version string
 
     <b>Bug Fixes:</b>
+    - threads created by %Python that call %Qore concurrently no longer use the %Python thread state of an ended
+      thread, which aborted free-threaded %Python (\c "_PyThreadState_Attach: non-NULL old thread state") and could
+      corrupt the thread states of an interpreter: the cleanup of an ended thread was skipped when another thread held
+      the module's thread lock, and the next thread given its %Qore thread ID found its thread state; a cached thread
+      state is now also only used by the native thread that it belongs to
+      (<a href="https://github.com/qoretechnologies/qore/issues/5494">issue 5494</a>)
     - %Qore code that runs when %Python releases %Qore values (the destructors of objects held by a %Qore closure or
       call reference that %Python releases, of the arguments and results of calls from %Python to %Qore, and of
       member values read from %Python) runs without the GIL, so it can no longer deadlock with a thread that holds a

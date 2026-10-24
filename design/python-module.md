@@ -181,6 +181,18 @@ Thread states are cached in `py_thr_map` (per-PythonProgram, per-thread):
 - Thread states are reused across `setContext()/releaseContext()` cycles
 - When a thread exits, its thread states are cleaned up
 
+## Thread State Cache
+
+`py_thr_map` caches the thread state of each interpreter for each Qore thread ID (`q_gettid()`), and Qore gives the ID
+of a deregistered thread to the next thread.  `pythonThreadCleanup()` (a Qore thread cleanup function) removes the
+entries of an ended thread; it skipped the cleanup when `py_thr_lck` was held by another thread (it used `trylock()`,
+for issue #4651: static process destruction, which it still detects with `q_libqore_exiting()`), so the next thread
+with the ID found the state of the ended thread, possibly the memory of the state of another running thread.
+`setContext()` also checks that a cached state belongs to the current native thread (`PyThreadState::thread_id`) and
+drops it otherwise, and debug builds assert that the state used belongs to the thread.  Test: `concurrent_rounds()` in
+`test/standalone-threads.py` (a stress test: the skipped cleanup depends on timing; it fails reliably with
+free-threaded Python without the fix).
+
 ## Stale TSS Handling
 
 ### The Problem

@@ -42,6 +42,45 @@ def lock_across_calls():
     return "unlocked"
 
 
+def concurrent_rounds():
+    """Threads created in successive rounds call a Qore user function concurrently.
+
+    Each round's threads get the Qore thread IDs of the previous round's threads, which have ended.  The cleanup of
+    an ended thread was skipped when another thread held the module's thread lock, so the thread state cached for its
+    Qore thread ID was then used by the new thread, although it was the state of the ended thread (or the memory of
+    the state of another running thread), which aborted free-threaded Python ("_PyThreadState_Attach: non-NULL old
+    thread state", or a critical section unlocked on the wrong state).  The skipped cleanup depends on the timing of
+    the threads, so this is a stress test; debug builds of the module assert that a thread uses its own state.
+    """
+    from qore.__root__.Qore import Program
+
+    program = Program()
+    program.parse("%new-style\nint sub twice(int i) { return i * 2; }\n", "rounds")
+    threads_per_round = 8
+    calls = 400
+    expected = sorted(sum((i + k) * 2 for i in range(calls)) for k in range(threads_per_round))
+    for _round in range(40):
+        barrier = threading.Barrier(threads_per_round)
+        lock = threading.Lock()
+        results = []
+
+        def worker(offset):
+            barrier.wait()
+            total = 0
+            for i in range(calls):
+                total += program.callFunction("twice", i + offset)
+            with lock:
+                results.append(total)
+
+        threads = [threading.Thread(target=worker, args=(k,)) for k in range(threads_per_round)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert sorted(results) == expected, "concurrent calls in round %d: %r" % (_round, results)
+    return "ok"
+
+
 def main():
     assert in_thread(lambda: sprintf("%d", 73)) == "73", "a Qore function called in a thread"
     assert in_thread(construct_and_use) == 1, "a Qore object created and used in a thread"
@@ -49,6 +88,7 @@ def main():
     tid = in_thread(gettid)
     assert tid > 0, "the thread had a Qore thread ID"
     assert tid not in thread_list(), "the ended thread is deregistered from Qore"
+    assert concurrent_rounds() == "ok", "threads reusing the Qore thread IDs of ended threads call Qore"
     print("Standalone Python threads PASS")
 
 

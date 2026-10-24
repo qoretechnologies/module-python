@@ -935,9 +935,14 @@ void QorePythonProgram::pythonThreadCleanup(void*) {
     //printd(5, "QorePythonProgram::pythonThreadCleanup()\n");
 
     // issue #4651: when called when the Qore library and the python module are initialized from Java during static
-    // process destruction, exit handlers may have already destroyed the static objects in this module
+    // process destruction, exit handlers may have already destroyed the static objects in this module; otherwise the
+    // lock is waited for: when another thread held it, the cleanup was skipped, and the thread states of the ended
+    // thread stayed in the cache under its Qore thread ID, which Qore gives to the next thread
     if (py_thr_lck.trylock()) {
-        return;
+        if (q_libqore_exiting()) {
+            return;
+        }
+        py_thr_lck.lock();
     }
 
     // delete all thread states for the tid
@@ -1313,15 +1318,22 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // 1. PyInterpreterState_Clear was called (sets tstate->interp = NULL)
     // 2. The thread state was somehow detached from the interpreter
     // If the cached thread state isn't in the interpreter's thread list, it's stale/invalid.
+    // The cache is keyed by Qore thread ID, which Qore reuses after a thread is deregistered: the cached state of a
+    // thread that Python created and that has ended (or whose state's memory now holds the state of another thread)
+    // can be found for another native thread, which must not use it (attaching the state of another thread corrupts
+    // the interpreter: "_PyThreadState_Attach: non-NULL old thread state", or critical sections of free-threaded
+    // Python that are unlocked on the wrong state); a state belongs to the native thread that created it
     if (python) {
         bool found = false;
-        PyThreadState* ts = PyInterpreterState_ThreadHead(interpreter);
-        while (ts) {
-            if (ts == python) {
-                found = true;
-                break;
+        if (python->thread_id == PyThread_get_thread_ident()) {
+            PyThreadState* ts = PyInterpreterState_ThreadHead(interpreter);
+            while (ts) {
+                if (ts == python) {
+                    found = true;
+                    break;
+                }
+                ts = PyThreadState_Next(ts);
             }
-            ts = PyThreadState_Next(ts);
         }
         if (!found) {
             printd(5, "QorePythonProgram::setContext() cached thread state %p not found in interpreter %p "
@@ -1496,6 +1508,8 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
 
     printd(5, "QorePythonProgram::setContext() got thread context: %p (GIL: %d hG: %d) refs: %d\n", python,
         PyGILState_Check(), haveGil(), _QORE_GILSTATE_COUNTER_GET(python));
+    // the state belongs to this native thread (see the check of the cached state above)
+    assert(python->thread_id == PyThread_get_thread_ident());
 
     PyGILState_STATE g_state;
     // the TSS state needs to be restored in any case
