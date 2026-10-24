@@ -40,6 +40,30 @@ assert q.get() is m
 assert getattr(q, 'nope', None) is None
     @endcode
 
+    @section python_qore_declarations Static Members, Enums and Hashdecls
+
+    - the public static members of a %Qore class are attributes of its %Python class (and objects) that give and set
+      the current value of the member (\c qoreloader.QoreStaticMember descriptors); setting the attribute of an
+      object sets the member, while assigning to the attribute of the class replaces the descriptor, as for any
+      %Python class attribute
+    - a %Qore enum is a %Python enum class: an \c enum.IntEnum if its values are integers, an \c enum.StrEnum if they
+      are strings, otherwise an \c enum.Enum; a value of the %Qore enum is the member of the %Python enum class, and
+      the member is the value of the %Qore enum in %Qore (an integer or a string is not, as in %Qore)
+    - a hashdecl is a \c dict subclass whose constructor sets the default values of the hashdecl's keys and then its
+      arguments (as \c dict.update()); a hash of the hashdecl is an object of the class, and an object of the class
+      is a hash of the hashdecl in %Qore (a \c dict is not, as a hash is not in %Qore); unknown keys and values of
+      the wrong types raise a %Qore exception when the object is passed to %Qore
+
+    @par Example:
+    @code{.py}
+import qoreloader
+from qore.__root__.Qore import StatInfo, hstat
+
+info = hstat('/tmp')
+# an object of the StatInfo dict subclass
+print(type(info).__name__, info['mode'])
+    @endcode
+
     @section python_inheriting_qore_classes Inheriting Qore Classes in Python
 
     When %Python code inherits %Qore classes, the %Qore constructor must be explicitly called in the %Python

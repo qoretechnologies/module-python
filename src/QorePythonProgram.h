@@ -386,6 +386,26 @@ public:
     */
     DLLLOCAL static PyObject* callQoreOverride(PyObject* name, PyObject* args);
 
+    //! Returns the Python type of a hashdecl: a dict subclass whose objects are hashes of the hashdecl in Qore
+    /** @return a borrowed reference to the type, or nullptr with a Qore exception in \a xsink
+    */
+    DLLLOCAL PyObject* getHashDeclType(ExceptionSink* xsink, const TypedHashDecl* hd);
+
+    //! Imports a Qore enum into a Python module as an enum class (see getEnumType())
+    DLLLOCAL int importQoreEnumToPython(PyObject* mod, const QoreEnumDecl& ed);
+
+    //! Returns the Python enum class of a Qore enum (enum.IntEnum, enum.StrEnum or enum.Enum); its members are the
+    //! values of the Qore enum in Qore
+    /** @return a borrowed reference to the class, or nullptr with a Qore exception in \a xsink
+    */
+    DLLLOCAL PyObject* getEnumType(ExceptionSink* xsink, const QoreEnumDecl* ed);
+
+    //! __init__() of the Python types of hashdecls: sets the default values and then the arguments as dict.update()
+    /** @param capsule holds the hashdecl
+        @param args the arguments; the first is the object
+    */
+    DLLLOCAL static PyObject* hashDeclInit(PyObject* capsule, PyObject* args, PyObject* kwargs);
+
     //! Adds the class methods of the type and its base classes as static methods bound to the type
     DLLLOCAL void addPythonClassMethods(PyTypeObject* type, QorePythonClass* cls);
 
@@ -567,6 +587,16 @@ protected:
     //! holds references (released in deleteIntern()); guarded by qpy_subclass_type_lock
     typedef std::map<std::pair<qore_classid_t, PyTypeObject*>, PyObject*> subclass_type_map_t;
     subclass_type_map_t subclass_type_map;
+
+    //! the Python types of hashdecls (dict subclasses): hashdecl -> type; holds references (released in
+    //! deleteIntern()); guarded by qpy_subclass_type_lock
+    typedef std::map<const TypedHashDecl*, PyObject*> hashdecl_type_map_t;
+    hashdecl_type_map_t hashdecl_type_map;
+
+    //! the Python enum classes of Qore enums: enum -> class; holds references (released in deleteIntern()); guarded by
+    //! qpy_subclass_type_lock
+    typedef std::map<const QoreEnumDecl*, PyObject*> enum_type_map_t;
+    enum_type_map_t enum_type_map;
 
     //! maps python functions to Qore functions
     typedef std::map<PyObject*, QoreExternalFunction*> flmap_t;

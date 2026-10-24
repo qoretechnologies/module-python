@@ -277,6 +277,68 @@ void PythonQoreClass::clearMethods() {
     }
 }
 
+// gives the value of a static member of a Qore class; self is a capsule holding the member
+static PyObject* qore_static_member_get(PyObject* capsule, PyObject* /* unused */) {
+    const QoreExternalStaticMember* mem = static_cast<const QoreExternalStaticMember*>(
+        PyCapsule_GetPointer(capsule, nullptr));
+    assert(mem);
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    ExceptionSink xsink;
+    QoreExternalProgramContextHelper pch(&xsink, qore_python_pgm->getQoreProgram());
+    if (!xsink) {
+        ValueHolder v(&xsink);
+        {
+            QorePythonReleaseGilHelper prgh;
+            v = mem->getValue();
+        }
+        QorePythonReferenceHolder rv(qore_python_pgm->getPythonValue(*v, &xsink));
+        // the value is released without the GIL if this can run Qore code
+        qore_python_release(v);
+        if (!xsink) {
+            return rv.release();
+        }
+    }
+    qore_python_pgm->raisePythonException(xsink);
+    return nullptr;
+}
+
+// sets the value of a static member of a Qore class; self is a capsule holding the member
+static PyObject* qore_static_member_set(PyObject* capsule, PyObject* value) {
+    const QoreExternalStaticMember* mem = static_cast<const QoreExternalStaticMember*>(
+        PyCapsule_GetPointer(capsule, nullptr));
+    assert(mem);
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    ExceptionSink xsink;
+    QoreExternalProgramContextHelper pch(&xsink, qore_python_pgm->getQoreProgram());
+    if (!xsink) {
+        ValueHolder v(qore_python_pgm->getQoreValue(&xsink, value), &xsink);
+        if (!xsink) {
+            // assigning the member releases the old value, which can run Qore code
+            QorePythonReleaseGilHelper prgh;
+            mem->setValue(*v, &xsink);
+        }
+        qore_python_release(v);
+        if (!xsink) {
+            Py_RETURN_NONE;
+        }
+    }
+    qore_python_pgm->raisePythonException(xsink);
+    return nullptr;
+}
+
+static PyMethodDef qore_static_member_get_def = {"get", qore_static_member_get, METH_NOARGS,
+    "returns the value of the static member of the Qore class"};
+static PyMethodDef qore_static_member_set_def = {"set", qore_static_member_set, METH_O,
+    "sets the value of the static member of the Qore class"};
+
 void PythonQoreClass::populateClass(QorePythonProgram* pypgm, const QoreClass& qcls, clsset_t& cls_set,
         cstrset_t& meth_set, bool skip_first) {
     //printd(5, "PythonQoreClass::populateClass() cls: %s cs: %d ms: %d\n", qcls.getName(), (int)cls_set.size(),
@@ -364,6 +426,42 @@ void PythonQoreClass::populateClass(QorePythonProgram* pypgm, const QoreClass& q
                 assert(val);
                 PyDict_SetItemString(py_type->tp_dict, c.getName(), *val);
             }
+        }
+    }
+
+    // the public static members are descriptors giving and setting their current values
+    {
+        QorePythonReferenceHolder descr_type;
+        QoreClassStaticMemberIterator i(qcls);
+        while (i.next()) {
+            const QoreExternalStaticMember& mem = i.getMember();
+            if (mem.getAccess() != Public) {
+                continue;
+            }
+            const char* mname = i.getName();
+            cstrset_t::iterator mi = meth_set.lower_bound(mname);
+            if (mi != meth_set.end() && !strcmp(*mi, mname)) {
+                continue;
+            }
+            if (!descr_type) {
+                descr_type = qore_python_get_qore_static_member_type();
+                if (!descr_type) {
+                    PyErr_Clear();
+                    break;
+                }
+            }
+            QorePythonReferenceHolder capsule(PyCapsule_New((void*)&mem, nullptr, nullptr));
+            QorePythonReferenceHolder get(capsule ? PyCFunction_NewEx(&qore_static_member_get_def, *capsule,
+                nullptr) : nullptr);
+            QorePythonReferenceHolder set(capsule ? PyCFunction_NewEx(&qore_static_member_set_def, *capsule,
+                nullptr) : nullptr);
+            QorePythonReferenceHolder descr(get && set
+                ? PyObject_CallFunction(*descr_type, "sOO", mname, *get, *set) : nullptr);
+            if (!descr || PyDict_SetItemString(py_type->tp_dict, mname, *descr) < 0) {
+                PyErr_Clear();
+                continue;
+            }
+            meth_set.insert(mi, mname);
         }
     }
 

@@ -802,6 +802,11 @@ DLLLOCAL PyMODINIT_FUNC PyInit_qoreloader();
 */
 DLLLOCAL PyObject* qore_python_get_qore_exception_type();
 
+//! returns a new reference to the qoreloader.QoreStaticMember type of the current interpreter
+/** Returns nullptr with a Python exception set on error.
+*/
+DLLLOCAL PyObject* qore_python_get_qore_static_member_type();
+
 //! Creates the global QOre Python program object
 DLLLOCAL int init_global_qore_python_pgm();
 

@@ -35,6 +35,54 @@ class PythonSandboxTestReader {
     }
 }
 
+#! declarations used to check the static members, enums and hashdecls of Qore in Python
+namespace PythonDeclTest {
+    enum Color {
+        Red = 1,
+        Green = 2,
+    }
+
+    enum Mode {
+        Fast = "fast",
+        Slow = "slow",
+    }
+
+    hashdecl Info {
+        int a = 1;
+        string b = "x";
+    }
+
+    class Counter {
+        public {
+            static int count = 1;
+        }
+
+        private {
+            static int hidden = 2;
+        }
+
+        static int get() {
+            return count;
+        }
+    }
+
+    hash<Info> sub make_info() {
+        return <Info>{"a": 5};
+    }
+
+    string sub check_info(hash<Info> h) {
+        return sprintf("%s %d %s", h.fullType(), h.a, h.b);
+    }
+
+    int sub color_val(Color c) {
+        return c;
+    }
+
+    Color sub get_color() {
+        return Color::Green;
+    }
+}
+
 #! has declared public and private members; used to check the attributes of Qore objects in Python
 class PythonAttrDecl {
     public {
@@ -184,6 +232,7 @@ class PythonTest inherits Test {
         addTestCase("class methods, callable attributes and base classes of Python classes", \pythonClassTest());
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
         addTestCase("identity, attributes and weak references of Qore objects in Python", \qoreObjectProtocolTest());
+        addTestCase("static members, enums and hashdecls of Qore in Python", \qoreDeclarationTest());
         addTestCase("import test", \importTest());
         addTestCase("qoreloader shared namespace import", \qoreloaderSharedNamespaceImportTest());
         addTestCase("qoreloader multi-namespace import", \qoreloaderMultiNamespaceImportTest());
@@ -3042,6 +3091,71 @@ def run():
         assertEq((True, True, False, True), r.dir);
         assertTrue(r.weak);
         assertTrue(r.weak_dead);
+    }
+
+    # static members of Qore classes are descriptors of their current values; Qore enums are Python enum classes whose
+    # members are the Qore enum values; hashdecls are dict subclasses whose objects are hashes of the hashdecl in Qore
+    qoreDeclarationTest() {
+        PythonProgram p("
+from qore.__root__.PythonDeclTest import Color, Mode, Info, Counter, make_info, check_info, color_val, get_color
+
+def error(f):
+    try:
+        f()
+    except Exception as e:
+        return type(e).__name__ + ': ' + str(e)
+
+def run():
+    r = {}
+    r['static'] = [Counter.count, hasattr(Counter, 'hidden')]
+    o = Counter()
+    o.count = 5
+    r['static_set'] = [Counter.get(), Counter.count, o.count]
+    r['color'] = [Color.__mro__[1].__name__, Color.Red == 1, Color['Green'].value, get_color() is Color.Green]
+    r['mode'] = [Mode.__mro__[1].__name__, Mode.Fast == 'fast']
+    r['color_val'] = color_val(Color.Green)
+    r['color_int'] = error(lambda: color_val(2))
+    i = Info(a=3)
+    r['info'] = [dict(i), type(i).__name__, isinstance(i, dict)]
+    m = make_info()
+    r['made'] = [type(m).__name__, dict(m)]
+    r['check'] = check_info(Info(a=7, b='y'))
+    r['check_dict'] = error(lambda: check_info({'a': 8}))
+    r['bad_key'] = error(lambda: check_info(Info(zz=1)))
+    return r
+
+def static_value():
+    return Counter.count
+", "decls.py");
+
+        hash<auto> r = p.callFunction("run");
+        assertEq((1, False), r.static);
+        assertEq((5, 5, 5), r.static_set);
+        # the descriptor gives the current value of the static member
+        PythonDeclTest::Counter::count = 9;
+        assertEq(9, p.callFunction("static_value"));
+
+        assertEq(("IntEnum", True, 2, True), r.color);
+        assertEq(("StrEnum", True), r.mode);
+        # an enum member is the Qore enum value
+        assertEq(2, r.color_val);
+        # an int is not a value of the enum, as in Qore
+        assertRegex("RUNTIME-OVERLOAD-ERROR", r.color_int);
+        # a Qore enum value is the member of the Python enum class
+        auto color = p.evalExpression("get_color()");
+        assertEq("enum<Color>", color.fullType());
+        assertEq(PythonDeclTest::Color::Green, color);
+
+        assertEq(({"a": 3, "b": "x"}, "Info", True), r.info);
+        assertEq(("Info", {"a": 5, "b": "x"}), r.made);
+        assertEq("hash<Info> 7 y", r.check);
+        # a dict is not a hash of the hashdecl, as a hash is not in Qore
+        assertRegex("RUNTIME-OVERLOAD-ERROR", r.check_dict);
+        assertRegex("HASHDECL-INIT-ERROR.*unknown key 'zz'", r.bad_key);
+        # a hash of the hashdecl from Python is a hash of the hashdecl in Qore
+        auto info = p.evalExpression("Info(a=11)");
+        assertEq("hash<Info>", info.fullType());
+        assertEq(11, info.a);
     }
 
     # Python values that a Qore value cannot represent raise an exception instead of crashing the process: containers

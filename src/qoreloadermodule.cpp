@@ -143,6 +143,8 @@ static int init_count = 0;
 struct qoreloader_state {
     //! the qoreloader.QoreException type of the interpreter
     PyObject* qore_exception_type;
+    //! the qoreloader.QoreStaticMember type of the interpreter (the descriptor of the static members of Qore classes)
+    PyObject* qore_static_member_type;
 };
 
 static qoreloader_state* qoreloader_get_state(PyObject* m) {
@@ -153,6 +155,7 @@ static int qoreloader_traverse(PyObject* m, visitproc visit, void* arg) {
     qoreloader_state* st = qoreloader_get_state(m);
     if (st) {
         Py_VISIT(st->qore_exception_type);
+        Py_VISIT(st->qore_static_member_type);
     }
     return 0;
 }
@@ -161,6 +164,7 @@ static int qoreloader_clear(PyObject* m) {
     qoreloader_state* st = qoreloader_get_state(m);
     if (st) {
         Py_CLEAR(st->qore_exception_type);
+        Py_CLEAR(st->qore_static_member_type);
     }
     return 0;
 }
@@ -442,7 +446,57 @@ static int qoreloader_init_exception_type(PyObject* m) {
     return PyModule_AddObjectRef(m, "QoreException", st->qore_exception_type);
 }
 
-PyObject* qore_python_get_qore_exception_type() {
+// the descriptor of a static member of a Qore class: gives and sets the current value of the member, also for the
+// class (ex: Cls.member); assigning to the attribute of the class replaces the descriptor, as for any class attribute
+static const char* qore_static_member_src = R"(
+class QoreStaticMember:
+    """A static member of a Qore class: its value is the current value of the member"""
+    __slots__ = ('name', '_get', '_set')
+
+    def __init__(self, name, get, set):
+        self.name = name
+        self._get = get
+        self._set = set
+
+    def __get__(self, obj, cls=None):
+        return self._get()
+
+    def __set__(self, obj, value):
+        self._set(value)
+
+    def __repr__(self):
+        return '<Qore static member ' + self.name + '>'
+)";
+
+// creates the qoreloader.QoreStaticMember type of the interpreter executing the module
+static int qoreloader_init_static_member_type(PyObject* m) {
+    qoreloader_state* st = qoreloader_get_state(m);
+    assert(st && !st->qore_static_member_type);
+    QorePythonReferenceHolder globals(PyDict_New());
+    if (!globals || PyDict_SetItemString(*globals, "__builtins__", PyEval_GetBuiltins()) < 0) {
+        return -1;
+    }
+    QorePythonReferenceHolder name(PyUnicode_FromString("qoreloader"));
+    if (!name || PyDict_SetItemString(*globals, "__name__", *name) < 0) {
+        return -1;
+    }
+    QorePythonReferenceHolder rv(PyRun_String(qore_static_member_src, Py_file_input, *globals, *globals));
+    if (!rv) {
+        return -1;
+    }
+    // returns a borrowed reference
+    PyObject* type = PyDict_GetItemString(*globals, "QoreStaticMember");
+    if (!type) {
+        PyErr_SetString(PyExc_RuntimeError, "cannot create the qoreloader.QoreStaticMember type");
+        return -1;
+    }
+    Py_INCREF(type);
+    st->qore_static_member_type = type;
+    return PyModule_AddObjectRef(m, "QoreStaticMember", type);
+}
+
+// returns a new reference to the qoreloader module of the current interpreter, importing it if necessary
+static PyObject* qoreloader_get_module() {
     QorePythonReferenceHolder name(PyUnicode_FromString("qoreloader"));
     if (!name) {
         return nullptr;
@@ -459,6 +513,28 @@ PyObject* qore_python_get_qore_exception_type() {
     }
     if (!PyModule_Check(*mod) || PyModule_GetDef(*mod) != &qoreloadermodule) {
         PyErr_SetString(PyExc_ImportError, "sys.modules['qoreloader'] is not the qoreloader module");
+        return nullptr;
+    }
+    return mod.release();
+}
+
+PyObject* qore_python_get_qore_static_member_type() {
+    QorePythonReferenceHolder mod(qoreloader_get_module());
+    if (!mod) {
+        return nullptr;
+    }
+    qoreloader_state* st = qoreloader_get_state(*mod);
+    if (!st || !st->qore_static_member_type) {
+        PyErr_SetString(PyExc_ImportError, "the qoreloader module has not been initialized");
+        return nullptr;
+    }
+    Py_INCREF(st->qore_static_member_type);
+    return st->qore_static_member_type;
+}
+
+PyObject* qore_python_get_qore_exception_type() {
+    QorePythonReferenceHolder mod(qoreloader_get_module());
+    if (!mod) {
         return nullptr;
     }
     qoreloader_state* st = qoreloader_get_state(*mod);
@@ -542,7 +618,7 @@ static int slot_qoreloader_exec(PyObject *m) {
         }
     }
 
-    if (qoreloader_init_exception_type(m)) {
+    if (qoreloader_init_exception_type(m) || qoreloader_init_static_member_type(m)) {
         return -1;
     }
 

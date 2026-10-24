@@ -37,6 +37,12 @@
       members, also from %Python subclasses (which set %Python attributes that %Qore did not see); \c dir() lists
       the public members; %Qore objects support weak references (see @ref python_qore_objects;
       <a href="https://github.com/qoretechnologies/qore/issues/5500">issue 5500</a>)
+    - the public static members of %Qore classes, %Qore enums and hashdecls are available in %Python (they were not
+      imported): static members are attributes giving and setting their current values, enums are %Python enum
+      classes whose members are the %Qore enum values, and hashdecls are \c dict subclasses whose objects are hashes
+      of the hashdecl in %Qore; hashes of hashdecls are objects of these classes in %Python (they were plain dicts)
+      (see @ref python_qore_declarations; <a href="https://github.com/qoretechnologies/qore/issues/5500">issue
+      5500</a>)
     - %Python class methods (\c \@classmethod) can be called from %Qore: they are static methods that get the class
       they are called for, also when inherited (calling one raised \c PYTHON-ERROR, and class methods were missing
       from exported classes); callable attributes of %Python objects (ex: a \c lambda stored in the object) can be

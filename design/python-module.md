@@ -207,6 +207,15 @@ exist; undeclared ones exist with a value, as with `exists`; classes with `membe
 attributes of objects with a dict, i.e. of Python subclasses, are Python attributes); `__dir__` (in each type's
 dict) adds the public members; `weakreflist` is the `__weaklistoffset__` member.
 
+Static members are `qoreloader.QoreStaticMember` descriptors (a per-interpreter class created from Python source in
+`slot_qoreloader_exec()`, held in the module state) whose getter and setter are `PyCFunction`s with the
+`QoreExternalStaticMember` in a capsule.  Enums are `IntEnum`/`StrEnum`/`Enum` classes and hashdecls `dict` subclasses
+(`getEnumType()`, `getHashDeclType()`, cached per program under `qpy_subclass_type_lock`, released in
+`deleteIntern()`); the classes hold the Qore declaration in a capsule attribute (`_qore_enum_`, `_qore_hashdecl_`),
+which `getQoreValue()` uses to convert members to `QoreValue::makeEnum()` values and objects to
+`TypedHashDecl::doRuntimeCast()` hashes; `getPythonValueIntern()` converts `QoreValue::isEnum()` values and hashes with
+`getHashDecl()` to them.  The namespace that Qore creates for an enum's members is not imported (the enum class is).
+
 ## Qore Classes Inheriting Python Classes
 
 `execPythonConstructor()` runs for the Qore class of the Python class; when the object's class is a Qore class (not a

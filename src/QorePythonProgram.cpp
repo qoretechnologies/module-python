@@ -719,6 +719,26 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                     Py_DECREF(i.second);
                 }
             }
+            {
+                hashdecl_type_map_t types;
+                {
+                    AutoLocker al(qpy_subclass_type_lock);
+                    types.swap(hashdecl_type_map);
+                }
+                for (auto& i : types) {
+                    Py_DECREF(i.second);
+                }
+            }
+            {
+                enum_type_map_t types;
+                {
+                    AutoLocker al(qpy_subclass_type_lock);
+                    types.swap(enum_type_map);
+                }
+                for (auto& i : types) {
+                    Py_DECREF(i.second);
+                }
+            }
 
             module.purge();
             python_code.purge();
@@ -2212,6 +2232,29 @@ void QorePythonProgram::importQoreToPython(PyObject* mod, const QoreNamespace& n
         }
     }
 
+    // import all enums as enum classes
+    QoreNamespaceEnumIterator ei(ns);
+    while (ei.next()) {
+        if (importQoreEnumToPython(mod, ei.get())) {
+            return;
+        }
+    }
+
+    // import all hashdecls as dict subclasses
+    QoreNamespaceTypedHashIterator hi(ns);
+    while (hi.next()) {
+        const TypedHashDecl& hd = hi.get();
+        ExceptionSink xsink;
+        PyObject* type = getHashDeclType(&xsink, &hd);
+        if (!type) {
+            raisePythonException(xsink);
+            return;
+        }
+        if (PyObject_SetAttrString(mod, hd.getName(), type) < 0) {
+            return;
+        }
+    }
+
     // import all classes
     QoreNamespaceClassIterator clsi(ns);
     while (clsi.next()) {
@@ -2223,6 +2266,10 @@ void QorePythonProgram::importQoreToPython(PyObject* mod, const QoreNamespace& n
     // import all subnamespaces as modules
     QoreNamespaceNamespaceIterator ni(ns);
     while (ni.next()) {
+        // the namespace of an enum's members is the enum class
+        if (ns.findLocalEnum(ni.get().getName())) {
+            continue;
+        }
         if (importQoreNamespaceToPython(mod, ni.get())) {
             return;
         }
@@ -2248,6 +2295,172 @@ int QorePythonProgram::importQoreConstantToPython(PyObject* mod, const QoreExter
         return 0;
     }
     return -1;
+}
+
+// the attribute of the Python enum classes of Qore enums that holds the enum in a capsule
+static constexpr const char* QORE_PYTHON_ENUM_ATTR = "_qore_enum_";
+
+int QorePythonProgram::importQoreEnumToPython(PyObject* mod, const QoreEnumDecl& ed) {
+    ExceptionSink xsink;
+    PyObject* cls = getEnumType(&xsink, &ed);
+    if (!cls) {
+        raisePythonException(xsink);
+        return -1;
+    }
+    return PyObject_SetAttrString(mod, ed.getName(), cls) < 0 ? -1 : 0;
+}
+
+PyObject* QorePythonProgram::getEnumType(ExceptionSink* xsink, const QoreEnumDecl* ed) {
+    {
+        AutoLocker al(qpy_subclass_type_lock);
+        enum_type_map_t::iterator i = enum_type_map.find(ed);
+        if (i != enum_type_map.end()) {
+            return i->second;
+        }
+    }
+
+    // the members as (name, value) pairs; an enum whose values are all integers is an enum.IntEnum, all strings an
+    // enum.StrEnum, so that its members compare equal to their values, otherwise an enum.Enum
+    QorePythonReferenceHolder members(PyList_New(0));
+    if (!members) {
+        checkPythonException(xsink);
+        return nullptr;
+    }
+    bool all_int = true, all_str = true;
+    QoreEnumMemberIterator i(*ed);
+    while (i.next()) {
+        const QoreEnumMember* m = i.getMember();
+        QorePythonReferenceHolder val(getPythonValue(m->getValue(), xsink));
+        if (!val) {
+            return nullptr;
+        }
+        all_int = all_int && PyLong_CheckExact(*val);
+        all_str = all_str && PyUnicode_CheckExact(*val);
+        QorePythonReferenceHolder pair(Py_BuildValue("(sO)", m->getName(), *val));
+        if (!pair || PyList_Append(*members, *pair) < 0) {
+            checkPythonException(xsink);
+            return nullptr;
+        }
+    }
+    const char* cls_name = PyList_GET_SIZE(*members) && all_int ? "IntEnum"
+        : (PyList_GET_SIZE(*members) && all_str ? "StrEnum" : "Enum");
+    QorePythonReferenceHolder enum_mod(PyImport_ImportModule("enum"));
+    QorePythonReferenceHolder enum_cls(enum_mod ? PyObject_GetAttrString(*enum_mod, cls_name) : nullptr);
+    QorePythonReferenceHolder args(Py_BuildValue("(sO)", ed->getName(), *members));
+    QorePythonReferenceHolder kwargs(Py_BuildValue("{s:s}", "module", "qore.__root__"));
+    QorePythonReferenceHolder cls(enum_cls && args && kwargs ? PyObject_Call(*enum_cls, *args, *kwargs) : nullptr);
+    QorePythonReferenceHolder capsule(cls ? PyCapsule_New((void*)ed, nullptr, nullptr) : nullptr);
+    if (!capsule || PyObject_SetAttrString(*cls, QORE_PYTHON_ENUM_ATTR, *capsule) < 0) {
+        checkPythonException(xsink);
+        return nullptr;
+    }
+
+    AutoLocker al(qpy_subclass_type_lock);
+    // another thread can have created the class meanwhile; the map keeps the first one
+    std::pair<enum_type_map_t::iterator, bool> rv = enum_type_map.insert(enum_type_map_t::value_type(ed, *cls));
+    if (rv.second) {
+        cls.release();
+    }
+    return rv.first->second;
+}
+
+static PyMethodDef qore_hashdecl_init_def = {"__init__", reinterpret_cast<PyCFunction>(
+    reinterpret_cast<void(*)(void)>(QorePythonProgram::hashDeclInit)), METH_VARARGS | METH_KEYWORDS,
+    "sets the default values of the hashdecl's keys, then the arguments as dict.update()"};
+
+// the attribute of the Python types of hashdecls that holds the hashdecl in a capsule
+static constexpr const char* QORE_PYTHON_HASHDECL_ATTR = "_qore_hashdecl_";
+
+PyObject* QorePythonProgram::getHashDeclType(ExceptionSink* xsink, const TypedHashDecl* hd) {
+    {
+        AutoLocker al(qpy_subclass_type_lock);
+        hashdecl_type_map_t::iterator i = hashdecl_type_map.find(hd);
+        if (i != hashdecl_type_map.end()) {
+            return i->second;
+        }
+    }
+
+    QorePythonReferenceHolder capsule(PyCapsule_New((void*)hd, nullptr, nullptr));
+    QorePythonReferenceHolder func(capsule ? PyCFunction_NewEx(&qore_hashdecl_init_def, *capsule, nullptr)
+        : nullptr);
+    // an instance method: the object is passed as the first argument
+    QorePythonReferenceHolder init(func ? PyInstanceMethod_New(*func) : nullptr);
+    QorePythonReferenceHolder doc(PyUnicode_FromFormat("A hash of Qore hashdecl %s: a dict whose values are "
+        "converted to the hashdecl when passed to Qore", hd->getName()));
+    QorePythonReferenceHolder slots(PyTuple_New(0));
+    QorePythonReferenceHolder dict(PyDict_New());
+    QorePythonReferenceHolder module_name(PyUnicode_FromString("qore.__root__"));
+    if (!init || !doc || !slots || !dict || !module_name
+        || PyDict_SetItemString(*dict, "__init__", *init) < 0
+        || PyDict_SetItemString(*dict, "__doc__", *doc) < 0
+        || PyDict_SetItemString(*dict, "__slots__", *slots) < 0
+        || PyDict_SetItemString(*dict, "__module__", *module_name) < 0
+        || PyDict_SetItemString(*dict, QORE_PYTHON_HASHDECL_ATTR, *capsule) < 0) {
+        checkPythonException(xsink);
+        return nullptr;
+    }
+    QorePythonReferenceHolder type(PyObject_CallFunction(reinterpret_cast<PyObject*>(&PyType_Type), "s(O)O",
+        hd->getName(), &PyDict_Type, *dict));
+    if (!type) {
+        checkPythonException(xsink);
+        return nullptr;
+    }
+
+    AutoLocker al(qpy_subclass_type_lock);
+    // another thread can have created the type meanwhile; the map keeps the first one
+    std::pair<hashdecl_type_map_t::iterator, bool> rv = hashdecl_type_map.insert(
+        hashdecl_type_map_t::value_type(hd, *type));
+    if (rv.second) {
+        type.release();
+    }
+    return rv.first->second;
+}
+
+PyObject* QorePythonProgram::hashDeclInit(PyObject* capsule, PyObject* args, PyObject* kwargs) {
+    const TypedHashDecl* hd = static_cast<const TypedHashDecl*>(PyCapsule_GetPointer(capsule, nullptr));
+    assert(hd);
+    assert(PyTuple_Check(args));
+    if (!PyTuple_GET_SIZE(args) || !PyDict_Check(PyTuple_GET_ITEM(args, 0))) {
+        PyErr_Format(PyExc_TypeError, "%s.__init__() must be called with a dict", hd->getName());
+        return nullptr;
+    }
+    PyObject* self = PyTuple_GET_ITEM(args, 0);
+
+    QorePythonQoreEntryHelper qeh;
+    if (!qeh.check()) {
+        return nullptr;
+    }
+    QorePythonProgram* pypgm = QorePythonProgram::getExecutionContext();
+    ExceptionSink xsink;
+    QoreExternalProgramContextHelper pch(&xsink, pypgm->getQoreProgram());
+    if (!xsink) {
+        // the default values of the keys; their initializers are Qore code, which runs without the GIL
+        ValueHolder defaults(&xsink);
+        {
+            QorePythonReleaseGilHelper prgh;
+            defaults = new QoreHashNode(hd, &xsink);
+        }
+        QorePythonReferenceHolder py_defaults;
+        if (!xsink) {
+            py_defaults = pypgm->getPythonDict(&xsink, defaults->get<const QoreHashNode>());
+        }
+        qore_python_release(defaults);
+        if (!xsink) {
+            if (PyDict_Update(self, *py_defaults) < 0) {
+                return nullptr;
+            }
+            // the arguments, as dict.update()
+            QorePythonReferenceHolder update(PyObject_GetAttrString(reinterpret_cast<PyObject*>(&PyDict_Type),
+                "update"));
+            QorePythonReferenceHolder rv(update ? PyObject_Call(*update, args, kwargs) : nullptr);
+            if (!rv) {
+                return nullptr;
+            }
+            Py_RETURN_NONE;
+        }
+    }
+    pypgm->raisePythonException(xsink);
+    return nullptr;
 }
 
 int QorePythonProgram::importQoreClassToPython(PyObject* mod, const QoreClass& cls, const char* mod_name) {
@@ -3127,6 +3340,24 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
         return getQoreHashFromDict(xsink, val, rset);
     }
 
+    // a member of the Python enum class of a Qore enum is the value of the Qore enum (the class has the attribute
+    // in its dict)
+    {
+        PyObject* type_dict = type->tp_dict;
+        // returns a borrowed reference
+        PyObject* capsule = type_dict ? PyDict_GetItemString(type_dict, QORE_PYTHON_ENUM_ATTR) : nullptr;
+        if (capsule && PyCapsule_CheckExact(capsule)) {
+            const QoreEnumDecl* ed = static_cast<const QoreEnumDecl*>(PyCapsule_GetPointer(capsule, nullptr));
+            QorePythonReferenceHolder name(PyObject_GetAttrString(val, "name"));
+            const char* namestr = name && PyUnicode_Check(*name) ? PyUnicode_AsUTF8(*name) : nullptr;
+            const QoreEnumMember* member = namestr ? ed->findMember(namestr) : nullptr;
+            if (member) {
+                return QoreValue::makeEnum(member);
+            }
+            PyErr_Clear();
+        }
+    }
+
     // subclasses of the types above (ex: IntEnum, StrEnum, OrderedDict, defaultdict) are converted as their base
     // types; a named tuple is a hash of its fields, so that its fields are accessed in Qore as with the Python object
     if (PyLong_Check(val)) {
@@ -3150,7 +3381,21 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
         return new QoreStringNode(str, size, QCS_UTF8);
     }
     if (PyDict_Check(val)) {
-        return getQoreHashFromDict(xsink, val, rset);
+        // an object of the dict subclass of a hashdecl is a hash of the hashdecl
+        QorePythonReferenceHolder capsule(PyObject_GetAttrString(reinterpret_cast<PyObject*>(type),
+            QORE_PYTHON_HASHDECL_ATTR));
+        if (!capsule || !PyCapsule_CheckExact(*capsule)) {
+            PyErr_Clear();
+            return getQoreHashFromDict(xsink, val, rset);
+        }
+        const TypedHashDecl* hd = static_cast<const TypedHashDecl*>(PyCapsule_GetPointer(*capsule, nullptr));
+        ValueHolder h(getQoreHashFromDict(xsink, val, rset), xsink);
+        if (!h) {
+            return QoreValue();
+        }
+        QoreValue rv = hd->doRuntimeCast(h->get<const QoreHashNode>(), xsink);
+        qore_python_release(h);
+        return rv;
     }
     if (PyList_Check(val)) {
         return getQoreListFromList(xsink, val, rset);
@@ -3470,6 +3715,19 @@ PyObject* QorePythonProgram::getPythonValue(QoreValue val, ExceptionSink* xsink)
 
 PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* xsink) {
     //printd(5, "QorePythonProgram::getPythonValue() type '%s'\n", val.getFullTypeName());
+    // a value of a Qore enum is the member of the enum's Python enum class
+    if (val.isEnum()) {
+        const QoreEnumMember* member = val.getEnumMember();
+        PyObject* cls = getEnumType(xsink, member->getEnumDecl());
+        if (!cls) {
+            return nullptr;
+        }
+        PyObject* rv = PyObject_GetAttrString(cls, member->getName());
+        if (!rv) {
+            checkPythonException(xsink);
+        }
+        return rv;
+    }
     switch (val.getType()) {
         case NT_NOTHING:
         case NT_NULL:
@@ -3499,8 +3757,27 @@ PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* 
         case NT_LIST:
             return getPythonList(xsink, val.get<const QoreListNode>());
 
-        case NT_HASH:
-            return getPythonDict(xsink, val.get<const QoreHashNode>());
+        case NT_HASH: {
+            const QoreHashNode* h = val.get<const QoreHashNode>();
+            QorePythonReferenceHolder dict(getPythonDict(xsink, h));
+            const TypedHashDecl* hd = h->getHashDecl();
+            if (!dict || !hd) {
+                return dict.release();
+            }
+            // a hash of a hashdecl is an object of the hashdecl's dict subclass
+            PyObject* type = getHashDeclType(xsink, hd);
+            if (!type) {
+                return nullptr;
+            }
+            QorePythonReferenceHolder empty(PyTuple_New(0));
+            QorePythonReferenceHolder rv(empty ? reinterpret_cast<PyTypeObject*>(type)->tp_new(
+                reinterpret_cast<PyTypeObject*>(type), *empty, nullptr) : nullptr);
+            if (!rv || PyDict_Update(*rv, *dict) < 0) {
+                checkPythonException(xsink);
+                return nullptr;
+            }
+            return rv.release();
+        }
 
         case NT_BINARY:
             return getPythonByteArray(xsink, val.get<const BinaryNode>());
