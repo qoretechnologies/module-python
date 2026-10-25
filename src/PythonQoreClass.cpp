@@ -1137,10 +1137,9 @@ PyObject* PythonQoreClass::py_getattro(PyObject* self, PyObject* attr) {
         cls_handle->raiseDeleted();
         return nullptr;
     }
-    const QoreClass* qcls = static_cast<const QoreClass*>(cls_handle->getDecl());
 
     ExceptionSink xsink;
-    //printd(5, "PythonQoreClass::py_getattro() obj %p %s.%s\n", obj, qcls->getName(), member);
+    //printd(5, "PythonQoreClass::py_getattro() obj %p %s.%s\n", obj, cls_handle->getName().c_str(), member);
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
     QoreExternalProgramContextHelper pch(&xsink, qore_python_pgm->getQoreProgram());
     if (!xsink) {

@@ -17,6 +17,9 @@ def child_mask():
 
 
 def main():
+    # Python leaves SIGINT ignored when the process starts with it ignored (as a background job of a non-interactive
+    # shell, as in CI), so its handler is installed here
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     process_mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
     mask_before = child_mask()
 
@@ -34,6 +37,7 @@ def main():
     assert p.wait(timeout=20) == -signal.SIGTERM, p.returncode
 
     # Python handles the signals of the process
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler, signal.getsignal(signal.SIGINT)
     try:
         signal.raise_signal(signal.SIGINT)
         raise AssertionError("no KeyboardInterrupt")
