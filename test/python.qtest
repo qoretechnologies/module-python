@@ -5478,7 +5478,9 @@ def run():
 
     # interrupts requested while a thread created by Python calls Qore methods: each call creates a helper with the GIL
     # held, which registers the interrupt callback; the helper waited for a callback that waited for the GIL
-    # (deadlock)
+    # (deadlock).  The test requests and clears interrupts a fixed number of times while the thread calls Qore methods
+    # and checks that it completes; whether a request reaches a call depends on the timing of the threads, so it is
+    # not checked here (the delivery of interrupts to running Python code is checked by runningInterruptTest())
     interruptPythonThreadTest() {
         if (Python::FreeThreading) {
             testSkip("Background threads with Python not supported with free-threading (PEP 703)");
@@ -5491,42 +5493,42 @@ import threading
 from qore.__root__.Qore.Thread import Counter
 done = threading.Event()
 stats = {\"calls\": 0, \"interrupted\": 0}
-def loop():
+def loop(started):
     c = Counter()
     while not done.is_set():
         try:
             c.getCount()
             stats[\"calls\"] += 1
+            if stats[\"calls\"] == 1:
+                started.push(1)
         except BaseException:
             stats[\"interrupted\"] += 1
 t = None
-def start():
+def start(started):
     global t
-    t = threading.Thread(target=loop)
+    t = threading.Thread(target=loop, args=(started,))
     t.start()
 def stop():
     done.set()
     t.join()
     return stats
 ', 'interrupt_thread.py');
-sub start() { pp.callFunction('start'); }
+sub start(Queue started) { pp.callFunction('start', started); }
 hash<auto> sub stop() { return pp.callFunction('stop'); }
 ", "interrupt_thread");
         pgm.run();
         SandboxManager sm();
         pgm.setSandboxManager(sm);
-        pgm.callFunction("start");
-        date end = now_us() + 3s;
-        int requests = 0;
-        while (now_us() < end) {
+        Queue started();
+        pgm.callFunction("start", started);
+        # the thread calls Qore methods before the interrupts are requested; the time limit is only a guard
+        started.get(60s);
+        for (int i = 0; i < 20000; ++i) {
             sm.requestInterrupt();
             sm.clearInterrupt();
-            ++requests;
         }
         hash<auto> stats = pgm.callFunction("stop");
-        assertGt(0, requests);
         assertGt(0, stats.calls);
-        assertGt(0, stats.interrupted);
     }
 
     # deleting a PythonProgram while another thread runs its Python code interrupts the code, so that the deletion does
