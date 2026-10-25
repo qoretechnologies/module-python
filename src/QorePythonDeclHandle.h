@@ -28,6 +28,7 @@
 #include <qore/Qore.h>
 
 #include <atomic>
+#include <cassert>
 #include <memory>
 #include <string>
 #include <vector>
@@ -135,16 +136,17 @@ private:
 */
 class QorePythonDeclUse {
 public:
-    DLLLOCAL QorePythonDeclUse(QorePythonDeclHandle* handle) {
+    DLLLOCAL QorePythonDeclUse(QorePythonDeclHandle* handle) : prev(current) {
         if (handle && handle->startUse()) {
             this->handle = handle;
         }
+        current = this;
     }
 
     DLLLOCAL ~QorePythonDeclUse() {
-        if (handle) {
-            handle->endUse();
-        }
+        end();
+        assert(current == this);
+        current = prev;
     }
 
     QorePythonDeclUse(const QorePythonDeclUse&) = delete;
@@ -155,8 +157,36 @@ public:
         return handle != nullptr;
     }
 
+    //! ends the use before the object is destroyed; the declaration must not be used afterwards
+    DLLLOCAL void end() {
+        if (handle) {
+            handle->endUse();
+            handle = nullptr;
+        }
+    }
+
+    //! returns the number of the current thread's uses of the handle
+    /** The uses of the thread that invalidates a handle (ex: a Qore call made while a declaration is used deletes its
+        Program) are not waited for: the thread would wait for itself; the code holding them does not use the
+        declaration after the call that it protects
+    */
+    DLLLOCAL static unsigned countThreadUses(const QorePythonDeclHandle* handle) {
+        unsigned rv = 0;
+        for (const QorePythonDeclUse* use = current; use; use = use->prev) {
+            if (use->handle == handle) {
+                ++rv;
+            }
+        }
+        return rv;
+    }
+
 private:
     QorePythonDeclHandle* handle = nullptr;
+    //! the use that the thread started before this one, if any
+    QorePythonDeclUse* prev;
+
+    //! the last use that the current thread started
+    DLLLOCAL static thread_local QorePythonDeclUse* current;
 };
 
 //! the uses of the declarations needed by an operation, held until it ends

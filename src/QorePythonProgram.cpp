@@ -671,8 +671,52 @@ void QorePythonProgram::clearPersistentReferences() {
     }
 }
 
+bool QorePythonProgram::isUsedByCurrentThread() const {
+    for (const QorePythonHelper* h = QorePythonHelper::getCurrent(); h; h = h->getPrevious()) {
+        if (h->getProgram() == this) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void QorePythonProgram::checkPendingDelete() {
+    if (!delete_pending || isUsedByCurrentThread()) {
+        return;
+    }
+    {
+        AutoLocker al(py_thr_lck);
+        // only the thread that deferred the deletion finishes it
+        if (deleting_tid != q_gettid()) {
+            return;
+        }
+    }
+    delete_pending = false;
+    {
+        // an exception raised by the deletion (ex: by a destructor) has no caller: it is handled by the default handler
+        ExceptionSink xsink;
+        deleteIntern(&xsink);
+    }
+    // the reference taken when the deletion was deferred; the last one deletes the object
+    weakDeref();
+}
+
 void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
-    if (destroyed) {
+    if (destroyed || delete_pending) {
+        return;
+    }
+    // the current thread runs code of the program (ex: Qore code that the program's Python code called deletes the
+    // program): the interpreter cannot be finalized while the thread uses it, and waiting for the uses to end would
+    // wait for the thread itself; other threads cannot use the program from now on, and the deletion is finished
+    // when the thread leaves the program (see checkPendingDelete()); the object is kept until then
+    if (isUsedByCurrentThread() && !q_libqore_exiting()) {
+        {
+            AutoLocker al(py_thr_lck);
+            checkForkIntern();
+            deleting_tid = q_gettid();
+        }
+        weakRef();
+        delete_pending = true;
         return;
     }
     destroyed = true;

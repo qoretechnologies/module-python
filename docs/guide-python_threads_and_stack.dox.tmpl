@@ -85,6 +85,12 @@ p.callFunction("join", t);
     @note %Python code that is blocked in a call (ex: \c time.sleep() or a blocking read) is interrupted when the call
     returns; the interrupt and the deletion wait for it.
 
+    A @ref Python::PythonProgram "PythonProgram" deleted by %Qore code that its own %Python code called (ex: a %Qore
+    callback that deletes it) is deleted when the thread leaves the program: the current call continues and returns
+    normally, and other threads cannot use the program from the time it was deleted.  Likewise, a %Qore %Program
+    deleted while %Python code uses one of its classes (ex: when the result of a method call is released) does not
+    wait for the current thread.
+
     When %Qore is the host, it handles signals in its own signal thread and blocks them in all other threads, so the
     processes that %Python code starts inherit the blocked signals.  When %Python is the host (\c import
     \c qoreloader), %Qore is initialized without its signal handling: %Python handles the signals of the process

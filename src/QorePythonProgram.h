@@ -110,6 +110,10 @@ public:
         deleteIntern(xsink);
     }
 
+    //! finishes the deletion of the program that the current thread deferred (see deleteIntern()), if the thread no
+    //! longer uses the program; called when a QorePythonHelper of the program is destroyed
+    DLLLOCAL void checkPendingDelete();
+
     DLLLOCAL void py_destructor(ExceptionSink* xsink) {
         needs_deregistration = false;
         deleteIntern(xsink);
@@ -597,6 +601,9 @@ protected:
     bool needs_deregistration = false;
     //! has this object been destroyed
     bool destroyed = false;
+    //! true if the deletion of the program is deferred until the thread that deletes it no longer uses it (see
+    //! deleteIntern()); read by the helpers of other threads
+    std::atomic<bool> delete_pending{false};
 
     //! if we should destroy the interpreter state
     bool owns_interpreter = false;
@@ -875,6 +882,9 @@ protected:
     DLLLOCAL void clearPersistentReferences();
 
     DLLLOCAL void deleteIntern(ExceptionSink* xsink);
+
+    //! returns true if the current thread uses the program (a QorePythonHelper of the program exists in the thread)
+    DLLLOCAL bool isUsedByCurrentThread() const;
 
     //! the child handler of py_thr_lck (see QoreForkHandler.h): the child runs only the thread that called fork()
     /** Initializes the lock again; the uses of each interpreter are counted again with the helpers of the forking

@@ -101,6 +101,11 @@
       deleted its %Qore object (the instance lost its attributes); reference cycles through %Qore references are
       documented (see @ref python_qore_object_lifecycle_cycles;
       <a href="https://github.com/qoretechnologies/qore/issues/5524">issue 5524</a>)
+    - deleting a @ref Python::PythonProgram "PythonProgram" from %Qore code that its own %Python code called no
+      longer deadlocks: it is deleted when the thread leaves the program; deleting a %Qore %Program while %Python
+      code uses one of its classes (ex: releasing the result of a method call deletes the class's %Program) no longer
+      deadlocks waiting for the current thread (see @ref python_interrupts;
+      <a href="https://github.com/qoretechnologies/qore/issues/5526">issue 5526</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

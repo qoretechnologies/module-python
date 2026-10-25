@@ -355,6 +355,8 @@ static PyObject* qore_static_member_get(PyObject* capsule, PyObject* /* unused *
             QorePythonReleaseGilHelper prgh;
             v = mem->getValue();
         }
+        // the member is not used anymore: converting and releasing the value can run Qore code
+        use.end();
         QorePythonReferenceHolder rv(qore_python_pgm->getPythonValue(*v, &xsink));
         // the value is released without the GIL if this can run Qore code
         qore_python_release(v);
@@ -388,6 +390,8 @@ static PyObject* qore_static_member_set(PyObject* capsule, PyObject* value) {
             QorePythonReleaseGilHelper prgh;
             mem->setValue(*v, &xsink);
         }
+        // the member is not used anymore: releasing the value can run Qore code
+        use.end();
         qore_python_release(v);
         if (!xsink) {
             Py_RETURN_NONE;
@@ -739,30 +743,38 @@ PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* 
 
         QorePythonHelper qph(qore_python_pgm, &xsink);
         if (!xsink) {
-            QoreExternalProgramContextHelper pch(&xsink, pgm);
-            if (!xsink) {
-                ReferenceHolder<QoreListNode> qargs(qore_python_pgm->getQoreListFromTuple(&xsink, args, 1), &xsink);
+            // the arguments and the result of the call are released after the context of the method's Program is
+            // left: releasing them can run Qore code that deletes the Program
+            ReferenceHolder<QoreListNode> qargs(&xsink);
+            ValueHolder rv(&xsink);
+            QorePythonReferenceHolder py_rv;
+            {
+                QoreExternalProgramContextHelper pch(&xsink, pgm);
                 if (!xsink) {
-                    ValueHolder rv(&xsink);
-                    {
-                        QorePythonReleaseGilHelper prgh;
-
-                        QorePythonStackLocationHelper slh(qph.getOldProgram());
-
-                        rv = obj->evalMethod(*m, *qargs, &xsink);
-                    }
-                    QorePythonReferenceHolder py_rv;
+                    qargs = qore_python_pgm->getQoreListFromTuple(&xsink, args, 1);
                     if (!xsink) {
-                        py_rv = qore_python_pgm->getPythonValue(*rv, &xsink);
-                    }
-                    // the arguments and the result of the call are released without the GIL if this can run Qore code
-                    qore_python_release(rv);
-                    qore_python_release(qargs);
-                    if (!xsink) {
-                        assert(py_rv);
-                        return py_rv.release();
+                        {
+                            QorePythonReleaseGilHelper prgh;
+
+                            QorePythonStackLocationHelper slh(qph.getOldProgram());
+
+                            rv = obj->evalMethod(*m, *qargs, &xsink);
+                        }
+                        // the method is not used anymore: converting and releasing the result can run Qore code that
+                        // deletes the method's Program
+                        use.end();
+                        if (!xsink) {
+                            py_rv = qore_python_pgm->getPythonValue(*rv, &xsink);
+                        }
                     }
                 }
+            }
+            // released without the GIL if this can run Qore code
+            qore_python_release(rv);
+            qore_python_release(qargs);
+            if (!xsink) {
+                assert(py_rv);
+                return py_rv.release();
             }
         }
     }
@@ -830,30 +842,35 @@ PyObject* PythonQoreClass::exec_qore_static_method(const QoreMethod& m, PyObject
 
         QorePythonHelper qph(qore_python_pgm, &xsink);
         if (!xsink) {
-            QoreExternalProgramContextHelper pch(&xsink, pgm);
-            if (!xsink) {
-                ReferenceHolder<QoreListNode> qargs(qore_python_pgm->getQoreListFromTuple(&xsink, args, offset), &xsink);
+            // the arguments and the result of the call are released after the context of the method's Program is
+            // left: releasing them can run Qore code that deletes the Program
+            ReferenceHolder<QoreListNode> qargs(&xsink);
+            ValueHolder rv(&xsink);
+            QorePythonReferenceHolder py_rv;
+            {
+                QoreExternalProgramContextHelper pch(&xsink, pgm);
                 if (!xsink) {
-                    ValueHolder rv(&xsink);
-                    {
-                        QorePythonReleaseGilHelper prgh;
-
-                        QorePythonStackLocationHelper slh(qph.getOldProgram());
-
-                        rv = QoreObject::evalStaticMethod(m, m.getClass(), *qargs, &xsink);
-                    }
-                    QorePythonReferenceHolder py_rv;
+                    qargs = qore_python_pgm->getQoreListFromTuple(&xsink, args, offset);
                     if (!xsink) {
-                        py_rv = qore_python_pgm->getPythonValue(*rv, &xsink);
-                    }
-                    // the arguments and the result of the call are released without the GIL if this can run Qore code
-                    qore_python_release(rv);
-                    qore_python_release(qargs);
-                    if (!xsink) {
-                        assert(py_rv);
-                        return py_rv.release();
+                        {
+                            QorePythonReleaseGilHelper prgh;
+
+                            QorePythonStackLocationHelper slh(qph.getOldProgram());
+
+                            rv = QoreObject::evalStaticMethod(m, m.getClass(), *qargs, &xsink);
+                        }
+                        if (!xsink) {
+                            py_rv = qore_python_pgm->getPythonValue(*rv, &xsink);
+                        }
                     }
                 }
+            }
+            // released without the GIL if this can run Qore code
+            qore_python_release(rv);
+            qore_python_release(qargs);
+            if (!xsink) {
+                assert(py_rv);
+                return py_rv.release();
             }
         }
     }
@@ -1176,6 +1193,8 @@ PyObject* PythonQoreClass::py_getattro(PyObject* self, PyObject* attr) {
                 v = obj->evalMember(member, &xsink);
             }
         }
+        // the class is not used anymore: converting and releasing the value can run Qore code
+        use.end();
         if (!exists && !xsink) {
             qore_python_no_attribute(self, member);
             return nullptr;

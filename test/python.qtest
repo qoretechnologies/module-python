@@ -176,6 +176,34 @@ sub python_test_delete_object(object o) {
     delete o;
 }
 
+#! deletes the Program that it holds when it is destroyed; used to delete a Program while Python uses its classes
+class PythonProgramOwner {
+    public {
+        *Program p;
+        static int deleted = 0;
+    }
+
+    destructor() {
+        delete p;
+        ++deleted;
+    }
+}
+
+#! gives the value returned by a closure; used to pass a value to Qore code called from Python
+class PythonSelfDeleteFactory {
+    private {
+        code get;
+    }
+
+    constructor(code get) {
+        self.get = get;
+    }
+
+    auto get() {
+        return get();
+    }
+}
+
 #! has a constructor, a destructor and a copy method; used to check that they are not Python methods
 class PythonSpecialMethods {
     public {
@@ -286,6 +314,7 @@ class PythonTest inherits Test {
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
         addTestCase("importing a Qore class that inherits a Python class", \qoreSubclassImportTest());
         addTestCase("reference cycles between Python and Qore objects", \pythonQoreCycleTest());
+        addTestCase("deleting a program from its own call path", \selfDeleteTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -3387,6 +3416,41 @@ object sub new_q() { return new Q(); }
         assertEq(("updated", "from outside"), q.show());
         assertEq("from outside", remove q.extra);
         assertEq(("updated", NOTHING), q.show());
+    }
+
+    # a Python program deleted by Qore code that its own Python code called is deleted when the thread leaves it, and
+    # a Program deleted while Python uses one of its classes is deleted without waiting for the thread itself;
+    # previously both waited forever for the current thread (issue 5526)
+    selfDeleteTest() {
+        {
+            PythonProgram p("def go(cb):\n    cb()\n    return 'after'\n", "self-delete.py");
+            code cb = sub () { delete p; };
+            assertEq("after", p.callFunction("go", cb), "the call returns after the program was deleted");
+            assertEq(NOTHING, p, "the program was deleted");
+        }
+
+        # the result of a method of a class of a child Program cannot be converted to Python; releasing it releases
+        # the last reference to the child Program while the method's class is used
+        {
+            Program child(PO_NEW_STYLE);
+            child.parse("class C { list<auto> take(object f) { return (f.get(), 2026-01-01 + 9000Y); } } "
+                "object sub make() { return new C(); }", "self-delete-child");
+            object c = child.callFunction("make");
+            PythonProgramOwner owner();
+            owner.p = remove child;
+            int deleted = PythonProgramOwner::deleted;
+            PythonProgram pp("
+def go(c, f):
+    try:
+        c.take(f)
+    except Exception as e:
+        return type(e).__name__
+    return 'no error'
+", "self-delete-decl.py");
+            code get = auto sub () { return remove owner; };
+            assertEq("ValueError", pp.callFunction("go", c, new PythonSelfDeleteFactory(get)));
+            assertEq(deleted + 1, PythonProgramOwner::deleted, "the child Program was deleted");
+        }
     }
 
     # an instance of a Python subclass of a Qore class is not cleared by Python's cycle collector after Qore deleted

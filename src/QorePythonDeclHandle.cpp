@@ -59,6 +59,8 @@ void decl_capsule_destructor(PyObject* capsule) {
 }
 }
 
+thread_local QorePythonDeclUse* QorePythonDeclUse::current = nullptr;
+
 int QorePythonDeclHandle::registerForkHandler() {
     assert(!decl_handle_fork_reg);
     decl_handle_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_qore_declaration_handles",
@@ -135,7 +137,7 @@ void QorePythonDeclHandle::invalidate(QoreProgram* pgm) {
             std::shared_ptr<QorePythonDeclHandle> handle = hi.second.lock();
             if (handle) {
                 handle->valid.store(false, std::memory_order_release);
-                used = used || handle->users;
+                used = used || handle->users > QorePythonDeclUse::countThreadUses(handle.get());
                 handles.push_back(std::move(handle));
             }
         }
@@ -145,8 +147,9 @@ void QorePythonDeclHandle::invalidate(QoreProgram* pgm) {
         return;
     }
 
-    // wait for the uses that started before the handles were invalidated; a use in another thread can wait for the
-    // GIL, so the GIL is not held meanwhile
+    // wait for the uses in other threads that started before the handles were invalidated (the uses of this thread
+    // are not waited for, see QorePythonDeclUse::countThreadUses()); a use in another thread can wait for the GIL, so
+    // the GIL is not held meanwhile
     {
         std::optional<QorePythonReleaseGilHelper> prgh;
         if (qore_python_attached_thread_state()) {
@@ -154,7 +157,8 @@ void QorePythonDeclHandle::invalidate(QoreProgram* pgm) {
         }
         AutoLocker al(registry.lck);
         for (auto& handle : handles) {
-            while (handle->users) {
+            unsigned own = QorePythonDeclUse::countThreadUses(handle.get());
+            while (handle->users > own) {
                 ++registry.waiting;
                 registry.cond.wait(registry.lck);
                 --registry.waiting;

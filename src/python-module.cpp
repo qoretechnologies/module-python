@@ -1412,6 +1412,8 @@ QorePythonHelper::~QorePythonHelper() {
     assert(current == this);
     current = prev;
     deregisterInterrupt();
+    // the program can have been deleted while this thread used it (see QorePythonProgram::deleteIntern())
+    const_cast<QorePythonProgram*>(new_pypgm)->checkPendingDelete();
 }
 
 void QorePythonHelper::registerInterrupt() {
