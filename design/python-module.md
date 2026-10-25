@@ -342,6 +342,18 @@ Thread states are cached in `py_thr_map` (per-PythonProgram, per-thread):
 
 ## Qore Classes for Python Classes
 
+`getNamespaceForClass()` resolves an automatically imported type's `__module__` before using the import context.
+Base classes and re-exported classes therefore get the same defining-module path whichever import reaches them
+first; `clmap` still holds one Qore class per Python type. A known module path is not extended by the module prefix
+of `tp_name`. Without a usable `__module__`, the legacy dotted `__name__`, import context and relative type path
+fallbacks apply. Attribute access and UTF-8 conversion errors propagate; missing or non-string metadata falls back.
+The namespace's `python_module` metadata records the resolved dotted module name. Function imports continue to use
+`getNamespaceForObject()` so re-exported functions (ex: `os.getcwd`, defined by `posix`) keep their import paths;
+constants and explicit `export-class` placement are unchanged. Tests: `classNamespaceTest()` and
+`classNamespaceMetadataTest()` (qoretechnologies/qore#5520).
+If a base's metadata fails while a subclass is being created, `addClassToNamespaceIntern()` removes the incomplete
+subclass from both class caches before freeing it, so a later conversion can retry safely.
+
 `setupQorePythonClass()` creates a `QorePythonClass` for a Python type.  A Python base class is added as a virtual base
 class: it shares the Python object, and Qore maps the private data of a virtual base class to the subclass's private
 data (`addVirtualPrivateData()`), which the methods of the Python base class use.  A Qore base class (the base is the

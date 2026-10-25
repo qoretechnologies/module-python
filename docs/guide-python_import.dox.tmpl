@@ -34,6 +34,14 @@ p.issueModuleCmd("python", "import math");
 
     If the module defines \c __all__ (a list or another sequence of names), only the names in it are imported.
 
+    Automatically imported classes are created below \c Python in the namespace of their defining module
+    (\c __module__), including base classes and classes re-exported by another module. For example, importing
+    \c os creates \c Python::os::_Environ with the parent \c Python::collections::abc::MutableMapping; it does
+    not create \c Python::os::MutableMapping. Each %Python type has one %Qore class per %Python program,
+    independent of import order. Functions and constants remain in the importing module's namespace, and
+    \c export-class keeps its explicitly requested %Qore path. A class without a nonempty string \c __module__
+    uses a dotted \c __name__ or the current import context, falling back to \c Python when neither is available.
+
     The methods of a %Python class whose names have a special meaning in %Qore classes (\c constructor,
     \c destructor, \c copy, \c methodGate, \c memberGate and \c memberNotification) are imported with a \c _
     prefix: ex: the \c copy() method of a %Python class is \c _copy() in %Qore.

@@ -4753,6 +4753,77 @@ QoreNamespace* QorePythonProgram::getNamespaceForObject(PyObject* obj) {
     return ns;
 }
 
+QoreNamespace* QorePythonProgram::getNamespaceForClass(ExceptionSink* xsink, PyTypeObject* type,
+        const QoreString& relative_path) {
+    QoreString module_name;
+    bool defining_module = false;
+    // Unlike functions re-exported by a module, a class has one wrapper shared by all import routes and bases.
+    // Resolve its defining module before using the importing module's context. Attribute access can run Python.
+    for (const char* attr : {"__module__", "__name__"}) {
+        QorePythonReferenceHolder value(PyObject_GetAttrString(reinterpret_cast<PyObject*>(type), attr));
+        if (!value) {
+            if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+                checkPythonException(xsink);
+                return nullptr;
+            }
+            PyErr_Clear();
+            continue;
+        }
+        if (!PyUnicode_Check(*value)) {
+            continue;
+        }
+        Py_ssize_t size;
+        const char* str = PyUnicode_AsUTF8AndSize(*value, &size);
+        if (!str) {
+            checkPythonException(xsink);
+            return nullptr;
+        }
+        if (memchr(str, '\0', size)) {
+            xsink->raiseException("PYTHON-IMPORT-ERROR", "Python class attribute '%s' contains a null byte", attr);
+            return nullptr;
+        }
+        if (!strcmp(attr, "__module__")) {
+            module_name.set(str, size);
+            defining_module = !module_name.empty();
+        } else {
+            const char* dot = strrchr(str, '.');
+            if (dot) {
+                module_name.set(str, dot - str);
+            }
+        }
+        if (!module_name.empty()) {
+            break;
+        }
+    }
+    if (module_name.empty()) {
+        if (!module_context) {
+            return pyns;
+        }
+        module_name = module_context;
+    }
+    // Some import paths already use Qore separators. Keep the namespace metadata in Python's dotted form.
+    module_name.replaceAll("::", ".");
+    QoreString ns_path(module_name);
+    ns_path.replaceAll(".", "::");
+    QoreNamespace* ns = pyns->findCreateNamespacePathAll(ns_path.c_str());
+    // Preserve the legacy relative type path fallback, but never append it to a known defining module.
+    if (!defining_module && !relative_path.empty() && relative_path.startsWith(ns->getName())) {
+        size_t len = strlen(ns->getName());
+        if (relative_path.size() > len && relative_path[len] == '.') {
+            QoreString suffix(relative_path);
+            suffix.replace(0, len + 1, nullptr);
+            module_name.concat('.');
+            module_name.concat(suffix.c_str());
+            suffix.replaceAll(".", "::");
+            ns = ns->findCreateNamespacePathAll(suffix.c_str());
+        }
+    }
+#if QORE_VERSION_CODE >= 10013
+    ns->setKeyValueIfNotSet("python_module", module_name.c_str());
+#endif
+    return ns;
+}
+
 QoreClass* QorePythonProgram::getCreateQorePythonClassIntern(ExceptionSink* xsink, PyTypeObject* type,
         strset_t& nsset, QorePythonDeclUseList& uses, const char* cname, int flags) {
     //printd(5, "QorePythonProgram::getCreateQorePythonClassIntern() class: '%s'\n", type->tp_name);
@@ -4791,17 +4862,17 @@ QoreClass* QorePythonProgram::getCreateQorePythonClassIntern(ExceptionSink* xsin
         }
     }
 
-    // create new QorePythonClass
-    QoreNamespace* ns = getNamespaceForObject(reinterpret_cast<PyObject*>(type));
-    if (!rpath_str.empty() && rpath_str.startsWith(ns->getName())) {
-        size_t len = strlen(ns->getName());
-        if (rpath_str[len] == '.' && rpath_str.size() > len) {
-            rpath_str.replace(0, len + 1, nullptr);
-            rpath_str.replaceAll(".", "::");
-            ns = ns->findCreateNamespacePathAll(rpath_str.c_str());
-        }
+    // Attribute access can change tp_name or re-enter the importer, so own the name and recheck the cache.
+    QoreString class_name(cname);
+    QoreNamespace* ns = getNamespaceForClass(xsink, type, rpath_str);
+    if (!ns) {
+        return nullptr;
     }
-    return addClassToNamespaceIntern(xsink, ns, type, cname, i, nsset, flags);
+    i = clmap.lower_bound(type);
+    if (i != clmap.end() && i->first == type) {
+        return i->second;
+    }
+    return addClassToNamespaceIntern(xsink, ns, type, class_name.c_str(), i, nsset, flags);
 }
 
 QorePythonClass* QorePythonProgram::addClassToNamespaceIntern(ExceptionSink* xsink, QoreNamespace* ns,
@@ -4839,7 +4910,19 @@ QorePythonClass* QorePythonProgram::addClassToNamespaceIntern(ExceptionSink* xsi
     //printd(5, "QorePythonProgram::addClassToNamespaceIntern() ns: '%s' cls: '%s' (%s id: %d)\n", ns->getName(),
     //  cls->getName(), type->tp_name, cls->getID());
 
-    return setupQorePythonClass(xsink, ns, type, cls, nsset, flags);
+    QorePythonClass* rv = setupQorePythonClass(xsink, ns, type, cls, nsset, flags);
+    if (!rv) {
+        // A base's metadata can raise an exception. Remove both mappings before the incomplete class is freed,
+        // otherwise retrying the conversion finds a dangling Qore class (or reuses its reverse mapping).
+        clmap.erase(type);
+        nsset.erase(full_path);
+        py_cls_map_t::iterator pi = py_cls_map.find(cls.get());
+        if (pi != py_cls_map.end()) {
+            std::unique_ptr<PythonQoreClass> py_cls(pi->second);
+            py_cls_map.erase(pi);
+        }
+    }
+    return rv;
 }
 
 static constexpr int static_meth_flags = QCF_USES_EXTRA_ARGS;

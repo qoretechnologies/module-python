@@ -239,6 +239,8 @@ class PythonTest inherits Test {
         addTestCase("named argument calls", \namedArgumentTest());
         addTestCase("keyword arguments between Qore and Python", \keywordArgumentTest());
         addTestCase("class methods, callable attributes and base classes of Python classes", \pythonClassTest());
+        addTestCase("Python class defining namespaces and import order", \classNamespaceTest());
+        addTestCase("Python class namespace metadata errors and fallbacks", \classNamespaceMetadataTest());
         addTestCase("assigning, removing and deleting the attributes of Python objects", \attributeWriteTest());
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
@@ -2904,6 +2906,168 @@ string sub made_name() { return Sub::make().name(); }
         assertEq("Base", pgm.callFunction("base_name"));
         assertEq("Sub", pgm.callFunction("sub_name"));
         assertEq("Sub", pgm.callFunction("made_name"));
+    }
+
+    classNamespaceTest() {
+        foreach bool abc_first in (False, True) {
+            Program p(PO_NEW_STYLE);
+            p.loadModule("python");
+            if (abc_first) {
+                p.issueModuleCmd("python", "import collections.abc.Iterable");
+                p.issueModuleCmd("python", "import collections.abc.MutableMapping");
+            }
+            p.issueModuleCmd("python", "import os");
+            foreach string name in ("Iterable", "MutableMapping") {
+                string path = "Python::collections::abc::" + name;
+                assertEq(path, Class::forName(p, path).getPathName());
+                assertThrows("UNKNOWN-CLASS", \Class::forName(), (p, "Python::os::" + name));
+            }
+            Class env = Class::forName(p, "Python::os::_Environ");
+            assertEq("Python::collections::abc::MutableMapping", env.getParentClasses()[0].cls.getPathName());
+            p.issueModuleCmd("python", "import collections.abc.MutableMapping");
+            assertEq("Python::collections::abc::MutableMapping", env.getParentClasses()[0].cls.getPathName());
+            assertEq(Type::String, p.callFunction("Python::os::getcwd").type());
+            p.issueModuleCmd("python", "import _io.BytesIO");
+            assertEq("Python::_io::BytesIO", Class::forName(p, "Python::_io::BytesIO").getPathName());
+        }
+
+        # Two importing modules share classes defined in a nested module; explicit re-exports and instances must
+        # resolve to the same class, while functions and constants remain in the importing module's namespace.
+        foreach bool reverse in (False, True) {
+            Program p(PO_NEW_STYLE);
+            p.issueModuleCmd("python", "parse namespace_fixture.py #
+import sys, types
+owner = types.ModuleType('qore_ns_owner.deep')
+exec('''
+class Shared:
+    def value(self):
+        return 42
+class Mixin:
+    def mixin(self):
+        return 7
+def get_shared():
+    return Shared()
+''', owner.__dict__)
+for module_name, child_name in (('qore_ns_first', 'ChildA'), ('qore_ns_second', 'ChildB')):
+    mod = types.ModuleType(module_name)
+    child = type(child_name, (owner.Shared, owner.Mixin), {'__module__': module_name})
+    setattr(mod, child_name, child)
+    mod.Alias = owner.Shared
+    mod.get_shared = owner.get_shared
+    mod.VALUE = 19
+    mod.instance = owner.Shared()
+    mod.Fallback = type('Fallback', (), {'__module__': None})
+    mod.__all__ = [child_name, 'Alias', 'get_shared', 'VALUE', 'instance', 'Fallback']
+    sys.modules[module_name] = mod
+
+class Explicit:
+    pass
+");
+            foreach string mod in (reverse ? ("qore_ns_second", "qore_ns_first")
+                    : ("qore_ns_first", "qore_ns_second")) {
+                p.issueModuleCmd("python", "import " + mod);
+            }
+            foreach string path in ("Python::qore_ns_first::ChildA", "Python::qore_ns_second::ChildB") {
+                list<string> parents = (map cast<Class>($1.cls).getPathName(),
+                    Class::forName(p, path).getParentClasses())[0..1];
+                assertEq(("Python::qore_ns_owner::deep::Shared", "Python::qore_ns_owner::deep::Mixin"), parents);
+            }
+            p.parse("bool sub shared_instance() { return Python::qore_ns_first::instance instanceof "
+                "Python::qore_ns_owner::deep::Shared; }", "namespace-identity");
+            assertTrue(p.callFunction("shared_instance"));
+            foreach string mod in ("qore_ns_first", "qore_ns_second") {
+                assertEq("Python::" + mod + "::Fallback", Class::forName(p,
+                    "Python::" + mod + "::Fallback").getPathName());
+                assertThrows("UNKNOWN-CLASS", \Class::forName(), (p, "Python::" + mod + "::Shared"));
+                assertThrows("UNKNOWN-CLASS", \Class::forName(), (p, "Python::" + mod + "::Alias"));
+                object o = p.callFunction("Python::" + mod + "::get_shared");
+                assertEq("Python::qore_ns_owner::deep::Shared", Class::getClass(o).getPathName());
+                assertEq(42, o.value());
+                assertEq(19, p.getExpression("Python::" + mod + "::VALUE", "namespace-constant").eval());
+                object instance = p.getExpression("Python::" + mod + "::instance", "namespace-instance").eval();
+                assertEq("Python::qore_ns_owner::deep::Shared", Class::getClass(instance).getPathName());
+                # Release the imported object's Python private data while its Program is still alive.
+                delete instance;
+            }
+            p.issueModuleCmd("python", "export-class Explicit");
+            assertEq("Explicit", Class::forName(p, "Explicit").getPathName());
+        }
+    }
+
+    classNamespaceMetadataTest() {
+        PythonProgram p("
+class Meta(type):
+    def __getattribute__(cls, name):
+        if name == '__module__':
+            mode = type.__getattribute__(cls, 'mode')
+            if mode == 'missing':
+                raise AttributeError('no module')
+            if mode == 'error':
+                raise ValueError('module lookup failed')
+            if mode == 'surrogate':
+                return '\\ud800'
+            if mode == 'nul':
+                return 'owner\\x00hidden'
+            if mode == 'empty':
+                return ''
+            if mode == 'number':
+                return 42
+            return None
+        return type.__getattribute__(cls, name)
+
+def make(mode):
+    cls = Meta('Metadata_' + mode, (), {'mode': mode})
+    return cls()
+
+def legacy_name():
+    return Meta('qore_ns_legacy.deep.Legacy', (), {'mode': 'missing'})()
+
+class Dotted:
+    pass
+Dotted.__name__ = 'misleading.Dotted'
+Dotted.__module__ = 'qore_ns_real.owner'
+def dotted():
+    return Dotted()
+
+broken = True
+class BaseMeta(type):
+    def __getattribute__(cls, name):
+        if name == '__module__' and type.__getattribute__(cls, '__name__') == 'BrokenBase' and broken:
+            raise ValueError('base module lookup failed')
+        return type.__getattribute__(cls, name)
+class BrokenBase(metaclass=BaseMeta):
+    __module__ = 'qore_ns_retry'
+    def value(self):
+        return 42
+class RetryChild(BrokenBase):
+    __module__ = 'qore_ns_retry'
+def retry_child(repair=False):
+    global broken
+    if repair:
+        broken = False
+    return RetryChild()
+", "namespace_metadata.py");
+        foreach string mode in ("missing", "none", "empty", "number") {
+            object o = p.callFunction("make", mode);
+            assertEq("Python::Metadata_" + mode, Class::getClass(o).getPathName());
+        }
+        assertThrows("builtins.ValueError", "module lookup failed", \p.callFunction(), ("make", "error"));
+        assertThrows("builtins.UnicodeEncodeError", "surrogates not allowed", \p.callFunction(),
+            ("make", "surrogate"));
+        assertThrows("PYTHON-IMPORT-ERROR", "contains a null byte", \p.callFunction(), ("make", "nul"));
+        object dotted = p.callFunction("dotted");
+        assertEq("Python::qore_ns_real::owner::Dotted", Class::getClass(dotted).getPathName());
+        object legacy = p.callFunction("legacy_name");
+        assertEq("Python::qore_ns_legacy::deep::Legacy", Class::getClass(legacy).getPathName());
+        # A failed parent lookup must not leave an incomplete subclass in either class cache.
+        for (int i = 0; i < 2; ++i) {
+            assertThrows("builtins.ValueError", "base module lookup failed", \p.callFunction(), "retry_child");
+        }
+        object repaired = p.callFunction("retry_child", True);
+        assertEq("Python::qore_ns_retry::RetryChild", Class::getClass(repaired).getPathName());
+        assertEq("Python::qore_ns_retry::BrokenBase",
+            Class::getClass(repaired).getParentClasses()[0].cls.getPathName());
+        assertEq(42, repaired.value());
     }
 
     # assigning a member of the Qore object of a Python object sets the Python attribute; removing or deleting the

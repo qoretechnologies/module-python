@@ -737,6 +737,12 @@ protected:
 
     DLLLOCAL QoreNamespace* getNamespaceForObject(PyObject* type);
 
+    //! Resolves a Python class's defining module, falling back to the import context when unavailable
+    /** @return the namespace, or nullptr with an exception in xsink
+    */
+    DLLLOCAL QoreNamespace* getNamespaceForClass(ExceptionSink* xsink, PyTypeObject* type,
+        const QoreString& relative_path);
+
     //! returns the Qore class of a Python type, creating it if necessary
     /** @param uses the uses of the Qore classes of the Python types made for Qore classes that are returned or used as
         base classes; held by the caller until it has used the class

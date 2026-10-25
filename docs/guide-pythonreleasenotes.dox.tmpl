@@ -42,6 +42,12 @@
       <a href="https://github.com/qoretechnologies/qore/issues/5503">issue 5503</a>)
 
     <b>Bug Fixes:</b>
+    - automatically imported %Python classes and their bases use the namespace of their defining module
+      (\c __module__), independent of import order: importing \c os creates
+      \c Python::collections::abc::Iterable, rather than \c Python::os::Iterable. This also changes the paths
+      of classes re-exported by other modules; use their defining-module paths. Function and constant imports
+      and explicit \c export-class paths are unchanged. Errors reading class namespace metadata are propagated
+      safely (<a href="https://github.com/qoretechnologies/qore/issues/5520">issue 5520</a>)
     - values nested too deeply for the stack (in either direction) raise an exception instead of crashing; values
       that %Python code changes while they are converted (ex: in \c tzinfo.utcoffset()) are converted safely;
       \c str subclass keys (ex: \c StrEnum members) are strings; \c datetime.time subclasses are converted;
