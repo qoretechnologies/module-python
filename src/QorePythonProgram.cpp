@@ -1917,7 +1917,12 @@ PythonQoreClass* QorePythonProgram::findCreatePythonClass(const QoreClass& cls, 
     }
 
     std::unique_ptr<PythonQoreClass> py_cls(new PythonQoreClass(this, mod_name, cls, i));
-    [[maybe_unused]] PyTypeObject* t = py_cls->getPythonType();
+    PyTypeObject* t = py_cls->getPythonType();
+    if (!t) {
+        // the Python type could not be created; the Python exception is set
+        assert(PyErr_Occurred());
+        return nullptr;
+    }
     printd(5, "QorePythonProgram::findCreatePythonClass() returning new %s.%s type: %p (%s)\n", mod_name,
         cls.getName(), t, t->tp_name);
     //py_cls_map.insert(i, py_cls_map_t::value_type(&cls, py_cls.get()));
@@ -2556,12 +2561,14 @@ PyObject* QorePythonProgram::hashDeclInit(PyObject* capsule, PyObject* args, PyO
 }
 
 int QorePythonProgram::importQoreClassToPython(PyObject* mod, const QoreClass& cls, const char* mod_name) {
-    PyTypeObject* py_cls = findCreatePythonClass(cls, mod_name)->getPythonType();
+    PythonQoreClass* py_cls = findCreatePythonClass(cls, mod_name);
+    if (!py_cls) {
+        return -1;
+    }
     //printd(5, "QorePythonProgram::importQoreClassToPython() py_cls: %p ('%s') cn: '%s' mod_name: '%s'\n", py_cls,
-    //  py_cls->tp_name, cls.getName(), mod_name);
+    //  py_cls->getPythonType()->tp_name, cls.getName(), mod_name);
 
-    PyObject* clsobj = (PyObject*)py_cls;
-    if (PyObject_SetAttrString(mod, cls.getName(), clsobj)) {
+    if (PyObject_SetAttrString(mod, cls.getName(), reinterpret_cast<PyObject*>(py_cls->getPythonType()))) {
         return -1;
     }
     return 0;
@@ -4028,6 +4035,10 @@ PyObject* QorePythonProgram::getPythonValueIntern(QoreValue val, ExceptionSink* 
                 return nullptr;
             }
             PythonQoreClass* py_cls = findCreatePythonClass(*cls, "qore");
+            if (!py_cls) {
+                checkPythonException(xsink);
+                return nullptr;
+            }
             return py_cls->wrap(o);
         }
     }

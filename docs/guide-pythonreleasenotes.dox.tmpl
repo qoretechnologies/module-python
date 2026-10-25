@@ -74,6 +74,11 @@
       \c %%modern), calling a %Python callable through a call reference with an argument that was not a constant (ex:
       a variable) raised \c PYTHON-VALUE-ERROR
       (<a href="https://github.com/qoretechnologies/qore/issues/5535">issue 5535</a>)
+    - the constructor, destructor and copy method of %Qore classes are no longer %Python methods: calling them from
+      %Python ran a destructor's code without destroying the object, or crashed (\c copy() and the destructors of
+      builtin classes); importing a %Qore class that inherits a %Python class into %Python (ex: with \c import-ns) no
+      longer crashes: its %Python type is the type of a %Qore class whose methods include those of the %Python class
+      (<a href="https://github.com/qoretechnologies/qore/issues/5522">issue 5522</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

@@ -158,6 +158,29 @@ class PythonLifecycleTracked {
     }
 }
 
+#! has a constructor, a destructor and a copy method; used to check that they are not Python methods
+class PythonSpecialMethods {
+    public {
+        static int destroyed = 0;
+        static int copied = 0;
+    }
+
+    constructor() {
+    }
+
+    destructor() {
+        ++destroyed;
+    }
+
+    copy() {
+        ++copied;
+    }
+
+    string get() {
+        return "get";
+    }
+}
+
 #! its destructor waits for a lock; used to check that Qore code released by Python runs without the GIL
 class PythonGilTestLocker {
     private {
@@ -243,6 +266,7 @@ class PythonTest inherits Test {
         addTestCase("Python class namespace metadata errors and fallbacks", \classNamespaceMetadataTest());
         addTestCase("assigning, removing and deleting the attributes of Python objects", \attributeWriteTest());
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
+        addTestCase("importing a Qore class that inherits a Python class", \qoreSubclassImportTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -3345,6 +3369,38 @@ object sub new_q() { return new Q(); }
         assertEq(("updated", NOTHING), q.show());
     }
 
+    # a Qore class that inherits a Python class can be imported into Python (ex: import-ns): its Python type is the
+    # type of a Qore class (a Python type cannot be the base class of such a type); previously the import crashed
+    # (the result of PyType_FromSpecWithBases() was not checked) (issue 5522)
+    qoreSubclassImportTest() {
+        Program pgm(PO_NEW_STYLE);
+        pgm.issueModuleCmd("python", "parse subclass_import.py #
+class Base:
+    def hook(self):
+        return 'python-hook'
+    def base_only(self):
+        return 'base-only:' + self.hook()
+");
+        pgm.issueModuleCmd("python", "export-class Base");
+        pgm.parse("our auto saved;
+namespace SubclassImport {
+    class Q inherits Base {
+        string hook() { return 'qore-hook'; }
+        string qm() { return 'qm'; }
+    }
+    public sub save(auto v) { saved = v; }
+}
+", "subclass-import");
+        pgm.issueModuleCmd("python", "import-ns SubclassImport si");
+        pgm.issueModuleCmd("python", "parse subclass_import_check.py #
+q = si.Q()
+si.save({'type': type(q).__name__, 'hook': q.hook(), 'qm': q.qm(), 'base_only': q.base_only(),
+    'isinstance': isinstance(q, si.Q)})
+");
+        assertEq({"type": "Q", "hook": "qore-hook", "qm": "qm", "base_only": "base-only:qore-hook",
+            "isinstance": True}, pgm.getGlobalVariable("saved"));
+    }
+
     # the Python object of a Qore object whose class inherits a Python class is an object of a generated subclass
     # whose methods that the Qore class overrides call the Qore methods, so that Python code calls the Qore overrides
     qoreOverrideTest() {
@@ -4624,6 +4680,44 @@ def get():
         assertEq("memberGate x", o._memberGate("x"));
         assertEq("memberNotification x", o._memberNotification("x"));
         assertEq("static", o.constructor_static());
+
+        # the constructor, destructor and copy method of a Qore class are not Python methods, for user and builtin
+        # classes; calling them ran the destructor's code without destroying the object or crashed (issue 5522)
+        PythonProgram sp("
+from qore.__root__ import PythonSpecialMethods
+from qore.__root__.Qore.Thread import Counter
+import copy
+
+def attrs(o):
+    return [n for n in ('constructor', 'destructor', 'copy', 'get') if hasattr(o, n)]
+
+def check():
+    o = PythonSpecialMethods()
+    c = Counter(1)
+    rv = {
+        'user': attrs(o),
+        'user type': attrs(PythonSpecialMethods),
+        'user dir': [n for n in dir(o) if n in ('constructor', 'destructor', 'copy')],
+        'builtin': attrs(c),
+        'get': o.get(),
+    }
+    try:
+        copy.copy(o)
+        rv['copy.copy'] = 'copied'
+    except TypeError:
+        rv['copy.copy'] = 'TypeError'
+    return rv
+", "special-methods.py");
+        int destroyed = PythonSpecialMethods::destroyed;
+        hash<auto> h = sp.callFunction("check");
+        assertEq(("get",), h."user");
+        assertEq(("get",), h."user type");
+        assertEq((), h."user dir");
+        assertEq((), h.builtin);
+        assertEq("get", h.get);
+        assertEq("TypeError", h."copy.copy");
+        assertEq(0, PythonSpecialMethods::copied);
+        assertEq(destroyed + 1, PythonSpecialMethods::destroyed, "the destructor ran once");
 
         # Qore's exit() is not shadowed by the exit object of Python's builtins, which has no constants in Qore
         Program pgm(PO_NEW_STYLE);

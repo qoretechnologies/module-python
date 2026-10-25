@@ -172,19 +172,31 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
     // base classes, then we populate methods instead directly
     QorePythonReferenceHolder bases;
     {
-        PythonQoreClass* base_cls = nullptr;
         QoreParentClassIterator ci(qcls);
         while (ci.next()) {
             if (ci.getAccess() > Private) {
                 continue;
             }
 
-            base_cls = pypgm->findCreatePythonClass(ci.getParentClass(), module_name);
-            cls_set.insert(&ci.getParentClass());
+            PythonQoreClass* base_cls = pypgm->findCreatePythonClass(ci.getParentClass(), module_name);
+            if (!base_cls) {
+                // the Python exception is set
+                return;
+            }
+            PyTypeObject* base_type = base_cls->getPythonType();
+            // the type of a Python class (the parent class is a Qore class of a Python class) does not have the
+            // layout of the types of Qore classes, so it cannot be the base class; the methods of the parent class
+            // are added instead
+            if (!PyType_IsSubtype(base_type, &PythonQoreObjectBase_Type)) {
+                break;
+            }
             bases = PyTuple_New(1);
-            PyObject* py_base_cls = reinterpret_cast<PyObject*>(base_cls->getPythonType());
-            Py_INCREF(py_base_cls);
-            PyTuple_SET_ITEM(*bases, 0, py_base_cls);
+            if (!bases) {
+                return;
+            }
+            cls_set.insert(&ci.getParentClass());
+            Py_INCREF(reinterpret_cast<PyObject*>(base_type));
+            PyTuple_SET_ITEM(*bases, 0, reinterpret_cast<PyObject*>(base_type));
             break;
         }
     }
@@ -193,8 +205,10 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
         ? reinterpret_cast<PyTypeObject*>(PyType_FromSpecWithBases(&spec, *bases))
         : reinterpret_cast<PyTypeObject*>(PyType_FromSpec(&spec));
     //printd(5, "PythonQoreClass::PythonQoreClass() %s py_type: %p\n", qcls.getName(), py_type);
-
-    assert(py_type);
+    if (!py_type) {
+        // the Python exception is set; findCreatePythonClass() returns nullptr
+        return;
+    }
     assert(py_type->tp_dict);
 
     // set of normal method names
@@ -202,8 +216,8 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
 
     pypgm->insertClass(i, &qcls, this);
 
-    // setup class
-    populateClass(pypgm, qcls, cls_set, meth_set);
+    // setup class; the first parent class is not populated if it is the base class
+    populateClass(pypgm, qcls, cls_set, meth_set, (bool)bases);
 
     // dir() lists the public members of the Qore object
     {
@@ -397,7 +411,8 @@ void PythonQoreClass::populateClass(QorePythonProgram* pypgm, const QoreClass& q
         QoreMethodIterator i(qcls);
         while (i.next()) {
             const QoreMethod* m = i.getMethod();
-            if (m->getAccess() > Private) {
+            // the constructor, destructor and copy method are not callable as methods
+            if (m->getAccess() > Private || m->getMethodType() != MT_Normal) {
                 continue;
             }
 
