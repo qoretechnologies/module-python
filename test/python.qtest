@@ -158,6 +158,18 @@ class PythonLifecycleTracked {
     }
 }
 
+#! a base class whose constant is an object of its subclass: making the Python type of the subclass makes the type
+#! of the base class, which makes the type of the subclass again for the constant
+namespace PythonNestedClass {
+    # the classes of a namespace are imported in the order of their names: the subclass is imported first
+    class Root {
+        const Default = new Derived();
+    }
+
+    class Derived inherits Root {
+    }
+}
+
 #! counts its destructions; used to check the reference cycles between Python and Qore
 class PythonCycleTracked {
     public {
@@ -313,6 +325,7 @@ class PythonTest inherits Test {
         addTestCase("assigning, removing and deleting the attributes of Python objects", \attributeWriteTest());
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
         addTestCase("importing a Qore class that inherits a Python class", \qoreSubclassImportTest());
+        addTestCase("a Qore class made into a Python type in a nested call", \nestedClassCreationTest());
         addTestCase("reference cycles between Python and Qore objects", \pythonQoreCycleTest());
         addTestCase("deleting a program from its own call path", \selfDeleteTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
@@ -3508,6 +3521,18 @@ def make_kept_cycle():
         assertEq(destroyed + 2, PythonCycleTracked::destroyed);
         delete p;
         assertEq(destroyed + 3, PythonCycleTracked::destroyed, "deleting the Python program releases the cycle");
+    }
+
+    # a Qore class made into a Python type again in a nested call has one Python type; previously the objects of the
+    # nested one were not instances of the imported type, and the other one leaked (issue 5539)
+    nestedClassCreationTest() {
+        PythonProgram p("
+import qoreloader
+from qore.__root__.PythonNestedClass import Derived, Root
+def check():
+    return [type(Root.Default) is Derived, isinstance(Root.Default, Derived), isinstance(Root.Default, Root)]
+", "nested-class.py");
+        assertEq((True, True, True), p.callFunction("check"));
     }
 
     # a Qore class that inherits a Python class can be imported into Python (ex: import-ns): its Python type is the

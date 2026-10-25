@@ -123,9 +123,9 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, PyTypeObject* type, c
 static PyMethodDef qore_dir_def = {"__dir__", PythonQoreClass::py_dir, METH_O,
     "returns the Python attributes and the public members of the Qore object"};
 
-PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_name, const QoreClass& qcls,
-        py_cls_map_t::iterator i) : handle(QorePythonDeclHandle::create(&qcls, qcls.getProgram(),
-            QorePythonDeclHandle::CLASS, qcls.getName())) {
+PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_name, const QoreClass& qcls)
+        : handle(QorePythonDeclHandle::create(&qcls, qcls.getProgram(), QorePythonDeclHandle::CLASS,
+            qcls.getName())) {
     //printd(5, "PythonQoreClass::PythonQoreClass() %s.%s py_type: %p\n", module_name, qcls.getName(), &py_type);
 
     name.sprintf("%s.%s", module_name, qcls.getName());
@@ -214,7 +214,8 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
     // set of normal method names
     cstrset_t meth_set;
 
-    pypgm->insertClass(i, &qcls, this);
+    // no hint: the creation of the base classes above can change the map (see findCreatePythonClass())
+    pypgm->insertClass(&qcls, this);
 
     // setup class; the first parent class is not populated if it is the base class
     populateClass(pypgm, qcls, cls_set, meth_set, (bool)bases);

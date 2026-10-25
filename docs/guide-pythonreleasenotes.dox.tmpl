@@ -106,6 +106,10 @@
       code uses one of its classes (ex: releasing the result of a method call deletes the class's %Program) no longer
       deadlocks waiting for the current thread (see @ref python_interrupts;
       <a href="https://github.com/qoretechnologies/qore/issues/5526">issue 5526</a>)
+    - a %Qore class that is made into a %Python type again while its type is made (ex: a constant of its base class is
+      an object of the class) has one %Python type: the objects of the second one were not instances of the imported
+      type, and the other one was not freed (<a href="https://github.com/qoretechnologies/qore/issues/5539">issue
+      5539</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

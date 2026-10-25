@@ -1960,16 +1960,24 @@ PythonQoreClass* QorePythonProgram::findCreatePythonClass(const QoreClass& cls, 
         i = py_cls_map.erase(i);
     }
 
-    std::unique_ptr<PythonQoreClass> py_cls(new PythonQoreClass(this, mod_name, cls, i));
+    std::unique_ptr<PythonQoreClass> py_cls(new PythonQoreClass(this, mod_name, cls));
     PyTypeObject* t = py_cls->getPythonType();
     if (!t) {
         // the Python type could not be created; the Python exception is set
         assert(PyErr_Occurred());
         return nullptr;
     }
+    // creating the class can create it in a nested call (ex: a constant of a base class is an object of the class),
+    // whose Python class is in the map then: it is the class's Python class, and the one made here is released with
+    // the classes in the map (its type can already be in use, ex: as the base of another type)
+    py_cls_map_t::iterator ci = py_cls_map.find(&cls);
+    assert(ci != py_cls_map.end());
+    if (ci->second != py_cls.get()) {
+        stale_py_cls_vec.push_back(py_cls.release());
+        return ci->second;
+    }
     printd(5, "QorePythonProgram::findCreatePythonClass() returning new %s.%s type: %p (%s)\n", mod_name,
         cls.getName(), t, t->tp_name);
-    //py_cls_map.insert(i, py_cls_map_t::value_type(&cls, py_cls.get()));
     return py_cls.release();
 }
 

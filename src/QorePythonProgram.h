@@ -512,11 +512,7 @@ public:
     //! Returns a new reference; may return nullptr with only a Python exception set
     DLLLOCAL PyObject* getPythonValueIntern(QoreValue val, ExceptionSink* xsink);
 
-    //! Inserts a new class in the map
-    DLLLOCAL void insertClass(py_cls_map_t::iterator i, const QoreClass* qcls, PythonQoreClass* pycls) {
-        py_cls_map.insert(i, py_cls_map_t::value_type(qcls, pycls));
-    }
-
+    //! Inserts a new class in the map; does nothing if the map has a class for qcls (see findCreatePythonClass())
     DLLLOCAL void insertClass(const QoreClass* qcls, PythonQoreClass* pycls) {
         py_cls_map.insert(py_cls_map_t::value_type(qcls, pycls));
     }
