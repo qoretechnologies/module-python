@@ -3013,6 +3013,40 @@ static void qore_python_conversion_error(QorePythonProgram* pypgm, ExceptionSink
     }
 }
 
+//! returns a new reference to the item of a list at the given index
+/** In free-threaded builds, other threads can change a list while it is converted and a borrowed item can be freed,
+    so a strong reference is taken atomically.  With the GIL, no other thread runs while the size and the item are
+    read.
+
+    @return a new reference, or nullptr if the index is past the end of the list (with no Python exception set)
+*/
+static PyObject* qore_python_list_get_item(PyObject* list, Py_ssize_t i) {
+#ifdef Py_GIL_DISABLED
+    PyObject* rv = PyList_GetItemRef(list, i);
+    if (!rv) {
+        // IndexError: another thread made the list shorter
+        PyErr_Clear();
+    }
+    return rv;
+#else
+    return i < PyList_GET_SIZE(list) ? Py_NewRef(PyList_GET_ITEM(list, i)) : nullptr;
+#endif
+}
+
+//! returns a new reference to the dict to iterate with PyDict_Next()
+/** In free-threaded builds, PyDict_Next() is not safe while other threads change the dict; a copy is iterated there,
+    which is made atomically.  With the GIL, the dict itself is iterated.
+
+    @return a new reference, or nullptr with a Python exception set
+*/
+static PyObject* qore_python_dict_for_iteration(PyObject* dict) {
+#ifdef Py_GIL_DISABLED
+    return PyDict_Copy(dict);
+#else
+    return Py_NewRef(dict);
+#endif
+}
+
 QoreListNode* QorePythonProgram::getQoreListFromList(ExceptionSink* xsink, PyObject* val, pyobj_set_t& rset) {
     assert(PyList_Check(val));
     QorePythonConversionPathHelper path(rset, val);
@@ -3020,11 +3054,13 @@ QoreListNode* QorePythonProgram::getQoreListFromList(ExceptionSink* xsink, PyObj
         return nullptr;
     }
     ReferenceHolder<QoreListNode> rv(new QoreListNode(autoTypeInfo), xsink);
-    // the size is read for each element and each element is referenced while it is converted: converting a value
+    // the size is checked for each element and each element is referenced while it is converted: converting a value
     // can run Python code (ex: utcoffset() of a tzinfo) that changes the list
-    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(val); ++i) {
-        QorePythonReferenceHolder item(PyList_GET_ITEM(val, i));
-        item.py_ref();
+    for (Py_ssize_t i = 0; ; ++i) {
+        QorePythonReferenceHolder item(qore_python_list_get_item(val, i));
+        if (!item) {
+            break;
+        }
         ValueHolder qval(getQoreValue(xsink, *item, rset), xsink);
         if (*xsink) {
             return nullptr;
@@ -3128,11 +3164,16 @@ QoreHashNode* QorePythonProgram::getQoreHashFromDict(ExceptionSink* xsink, PyObj
         return nullptr;
     }
 
+    QorePythonReferenceHolder dict(qore_python_dict_for_iteration(val));
+    if (!dict) {
+        qore_python_conversion_error(this, xsink);
+        return nullptr;
+    }
     ReferenceHolder<QoreHashNode> rv(new QoreHashNode(autoTypeInfo), xsink);
 
     PyObject* borrowed_key, * borrowed_value;
     Py_ssize_t pos = 0;
-    while (PyDict_Next(val, &pos, &borrowed_key, &borrowed_value)) {
+    while (PyDict_Next(*dict, &pos, &borrowed_key, &borrowed_value)) {
         // the key and the value are referenced while they are converted: converting a value can run Python code that
         // changes the dict
         QorePythonReferenceHolder key(borrowed_key);
@@ -3185,7 +3226,15 @@ BinaryNode* QorePythonProgram::getQoreBinaryFromBytes(PyObject* val) {
 BinaryNode* QorePythonProgram::getQoreBinaryFromByteArray(PyObject* val) {
     assert(PyByteArray_Check(val));
     SimpleRefHolder<BinaryNode> rv(new BinaryNode);
+    // in free-threaded builds, another thread can resize the bytearray while it is copied; the copy runs no Python
+    // code
+#ifdef Py_GIL_DISABLED
+    Py_BEGIN_CRITICAL_SECTION(val);
+#endif
     rv->append(PyByteArray_AsString(val), PyByteArray_Size(val));
+#ifdef Py_GIL_DISABLED
+    Py_END_CRITICAL_SECTION();
+#endif
     return rv.release();
 }
 
@@ -5054,9 +5103,14 @@ void QorePythonProgram::addPythonClassMethods(PyTypeObject* type, QorePythonClas
         if (!t->tp_dict) {
             continue;
         }
+        QorePythonReferenceHolder type_dict(qore_python_dict_for_iteration(t->tp_dict));
+        if (!type_dict) {
+            PyErr_Clear();
+            continue;
+        }
         PyObject* key, * value;
         Py_ssize_t pos = 0;
-        while (PyDict_Next(t->tp_dict, &pos, &key, &value)) {
+        while (PyDict_Next(*type_dict, &pos, &key, &value)) {
             const char* keystr = PyUnicode_Check(key) ? PyUnicode_AsUTF8(key) : nullptr;
             if (!keystr) {
                 PyErr_Clear();
@@ -5145,9 +5199,14 @@ PyObject* QorePythonProgram::getQoreSubclassType(ExceptionSink* xsink, const Qor
         if (!t->tp_dict) {
             continue;
         }
+        QorePythonReferenceHolder type_dict(qore_python_dict_for_iteration(t->tp_dict));
+        if (!type_dict) {
+            checkPythonException(xsink);
+            return nullptr;
+        }
         PyObject* name, * value;
         Py_ssize_t pos = 0;
-        while (PyDict_Next(t->tp_dict, &pos, &name, &value)) {
+        while (PyDict_Next(*type_dict, &pos, &name, &value)) {
             const char* namestr = PyUnicode_Check(name) ? PyUnicode_AsUTF8(name) : nullptr;
             if (!namestr) {
                 PyErr_Clear();
@@ -5338,11 +5397,15 @@ PyObject* QorePythonProgram::callQoreOverride(PyObject* name, PyObject* args) {
 }
 
 void QorePythonProgram::addPythonTypeAttributes(PyTypeObject* type, QorePythonClass* cls, strset_t& names) {
-    if (type->tp_dict) {
+    QorePythonReferenceHolder type_dict(type->tp_dict ? qore_python_dict_for_iteration(type->tp_dict) : nullptr);
+    if (type->tp_dict && !type_dict) {
+        PyErr_Clear();
+    }
+    if (type_dict) {
         PyObject* key, * value;
         Py_ssize_t pos = 0;
 
-        while (PyDict_Next(type->tp_dict, &pos, &key, &value)) {
+        while (PyDict_Next(*type_dict, &pos, &key, &value)) {
             assert(Py_TYPE(key) == &PyUnicode_Type);
             const char* keystr = PyUnicode_AsUTF8(key);
             if (!keystr) {
@@ -5835,25 +5898,24 @@ int QorePythonProgram::importModule(ExceptionSink* xsink, PyObject* mod, const c
     // returns a borrowed reference
     {
         PyObject* all = PyDict_GetItemString(mod_dict, "__all__");
-        // any sequence (usually a list or a tuple)
-        QorePythonReferenceHolder all_seq(all ? PySequence_Fast(all, "") : nullptr);
+        // any sequence (usually a list or a tuple); a tuple is made of a list, as importing a symbol runs Python
+        // code that can change the list (and other threads can in free-threaded builds)
+        QorePythonReferenceHolder all_seq(all ? PySequence_Tuple(all) : nullptr);
         if (all && !all_seq) {
             PyErr_Clear();
             throw QoreStandardException("PYTHON-IMPORT-ERROR", "module '%s' __all__ is not a sequence (type '%s')",
                 module, Py_TYPE(all)->tp_name);
         }
         if (all_seq) {
-            Py_ssize_t len = PySequence_Fast_GET_SIZE(*all_seq);
+            Py_ssize_t len = PyTuple_GET_SIZE(*all_seq);
             for (Py_ssize_t i = 0; i < len; ++i) {
-                // referenced while the symbol is imported, which runs Python code that can change __all__
-                QorePythonReferenceHolder sv(PySequence_Fast_GET_ITEM(*all_seq, i));
-                sv.py_ref();
-                if (!PyUnicode_Check(*sv)) {
+                PyObject* sv = PyTuple_GET_ITEM(*all_seq, i);
+                if (!PyUnicode_Check(sv)) {
                     throw QoreStandardException("PYTHON-IMPORT-ERROR", "module '%s' __all__ has an invalid " \
-                        "element with type '%s'; expecting 'str'", module, Py_TYPE(*sv)->tp_name);
+                        "element with type '%s'; expecting 'str'", module, Py_TYPE(sv)->tp_name);
                 }
                 // ex: a name with a lone surrogate, which cannot be encoded in UTF-8 (UnicodeEncodeError)
-                const char* symbol = PyUnicode_AsUTF8(*sv);
+                const char* symbol = PyUnicode_AsUTF8(sv);
                 if (!symbol) {
                     checkPythonException(xsink);
                     return -1;
@@ -5937,7 +5999,10 @@ int QorePythonProgram::checkImportSymbol(ExceptionSink* xsink, const char* modul
 int QorePythonProgram::findCreateQoreFunction(PyObject* value, const char* symbol, q_external_func_t func) {
     QoreNamespace* ns = getNamespaceForObject(value);
     if (!ns->findLocalFunction(symbol)) {
-        // do not need to save reference here
+        // the function is referenced as long as the program is: it is not necessarily referenced elsewhere (ex: a
+        // function that the __getattr__() of a module returned)
+        Py_INCREF(value);
+        addObj(value);
         ns->addBuiltinVariant((void*)value, symbol, func, QCF_USES_EXTRA_ARGS, QDOM_UNCONTROLLED_API, autoTypeInfo);
         printd(5, "QorePythonProgram::findCreateQoreFunction() added function %s::%s() (%s)\n", ns->getName(),
             symbol, Py_TYPE(value)->tp_name);

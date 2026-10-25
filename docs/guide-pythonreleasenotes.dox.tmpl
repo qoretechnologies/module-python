@@ -79,6 +79,13 @@
       builtin classes); importing a %Qore class that inherits a %Python class into %Python (ex: with \c import-ns) no
       longer crashes: its %Python type is the type of a %Qore class whose methods include those of the %Python class
       (<a href="https://github.com/qoretechnologies/qore/issues/5522">issue 5522</a>)
+    - with free-threaded %Python, converting a list, a dict or a bytearray that another %Python thread changes no
+      longer crashes: list items are referenced atomically, a copy of a dict is iterated and a bytearray is copied
+      in a critical section; importing a module whose \c __all__ is changed by the import
+      (ex: by the module's \c __getattr__()) no longer reads past the end of the list and crashes, also with the GIL;
+      the %Python functions that are imported as %Qore functions are referenced as long as the %Python program is:
+      calling a function that was referenced only by the import (ex: one returned by the \c __getattr__() of a
+      module) crashed (<a href="https://github.com/qoretechnologies/qore/issues/5523">issue 5523</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

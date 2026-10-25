@@ -281,6 +281,7 @@ class PythonTest inherits Test {
         addTestCase("the functions of qoreloader reject strings that cannot be converted", \qoreloaderArgumentTest());
         addTestCase("the scopes of evalStatement(), evalStatementKeep(), evalExpression() and run()", \evalScopeTest());
         addTestCase("module command syntax errors", \moduleCommandSyntaxTest());
+        addTestCase("conversion of containers that other Python threads change", \concurrentContainerTest());
         addTestCase("conversion of deeply nested values, values changed while converted and str subclass keys",
             \conversionRobustnessTest());
         addTestCase("type conversion test", \typeConversionTest());
@@ -4017,6 +4018,28 @@ def limit():
             assertEq(1, pgm.callFunction("pub"));
             assertThrows("NO-FUNCTION", \pgm.callFunction(), "allmod_list::notpub");
         }
+        # importing a symbol runs Python code (here the __getattr__() of the module) that changes __all__; the names of
+        # __all__ when the import started are imported; previously the items were read past the end of the changed
+        # list (issue 5523)
+        {
+            File f();
+            f.open2(tmp.path + "/allmod_shrink.py", O_WRONLY | O_CREAT | O_TRUNC);
+            f.write("__all__ = ['a', 'b', 'c']
+def __getattr__(name):
+    if name in ('a', 'b', 'c'):
+        __all__.clear()
+        return lambda: name
+    raise AttributeError(name)
+");
+            f.close();
+            Program pgm(PO_NEW_STYLE);
+            pgm.loadModule("python");
+            pgm.issueModuleCmd("python", "add-module-path " + tmp.path);
+            pgm.issueModuleCmd("python", "import allmod_shrink");
+            pgm.parse("list<auto> sub names() { return (allmod_shrink::a(), allmod_shrink::b(), "
+                "allmod_shrink::c()); }\n", "allmod-shrink");
+            assertEq(("a", "b", "c"), pgm.callFunction("names"));
+        }
         # names that cannot be encoded in UTF-8 (lone surrogates): in __all__ they raise UnicodeEncodeError; names of
         # dir() are not imported
         {
@@ -4466,6 +4489,79 @@ def reinit():
 ", "proxy_lifetime.py");
         assertEq((7,), p.callFunction("run", Counter sub () { return c; }));
         assertEq(("the 'qore.Thread.Counter' object has already been initialized", 2), p.callFunction("reinit"));
+    }
+
+    # in free-threaded builds, other Python threads can change a list, a dict or a bytearray while it is converted to
+    # Qore; list items are referenced atomically, a copy of a dict is iterated and a bytearray is copied in a critical
+    # section.  Previously the conversion of a list read items that
+    # another thread had removed and crashed the process (issue 5523).  With the GIL the test checks the same results.
+    concurrentContainerTest() {
+        PythonProgram p("
+import threading
+
+shared_l = [[i] for i in range(1000)]
+shared_d = {str(i): [i] for i in range(1000)}
+shared_b = bytearray(b'x' * 1000)
+stop = False
+
+def mutate():
+    i = 0
+    while not stop:
+        i += 1
+        shared_l.append([i])
+        shared_l.pop(0)
+        if i % 7 == 0:
+            shared_l.clear()
+            shared_l.extend([[j] for j in range(1000)])
+        shared_d[str(i % 2000)] = [i]
+        shared_d.pop(str((i + 1000) % 2000), None)
+        if i % 13 == 0:
+            shared_d.clear()
+            shared_d.update({str(j): [j] for j in range(1000)})
+        shared_b.extend(b'x' * 1000)
+        del shared_b[:1000]
+        if i % 11 == 0:
+            shared_b.clear()
+            shared_b.extend(b'x' * 2000)
+
+thread = threading.Thread(target=mutate)
+
+def start():
+    thread.start()
+
+def end():
+    global stop
+    stop = True
+    thread.join()
+
+def get():
+    return [shared_l, shared_d, shared_b]
+", "concurrent.py");
+        p.callFunction("start");
+        on_exit p.callFunction("end");
+        hash<string, int> bad = {"list": 0, "dict": 0, "bytearray": 0};
+        int converted = 0;
+        for (int i = 0; i < 1000; ++i) {
+            list<auto> v = p.callFunction("get");
+            foreach auto e in (v[0]) {
+                if (e.typeCode() != NT_LIST || e.size() != 1 || e[0].typeCode() != NT_INT) {
+                    ++bad.list;
+                }
+            }
+            foreach hash<auto> e in (v[1].pairIterator()) {
+                if (e.value.typeCode() != NT_LIST || e.value.size() != 1 || e.value[0].typeCode() != NT_INT) {
+                    ++bad.dict;
+                }
+            }
+            # the bytearray has at most 3000 bytes, all 'x'
+            binary b = v[2];
+            if (b.size() > 3000 || b.toString().regex("[^x]")) {
+                ++bad.bytearray;
+            }
+            converted += v[0].size() + v[1].size() + b.size();
+        }
+        assertEq({"list": 0, "dict": 0, "bytearray": 0}, bad, "every converted element is a value of the container");
+        assertGt(0, converted);
     }
 
     # containers nested too deeply for the stack raise an exception instead of overflowing it; values that change
