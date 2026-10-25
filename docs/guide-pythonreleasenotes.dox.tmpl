@@ -15,6 +15,11 @@
       when the %Program inherits the module from its parent.  Previously such Programs could run any %Python code,
       which is not subject to %Qore's restrictions (<a href="https://github.com/qoretechnologies/qore/issues/5506">issue
       5506</a>); see @ref python_restrictions
+    - documented that %Python values given to a restricted %Program, including the constants that a child %Program
+      inherits from the \c import module command of its parent, are capabilities that run in the %Program where they
+      were created, as in %Qore, and that @ref Qore::PO_NO_INHERIT_SYSTEM_CONSTANTS "PO_NO_INHERIT_SYSTEM_CONSTANTS"
+      withholds the inherited constants
+      (<a href="https://github.com/qoretechnologies/qore/issues/5521">issue 5521</a>)
 
     <b>New Features and Enhancements:</b>
     - Added support for Python 3.12, 3.13, 3.14, 3.15, and 3.16 (tested with the first alpha release of 3.16)

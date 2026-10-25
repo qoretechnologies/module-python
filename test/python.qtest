@@ -578,6 +578,69 @@ int sub get_count() { return count; }
             pgm.issueModuleCmd("python", "parse restricted.py " + py_code);
             assertTrue(is_file(marker), "an unrestricted module command runs the Python code");
         }
+
+        # Python values that a restricted Program gets from other code are capabilities, as in Qore: they run in the
+        # Program where they were created; a child Program inherits the constants that its parent imported unless it
+        # is created with PO_NO_INHERIT_SYSTEM_CONSTANTS (issue 5521)
+        {
+            unlink(marker);
+            File f();
+            f.open2(tmp.path + DirSep + "restricted_caps.py", O_CREAT | O_WRONLY | O_TRUNC);
+            f.write("def _touch(path):
+    open(path, 'w').close()
+    return True
+class Toucher:
+    def touch(self, path):
+        return _touch(path)
+toucher = Toucher()
+bound = toucher.touch
+");
+            f.close();
+            Program parent(PO_NEW_STYLE);
+            parent.issueModuleCmd("python", "add-module-path " + tmp.path);
+            parent.issueModuleCmd("python", "import restricted_caps");
+            parent.parse("%requires python
+auto sub run_child(int po, string code, *list<auto> args) {
+    Program child(PO_NEW_STYLE | po);
+    child.parse(code, \"child\");
+    return child.callFunctionArgs(\"go\", args);
+}
+auto sub get_bound() { return Python::restricted_caps::bound; }
+", "restricted-parent");
+            int po = PO_NO_UNCONTROLLED_APIS;
+
+            # inherited constants: a bound method and an object, whose method is called
+            hash<string, string> caps = {
+                "bound method constant": "auto sub go(string p) { auto f = Python::restricted_caps::bound; "
+                    "return f(p); }",
+                "object constant": "auto sub go(string p) { auto o = Python::restricted_caps::toucher; "
+                    "return o.touch(p); }",
+            };
+            foreach hash<auto> c in (caps.pairIterator()) {
+                assertTrue(parent.callFunction("run_child", po, c.value, (marker,)), c.key);
+                assertTrue(is_file(marker), c.key + ": the capability ran");
+                unlink(marker);
+                assertThrows("PARSE-EXCEPTION", "cannot resolve", \parent.callFunction(),
+                    ("run_child", po | PO_NO_INHERIT_SYSTEM_CONSTANTS, c.value, (marker,)),
+                    c.key + ": PO_NO_INHERIT_SYSTEM_CONSTANTS");
+                assertFalse(is_file(marker), c.key + ": PO_NO_INHERIT_SYSTEM_CONSTANTS: the Python code did not run");
+            }
+
+            # a callable given as an argument
+            assertTrue(parent.callFunction("run_child", po | PO_NO_INHERIT_SYSTEM_CONSTANTS,
+                "auto sub go(code f, string p) { return f(p); }", (parent.callFunction("get_bound"), marker)),
+                "argument");
+            assertTrue(is_file(marker), "argument: the capability ran");
+            unlink(marker);
+
+            # the functions and classes that the module imports cannot be used
+            assertThrows("PARSE-EXCEPTION", "_touch", \parent.callFunction(),
+                ("run_child", po, "auto sub go(string p) { return Python::restricted_caps::_touch(p); }", (marker,)));
+            assertThrows("ILLEGAL-CLASS-INSTANTIATION", "Toucher", \parent.callFunction(),
+                ("run_child", po, "auto sub go(string p) { return (new Python::restricted_caps::Toucher()).touch(p); }",
+                (marker,)));
+            assertFalse(is_file(marker), "imported functions and classes: the Python code did not run");
+        }
     }
 
     # the code of the interpreter of a sandboxed Program is governed by its sandbox also on the threads that Python

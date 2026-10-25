@@ -39,8 +39,24 @@
       runtime, cannot be used in a %Program restricted with @ref Qore::PO_NO_EMBEDDED_LOGIC "PO_NO_EMBEDDED_LOGIC"
 
     These restrictions also apply to a %Program that inherits the module from its parent %Program without loading it.
-    To keep code from running %Python, restrict its %Program with
+    To keep code from creating, parsing or importing %Python code, restrict its %Program with
     @ref Qore::PO_NO_UNCONTROLLED_APIS "PO_NO_UNCONTROLLED_APIS".
+
+    As in %Qore, %Python values that other code gives to a restricted %Program are capabilities: callables, objects
+    and their methods run in the %Program where they were created, which is the %Program whose restrictions apply to
+    them, as for %Qore call references, closures and objects of another %Program.  A restricted %Program can call them
+    when it gets them:
+    - as arguments or return values of calls made by other %Programs
+    - as constants that it inherits: the module imports %Python module attributes such as functions, bound methods and
+      objects as constants (ex: \c %%module-cmd(python) \c import), and a child %Program inherits the constants of its
+      parent unless it is created with @ref Qore::PO_NO_INHERIT_SYSTEM_CONSTANTS "PO_NO_INHERIT_SYSTEM_CONSTANTS"
+
+    @par Example
+    @code{.py}
+%module-cmd(python) import os
+# the child Program can neither use os.system() nor the os.system constant that its parent imported
+Program child(PO_NEW_STYLE | PO_NO_UNCONTROLLED_APIS | PO_NO_INHERIT_SYSTEM_CONSTANTS);
+    @endcode
 
     %Qore APIs called from %Python remain subject to the restrictions and the sandbox of the %Program whose %Python
     code calls them, also on threads created by %Python (see @ref python_created_threads).
