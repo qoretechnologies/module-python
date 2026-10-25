@@ -40,6 +40,15 @@ PythonCallableCallReferenceNode::PythonCallableCallReferenceNode(QorePythonProgr
 QoreValue PythonCallableCallReferenceNode::execValue(const QoreListNode* args, ExceptionSink* xsink) const {
     QoreSandboxProvenanceHelper provenance(this);
     //printd(5, "PythonCallableCallReferenceNode::execValue() f: %p self: %p\n", *val, *self);
+    // the arguments are given as parsed (ex: variable references in the ast exec mode); they are evaluated as Qore
+    // code, before the GIL is acquired
+    ValueEvalRefHolder evaluated_args(xsink);
+    if (args) {
+        if (evaluated_args.eval(args)) {
+            return QoreValue();
+        }
+        args = evaluated_args->get<const QoreListNode>();
+    }
     QorePythonHelper qph(*pypgm, xsink);
     if (*xsink) {
         return QoreValue();

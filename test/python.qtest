@@ -276,6 +276,7 @@ class PythonTest inherits Test {
         addTestCase("Qore exceptions in threads created by Python", \pythonThreadExceptionTest());
         addTestCase("Python threads call Qore", \pythonThreadEntryTest());
         addTestCase("a Qore callable runs without the GIL", \callableGilTest());
+        addTestCase("Python call references evaluate their arguments in every exec mode", \callRefArgumentTest());
         addTestCase("Python threads run under the sandbox of the interpreter's Program", \sandboxPythonThreadTest());
         addTestCase("restricted Programs cannot run Python code", \restrictedProgramTest());
         addTestCase("os.environ changes are serialized with Qore", \environmentTest());
@@ -452,6 +453,49 @@ def call_waiting(c, running, done):
             return done.get();
         };
         assertEq("pushed by a Python thread", p.callFunction("call_waiting", c, running, done));
+    }
+
+    # Qore gives the arguments of a call reference call to the call reference as parsed, and Python call references
+    # evaluate them.  Previously they did not, and in the ast exec mode, where the arguments are not evaluated before
+    # the call, an argument that was not a constant raised PYTHON-VALUE-ERROR ("variable reference") (issue 5535).
+    callRefArgumentTest() {
+        PythonProgram pp("
+class Echo:
+    def m(self, *args):
+        return list(args)
+echo = Echo()
+bound = echo.m
+def f(*args):
+    return list(args)
+", "callref-args.py");
+        hash<string, code> calls = {
+            "function": pp.getAttribute("f"),
+            "bound method": pp.getAttribute("bound"),
+        };
+        foreach hash<auto> mode in ({"ast": EM_AST, "ir": EM_IR, "jit": EM_JIT, "tiered": EM_TIERED}.pairIterator()) {
+            Program pgm(PO_NEW_STYLE);
+            pgm.setExecMode(mode.value);
+            pgm.parse("%modern
+int count = 0;
+int sub next() { return ++count; }
+list<auto> sub variable(code f, string s) { return f(s); }
+list<auto> sub expression(code f, string s) { int i = 2; return f(s + \"-\" + i, i * 3, (s, i)); }
+list<auto> sub call(code f) { return f(next(), next()); }
+list<auto> sub no_args(code f) { return f(); }
+int sub get_count() { return count; }
+", "callref-args");
+            # initializes the global variable
+            pgm.run();
+            foreach hash<auto> c in (calls.pairIterator()) {
+                string label = sprintf("%s: %s", mode.key, c.key);
+                assertEq(("a",), pgm.callFunction("variable", c.value, "a"), label + ": variable");
+                assertEq(("b-2", 6, ("b", 2)), pgm.callFunction("expression", c.value, "b"), label + ": expression");
+                int before = pgm.callFunction("get_count");
+                assertEq((before + 1, before + 2), pgm.callFunction("call", c.value), label + ": calls");
+                assertEq(before + 2, pgm.callFunction("get_count"), label + ": each argument is evaluated once");
+                assertEq((), pgm.callFunction("no_args", c.value), label + ": no arguments");
+            }
+        }
     }
 
     # Python code is not subject to Qore's restrictions (it can use the filesystem, start processes and use the
