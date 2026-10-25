@@ -4493,9 +4493,13 @@ def reinit():
 
     # in free-threaded builds, other Python threads can change a list, a dict or a bytearray while it is converted to
     # Qore; list items are referenced atomically, a copy of a dict is iterated and a bytearray is copied in a critical
-    # section.  Previously the conversion of a list read items that
-    # another thread had removed and crashed the process (issue 5523).  With the GIL the test checks the same results.
+    # section.  Previously the conversion of a list read items that another thread had removed and crashed the process
+    # (issue 5523).  With the GIL no other thread runs while a container is converted; there the CPU-bound thread of
+    # the test can also keep the GIL with Python 3.11 and 3.12 (issue 5528).
     concurrentContainerTest() {
+        if (!Python::FreeThreading) {
+            testSkip("other Python threads cannot change a container while it is converted with the GIL");
+        }
         PythonProgram p("
 import threading
 
