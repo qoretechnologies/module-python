@@ -41,6 +41,7 @@ PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-threads.py
 PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-exceptions.py
 PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-objects.py
 PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-signals.py
+PYTHONPATH="$PWD" python3 -B -W error ../test/standalone-loader.py
 
 # add Qore user and group
 if ! grep -q "^qore:x:${QORE_GID}" /etc/group; then

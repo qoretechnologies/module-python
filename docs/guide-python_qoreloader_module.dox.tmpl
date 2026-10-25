@@ -21,6 +21,12 @@
     - @ref python_exceptions_qoreexception "QoreException": the class of %Qore exceptions in %Python, which %Python
       code can also raise to raise a %Qore exception (see @ref python_exceptionsguide)
 
+    @par Sub-interpreters
+    The state of the module for the process (the %Qore library, the global %Qore program and the cleanup at exit)
+    belongs to the main %Python interpreter, which keeps it until the process exits: \c qoreloader must be imported
+    in the main interpreter before it is imported in a sub-interpreter, otherwise the import raises \c ImportError.
+    Sub-interpreters can then import \c qoreloader and be closed at any time.
+
     @section python_qoreloader_import_qore Using the qoreloader Module to Import Qore APIs
 
     For example, for %Python to import the %Qore \c SqlUtil module, the following code can be used.

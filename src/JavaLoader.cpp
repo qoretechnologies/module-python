@@ -168,8 +168,15 @@ PyObject* JavaLoader::create_module(PyObject* self, PyObject* args) {
         PyErr_SetString(PyExc_ValueError, "ModuleSpec has no 'name' attribute");
         return nullptr;
     }
-    QoreString mname(PyUnicode_AsUTF8(*name));
-    assert(mname.equalPartial("java"));
+    const char* name_str = PyUnicode_AsUTF8(*name);
+    if (!name_str) {
+        return nullptr;
+    }
+    if (strcmp(name_str, "java") && strncmp(name_str, "java.", 5)) {
+        PyErr_Format(PyExc_ImportError, "JavaLoader.create_module(): module '%s' is not a Java module", name_str);
+        return nullptr;
+    }
+    QoreString mname(name_str);
     // create new namespace
     [[maybe_unused]] QoreProgram* mod_pgm = qore_python_pgm->getQoreProgram();
     if (mname == "java") {
@@ -194,7 +201,11 @@ PyObject* JavaLoader::create_module(PyObject* self, PyObject* args) {
 }
 
 PyObject* JavaLoader::exec_module(PyObject* self, PyObject* args) {
-    assert(PyTuple_Check(args));
+    // exec_module(module); a borrowed reference
+    PyObject* mod;
+    if (!PyArg_ParseTuple(args, "O!:exec_module", &PyModule_Type, &mod)) {
+        return nullptr;
+    }
     QorePythonQoreEntryHelper qeh;
     if (!qeh.check()) {
         return nullptr;
@@ -205,16 +216,23 @@ PyObject* JavaLoader::exec_module(PyObject* self, PyObject* args) {
     printd(5, "JavaLoader::exec_module() self: %p args: %s\n", self, PyUnicode_AsUTF8(*argstr));
 #endif
 
-    // get module
-    // returns a borrowed reference
-    PyObject* mod = PyTuple_GetItem(args, 0);
-    assert(PyModule_Check(mod));
-
     // get module name
-    assert(PyObject_HasAttrString(mod, "__name__"));
     QorePythonReferenceHolder name(PyObject_GetAttrString(mod, "__name__"));
-    assert(PyUnicode_Check(*name));
-    [[maybe_unused]] const char* name_str = PyUnicode_AsUTF8(*name);
+    if (!name) {
+        return nullptr;
+    }
+    const char* name_str = PyUnicode_Check(*name) ? PyUnicode_AsUTF8(*name) : nullptr;
+    if (!name_str) {
+        if (!PyErr_Occurred()) {
+            PyErr_Format(PyExc_TypeError, "JavaLoader.exec_module(): the name of the module is not a string (type "
+                "'%s')", Py_TYPE(*name)->tp_name);
+        }
+        return nullptr;
+    }
+    if (strcmp(name_str, "java") && strncmp(name_str, "java.", 5)) {
+        PyErr_Format(PyExc_ImportError, "JavaLoader.exec_module(): module '%s' is not a Java module", name_str);
+        return nullptr;
+    }
 
     printd(5, "JavaLoader::exec_module() mod: '%s'\n", name_str);
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();

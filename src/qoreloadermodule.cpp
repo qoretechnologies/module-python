@@ -33,6 +33,9 @@
 #endif
 
 #include <dlfcn.h>
+#include <cstdlib>
+#include <memory>
+#include <string>
 
 QorePythonProgram* qore_python_pgm = nullptr;
 
@@ -101,6 +104,8 @@ struct qoreloader_state {
     PyObject* qore_exception_type;
     //! the qoreloader.QoreStaticMember type of the interpreter (the descriptor of the static members of Qore classes)
     PyObject* qore_static_member_type;
+    //! true if the module is counted in init_count (the module is freed also when its initialization fails before)
+    bool counted;
 };
 
 static qoreloader_state* qoreloader_get_state(PyObject* m) {
@@ -126,8 +131,10 @@ static int qoreloader_clear(PyObject* m) {
 }
 
 void qoreloader_free(void* obj) {
+    qoreloader_state* st = qoreloader_get_state(static_cast<PyObject*>(obj));
+    bool counted = st && st->counted;
     qoreloader_clear(static_cast<PyObject*>(obj));
-    if (!--init_count) {
+    if (counted && !--init_count) {
         printd(5, "qoreloader_free() obj: %p qore_needs_shutdown: %d\n", obj, qore_needs_shutdown);
 
         if (qore_python_pgm) {
@@ -503,8 +510,36 @@ PyObject* qore_python_get_qore_exception_type() {
     return st->qore_exception_type;
 }
 
+//! returns the resolved path of this binary if it has the extension of binary Qore modules, otherwise an empty string
+static std::string qoreloader_get_module_path() {
+    Dl_info info;
+    if (!dladdr(reinterpret_cast<void*>(&PyInit_qoreloader), &info) || !info.dli_fname) {
+        return std::string();
+    }
+    std::unique_ptr<char, decltype(&free)> resolved(realpath(info.dli_fname, nullptr), &free);
+    if (!resolved) {
+        return std::string();
+    }
+    std::string path(resolved.get());
+    static constexpr const char ext[] = ".qmod";
+    if (path.size() <= sizeof(ext) - 1 || path.compare(path.size() - (sizeof(ext) - 1), sizeof(ext) - 1, ext)) {
+        return std::string();
+    }
+    return path;
+}
+
 static int slot_qoreloader_exec(PyObject *m) {
+    // when Python is the host, the state of the module for the process (the initialization of the Qore library, the
+    // global Qore program and the cleanup at exit) belongs to the main interpreter, which keeps it until the process
+    // exits; a sub-interpreter can be closed at any time, which would shut Qore down while the process uses it
+    if (!init_count && !q_libqore_initalized()
+        && qore_python_get_interpreter(PyThreadState_Get()) != PyInterpreterState_Main()) {
+        PyErr_SetString(PyExc_ImportError, "qoreloader must be imported in the main Python interpreter before it "
+            "can be imported in a sub-interpreter");
+        return -1;
+    }
     ++init_count;
+    qoreloader_get_state(m)->counted = true;
     printd(5, "slot_qoreloader_exec() ic: %d\n", init_count);
     if (init_count == 1) {
         // initialize qore library if necessary
@@ -516,9 +551,15 @@ static int slot_qoreloader_exec(PyObject *m) {
             qore_needs_shutdown = true;
             printd(5, "PyInit_qoreloader() Qore library initialized\n");
 
-            // ensure that the Qore python module is registered as a Qore module
+            // ensure that the Qore python module is registered as a Qore module: by the path of this binary, which
+            // is the module; with the feature name, the module manager would load the python module that it finds
+            // in its module path, which can be another binary, so that the process would have two copies of the
+            // module (possibly built for another Python).  The path is resolved, as qoreloader.so is usually a
+            // symbolic link, and the module manager loads a binary module only from a file with its extension
+            std::string self_path = qoreloader_get_module_path();
             ExceptionSink xsink;
-            MM.runTimeLoadModule(&xsink, "python", nullptr, python_qore_module_desc);
+            MM.runTimeLoadModule(&xsink, self_path.empty() ? "python" : self_path.c_str(), nullptr,
+                python_qore_module_desc);
             if (xsink) {
                 QoreValue err(xsink.getExceptionErr());
                 QoreValue desc(xsink.getExceptionDesc());

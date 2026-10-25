@@ -2594,18 +2594,24 @@ PyObject* QorePythonProgram::newModule(const char* name, const QoreNamespace* ns
     //QorePythonReferenceHolder new_mod(PyModule_New(name));
     QorePythonReferenceHolder new_mod(ModuleNamespace_New(name, ns_pkg));
     if (ns_pkg) {
-        std::string nspath = ns_pkg->getPath();
-        QorePythonReferenceHolder path(PyUnicode_FromStringAndSize(nspath.c_str(), nspath.size()));
-        PyObject_SetAttrString(*new_mod, "__path__", *path);
+        // the module is a package with an empty __path__: its submodules are found by QoreMetaPathFinder, never in
+        // the file system (the path finder searches the directories of __path__)
+        QorePythonReferenceHolder path(PyList_New(0));
+        if (!path || PyObject_SetAttrString(*new_mod, "__path__", *path) < 0) {
+            PyErr_Clear();
+        }
     }
     saveModule(name, *new_mod);
     return new_mod.release();
 }
 
-PyObject* QorePythonProgram::newModule(const char* name, const char* path) {
+PyObject* QorePythonProgram::newPackageModule(const char* name) {
     QorePythonReferenceHolder new_mod(PyModule_New(name));
-    QorePythonReferenceHolder py_path(PyUnicode_FromStringAndSize(path, strlen(path)));
-    PyObject_SetAttrString(*new_mod, "__path__", *py_path);
+    // an empty __path__, as for the modules of Qore namespaces
+    QorePythonReferenceHolder py_path(PyList_New(0));
+    if (!py_path || PyObject_SetAttrString(*new_mod, "__path__", *py_path) < 0) {
+        PyErr_Clear();
+    }
     saveModule(name, *new_mod);
     return new_mod.release();
 }
@@ -2716,8 +2722,7 @@ void QorePythonProgram::aliasDefinition(const QoreString& source_path, const Qor
                 continue;
             }
             // create a new module, if the parent is a module, or a dictionary
-            QoreStringMaker path("alias:%s", source_path.c_str());
-            new_elem = newModule(nspath.c_str(), path.c_str());
+            new_elem = newPackageModule(nspath.c_str());
             //printd(5, "QorePythonProgram::aliasDefinition() created module '%s'\n", nspath.c_str());
         } else {
             new_elem = source_obj.release();

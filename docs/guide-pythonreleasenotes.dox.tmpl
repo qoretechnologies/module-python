@@ -86,6 +86,17 @@
       the %Python functions that are imported as %Qore functions are referenced as long as the %Python program is:
       calling a function that was referenced only by the import (ex: one returned by the \c __getattr__() of a
       module) crashed (<a href="https://github.com/qoretechnologies/qore/issues/5523">issue 5523</a>)
+    - \c qoreloader must be imported in the main %Python interpreter before it is imported in a sub-interpreter
+      (\c ImportError otherwise): the state of the module for the process belongs to the main interpreter; previously,
+      when a sub-interpreter imported it first, closing that sub-interpreter shut %Qore down and the process crashed;
+      the methods of the module's finder and loaders raise \c TypeError or \c ImportError for invalid arguments
+      instead of crashing; the packages of %Qore namespaces and the \c java package have an empty \c __path__, so
+      that their submodules are never found in the file system (with a string \c __path__, directories named like a
+      character of the namespace path, ex: \c o/ for \c Qore, replaced %Qore modules)
+      (<a href="https://github.com/qoretechnologies/qore/issues/5525">issue 5525</a>)
+    - importing \c qoreloader registers this binary as the %Qore \c python module; previously the module manager
+      loaded the \c python module that it found in its module path, which could be another binary, and the process
+      had two copies of the module (<a href="https://github.com/qoretechnologies/qore/issues/5537">issue 5537</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

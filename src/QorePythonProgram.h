@@ -781,8 +781,8 @@ protected:
     //! Saves the module in sys.modules
     DLLLOCAL int saveModule(const char* name, PyObject* mod);
 
-    //! Creates a new module package with an explicit path name
-    DLLLOCAL PyObject* newModule(const char* name, const char* path);
+    //! Creates a new package module with an empty __path__ (its submodules are not found in the file system)
+    DLLLOCAL PyObject* newPackageModule(const char* name);
 
     DLLLOCAL int findCreateQoreFunction(PyObject* value, const char* symbol, q_external_func_t func);
 

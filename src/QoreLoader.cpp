@@ -174,7 +174,11 @@ PyObject* QoreLoader::create_module(PyObject* self, PyObject* args) {
 }
 
 PyObject* QoreLoader::exec_module(PyObject* self, PyObject* args) {
-    assert(PyTuple_Check(args));
+    // exec_module(module); a borrowed reference
+    PyObject* mod;
+    if (!PyArg_ParseTuple(args, "O!:exec_module", &PyModule_Type, &mod)) {
+        return nullptr;
+    }
     QorePythonQoreEntryHelper qeh;
     if (!qeh.check()) {
         return nullptr;
@@ -185,16 +189,24 @@ PyObject* QoreLoader::exec_module(PyObject* self, PyObject* args) {
     printd(5, "QoreLoader::exec_module() self: %p args: %s\n", self, PyUnicode_AsUTF8(*argstr));
 #endif
 
-    // get module
-    // returns a borrowed reference
-    PyObject* mod = PyTuple_GetItem(args, 0);
-    assert(PyModule_Check(mod));
-
     // get module name
-    assert(PyObject_HasAttrString(mod, "__name__"));
     QorePythonReferenceHolder name(PyObject_GetAttrString(mod, "__name__"));
-    assert(PyUnicode_Check(*name));
+    if (!name) {
+        return nullptr;
+    }
+    if (!PyUnicode_Check(*name)) {
+        PyErr_Format(PyExc_TypeError, "QoreLoader.exec_module(): the name of the module is not a string (type '%s')",
+            Py_TYPE(*name)->tp_name);
+        return nullptr;
+    }
     const char* orig_name_str = PyUnicode_AsUTF8(*name);
+    if (!orig_name_str) {
+        return nullptr;
+    }
+    if (strcmp(orig_name_str, "qore") && strncmp(orig_name_str, "qore.", 5)) {
+        PyErr_Format(PyExc_ImportError, "QoreLoader.exec_module(): module '%s' is not a Qore module", orig_name_str);
+        return nullptr;
+    }
     const char* name_str = orig_name_str;
 
     printd(5, "QoreLoader::exec_module() mod: '%s'\n", name_str);
@@ -209,7 +221,6 @@ PyObject* QoreLoader::exec_module(PyObject* self, PyObject* args) {
     if (!strcmp(name_str, "qore")) {
         nsvec.push_back(mod_pgm->getQoreNS());
     } else {
-        assert(!strncmp(name_str, "qore.", 5));
         name_str += 5;
         if (!strchr(name_str, '.')) {
             if (!strcmp(name_str, "__root__")) {
@@ -229,10 +240,11 @@ PyObject* QoreLoader::exec_module(PyObject* self, PyObject* args) {
                 return nullptr;
             }
         }
-        // the primary namespace gives the module its path
-        std::string nspath = nsvec[0]->getPath();
-        QorePythonReferenceHolder py_path(PyUnicode_FromStringAndSize(nspath.c_str(), nspath.size()));
-        if (PyObject_SetAttrString(mod, "__path__", *py_path)) {
+        // the module is a package with an empty __path__: its submodules are found by QoreMetaPathFinder, never in
+        // the file system (the path finder searches the directories of __path__; a string was searched character by
+        // character)
+        QorePythonReferenceHolder py_path(PyList_New(0));
+        if (!py_path || PyObject_SetAttrString(mod, "__path__", *py_path)) {
             return nullptr;
         }
     } else {
