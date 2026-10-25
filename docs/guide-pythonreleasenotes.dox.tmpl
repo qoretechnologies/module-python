@@ -97,6 +97,10 @@
     - importing \c qoreloader registers this binary as the %Qore \c python module; previously the module manager
       loaded the \c python module that it found in its module path, which could be another binary, and the process
       had two copies of the module (<a href="https://github.com/qoretechnologies/qore/issues/5537">issue 5537</a>)
+    - %Python's cycle collector no longer clears an instance of a %Python class that inherits a %Qore class after %Qore
+      deleted its %Qore object (the instance lost its attributes); reference cycles through %Qore references are
+      documented (see @ref python_qore_object_lifecycle_cycles;
+      <a href="https://github.com/qoretechnologies/qore/issues/5524">issue 5524</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

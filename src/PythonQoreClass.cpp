@@ -1364,9 +1364,13 @@ int PythonQoreClass::py_traverse(PyObject* self, visitproc visit, void* arg) {
     Py_VISIT(Py_TYPE(self));
     // an instance of a Python subclass of a Qore class is referenced by the private data of its Qore object; while it
     // holds the only reference to the Qore object, that reference is part of a cycle that only this object keeps
-    // alive, which py_clear() breaks; while Qore code also references the Qore object, it keeps this object alive
+    // alive, which py_clear() breaks; while Qore code also references the Qore object, it keeps this object alive.
+    // Once the Qore object has been deleted (ex: by Qore's delete), its private data no longer references this
+    // object, which must then not be visited: the collector would count a reference that does not exist and clear a
+    // reachable object
     PyQoreObject* pyself = reinterpret_cast<PyQoreObject*>(self);
-    if (pyself->qobj_refs_self && pyself->strong && pyself->qobj && pyself->qobj->reference_count() == 1) {
+    if (pyself->qobj_refs_self && pyself->strong && pyself->qobj && pyself->qobj->isValid()
+        && pyself->qobj->reference_count() == 1) {
         Py_VISIT(self);
     }
     return 0;

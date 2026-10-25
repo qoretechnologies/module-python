@@ -158,6 +158,24 @@ class PythonLifecycleTracked {
     }
 }
 
+#! counts its destructions; used to check the reference cycles between Python and Qore
+class PythonCycleTracked {
+    public {
+        static int destroyed = 0;
+        auto me;
+        string tag;
+    }
+
+    destructor() {
+        ++destroyed;
+    }
+}
+
+#! deletes the object given; used to delete Qore objects of Python objects
+sub python_test_delete_object(object o) {
+    delete o;
+}
+
 #! has a constructor, a destructor and a copy method; used to check that they are not Python methods
 class PythonSpecialMethods {
     public {
@@ -267,6 +285,7 @@ class PythonTest inherits Test {
         addTestCase("assigning, removing and deleting the attributes of Python objects", \attributeWriteTest());
         addTestCase("Python code calls the Qore overrides of Python methods", \qoreOverrideTest());
         addTestCase("importing a Qore class that inherits a Python class", \qoreSubclassImportTest());
+        addTestCase("reference cycles between Python and Qore objects", \pythonQoreCycleTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -3368,6 +3387,63 @@ object sub new_q() { return new Q(); }
         assertEq(("updated", "from outside"), q.show());
         assertEq("from outside", remove q.extra);
         assertEq(("updated", NOTHING), q.show());
+    }
+
+    # an instance of a Python subclass of a Qore class is not cleared by Python's cycle collector after Qore deleted
+    # its Qore object: its Qore object's private data no longer references it (previously the collector cleared the
+    # reachable instance, which lost its attributes) (issue 5524); cycles through Qore references are not seen by the
+    # cycle collector: they are released when a reference of the cycle is removed or when the Python program is
+    # deleted (documented)
+    pythonQoreCycleTest() {
+        int destroyed = PythonCycleTracked::destroyed;
+        PythonProgram p("
+import gc, weakref
+from qore.__root__ import PythonCycleTracked, python_test_delete_object
+
+class Sub(PythonCycleTracked):
+    def __init__(self):
+        super().__init__()
+        self.py_attr = 'py'
+
+kept = []
+refs = []
+
+def deleted_by_qore():
+    s = Sub()
+    python_test_delete_object(s)
+    gc.collect()
+    return getattr(s, 'py_attr', None)
+
+def make_cycle():
+    s = Sub()
+    s.me = s
+    refs.append(weakref.ref(s))
+
+def collect():
+    gc.collect()
+    return [r() is None for r in refs]
+
+def break_cycle():
+    refs[0]().me = None
+    return collect()
+
+def make_kept_cycle():
+    s = Sub()
+    s.me = s
+", "cycles.py");
+        assertEq("py", p.callFunction("deleted_by_qore"), "the instance keeps its attributes");
+        assertEq(destroyed + 1, PythonCycleTracked::destroyed, "the Qore object was deleted");
+
+        p.callFunction("make_cycle");
+        assertEq((False,), p.callFunction("collect"), "a cycle through a Qore member is not collected");
+        assertEq(destroyed + 1, PythonCycleTracked::destroyed);
+        assertEq((True,), p.callFunction("break_cycle"), "the cycle is collected once it is broken");
+        assertEq(destroyed + 2, PythonCycleTracked::destroyed);
+
+        p.callFunction("make_kept_cycle");
+        assertEq(destroyed + 2, PythonCycleTracked::destroyed);
+        delete p;
+        assertEq(destroyed + 3, PythonCycleTracked::destroyed, "deleting the Python program releases the cycle");
     }
 
     # a Qore class that inherits a Python class can be imported into Python (ex: import-ns): its Python type is the

@@ -19,6 +19,27 @@
     %Python object exists as well, and when only the %Python object references it, the cycle collector releases both,
     and the %Qore object's destructor runs at that time.
 
+    Cycles that pass through %Qore references are not seen by %Python's cycle collector, as %Python cannot see the
+    references that %Qore objects hold; such cycles are released when the %Python program
+    (@ref Python::PythonProgram "PythonProgram") that holds the %Python objects is deleted, or when the cycle is broken
+    by removing one of the references (ex: by assigning \c None to an attribute):
+    - an instance of a %Python class that inherits a %Qore class whose %Qore object references the instance (ex:
+      \c self.me \c = \c self, which is the %Qore member \c me), directly or through other %Qore objects
+    - a %Python object referenced by a %Qore object (ex: a member, a list or a hash) that references the %Qore object
+      (ex: \c p.a \c = \c a and \c a.m \c = \c p)
+
+    @par Example
+    @code{.py}
+class Node(QoreBase):   # QoreBase is a Qore class
+    pass
+
+n = Node()
+n.me = n        # a cycle through the Qore member me
+n.me = None     # breaks the cycle: n is released when its last Python reference is released
+    @endcode
+
+    Cycles of %Qore objects alone are released by %Qore, and cycles of %Python objects alone by %Python.
+
     The destructors of %Qore objects released by %Python run without the %Python GIL, on the thread that releases
     them.
 
