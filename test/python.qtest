@@ -3515,22 +3515,43 @@ ChildClass sub get_object() {
         # the same declarations in a new Program get new types
         check_child();
 
-        # a hashdecl or class that outlives its Program (held by a value) has no Python type, which would outlive it:
-        # its hash is a dict, and its object cannot be converted
+        # a hashdecl, enum or class that outlives its Program (held by a value) has no Python type, which would outlive
+        # it: its hash is a dict, the value of its enum is the member's value, and its object cannot be converted
         hash<auto> h;
+        auto e;
         object o;
         {
             Program child(PO_NEW_STYLE);
             child.parse(child_src, "child");
             h = child.callFunction("get_hash");
+            e = child.callFunction("get_enum");
             o = child.callFunction("get_object");
         }
         assertEq("hash<ChildHash>", h.fullType());
-        PythonProgram pp2("def type_name(v):\n    return type(v).__name__\ndef echo(v):\n    return v\n", "outlived.py");
+        # the value keeps its enum (qoretechnologies/qore#5519)
+        assertEq("enum<ChildEnum>", e.fullType());
+        PythonProgram pp2("saved = []\ndef type_name(v):\n    return type(v).__name__\ndef echo(v):\n    return v\n"
+            "def save(v):\n    saved.append(v)\ndef get_saved():\n    return saved[0]\n", "outlived.py");
         assertEq("dict", pp2.callFunction("type_name", h));
         hash<auto> h2 = pp2.callFunction("echo", h);
         assertEq("hash<auto>", h2.fullType());
         assertEq({"a": 1, "b": 4}, h2);
+        assertEq("int", pp2.callFunction("type_name", e));
+        auto e2 = pp2.callFunction("echo", e);
+        assertEq("integer", e2.fullType());
+        assertEq(2, e2);
+        list<auto> l2 = pp2.callFunction("echo", (e, "x"));
+        assertEq((2, "x"), l2);
+        assertEq("integer", l2[0].fullType());
+        hash<auto> eh2 = pp2.callFunction("echo", {"e": e});
+        assertEq({"e": 2}, eh2);
+        assertEq("integer", eh2.e.fullType());
+        # a Python enum class would outlive the enum once its last Qore value is gone (crashed before)
+        pp2.callFunction("save", e);
+        remove e;
+        auto e3 = pp2.callFunction("get_saved");
+        assertEq(2, e3);
+        assertEq("integer", e3.fullType());
         assertThrows("PYTHON-VALUE-ERROR", "cannot convert an object of class 'ChildClass' to Python: the Qore Program "
             "that declared the class has been deleted", \pp2.callFunction(), ("type_name", o));
     }

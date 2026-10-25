@@ -62,7 +62,8 @@
       %Program that declared them has been deleted (ex: creating an object or a hash of a type kept in a %Python
       variable, calling a method or reading a static member): they raise \c RuntimeError; the declarations of a new
       %Program get new types; a hash of a hashdecl that outlived its %Program (held by a %Qore value) is a \c dict,
-      and an object of such a class raises \c PYTHON-VALUE-ERROR (requires %Qore 3.0;
+      the value of such an enum is the value of its member, and an object of such a class raises
+      \c PYTHON-VALUE-ERROR (requires %Qore 3.0;
       <a href="https://github.com/qoretechnologies/qore/issues/5517">issue 5517</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
