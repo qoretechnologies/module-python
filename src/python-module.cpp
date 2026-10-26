@@ -25,6 +25,10 @@
 #include <unistd.h>
 #ifndef _Q_WINDOWS
 #include <dlfcn.h>
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <pthread.h>
 #endif
 #include <cstring>
 #include "QC_PythonProgram.h"
@@ -1137,6 +1141,7 @@ static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, Except
 
 static void python_module_delete() {
     qore_deregister_program_cleanup_callback(python_program_cleanup);
+    qore_python_stop_gil_switch();
     if (qore_python_pgm) {
         qore_python_pgm->doDeref();
         qore_python_pgm = nullptr;
@@ -1363,6 +1368,152 @@ extern "C" int python_module_import(ExceptionSink* xsink, QoreProgram* pgm, cons
     return pypgm->import(xsink, module, symbol);
 }
 
+#ifdef QORE_PYTHON_GIL_SWITCH
+namespace {
+//! the helper thread of QorePythonGilWait; the members are guarded by lck
+struct GilSwitchState {
+    std::mutex lck;
+    std::condition_variable cond;
+    //! the threads in a section in which they can wait for the GIL
+    std::vector<qore_python_gil_waiter> waiting;
+    //! the sections of the threads in waiting, in the same order
+    std::vector<const QorePythonGilWait*> sections;
+    //! true if the helper thread runs
+    bool running = false;
+    //! true if the helper thread is asked to stop
+    bool stop = false;
+    pthread_t thread;
+};
+
+GilSwitchState& get_gil_switch_state() {
+    // not destroyed, so that it can be used while the process exits
+    static GilSwitchState* state = new GilSwitchState;
+    return *state;
+}
+
+void* gil_switch_main(void*) {
+    GilSwitchState& state = get_gil_switch_state();
+    std::unique_lock<std::mutex> al(state.lck);
+    while (!state.stop) {
+        if (state.waiting.empty()) {
+            state.cond.wait(al);
+            continue;
+        }
+        // the request is made while the threads cannot enter or leave their sections: a request made after a
+        // waiting thread has taken the GIL and left its section could be made to a thread that holds the GIL while
+        // no other thread waits for it, which would then release the GIL and wait for a thread that never takes it.
+        // A thread in a section does not wait for the GIL while it enters or leaves the section, and the request only
+        // takes CPython's locks of the list of interpreters and of the GIL's state, which no thread holds while it
+        // waits for the GIL or for this lock
+        qore_python_request_gil_switch(state.waiting.data(), state.waiting.size());
+        // the default switch interval of CPython, with which its own waits repeat the request
+        state.cond.wait_for(al, std::chrono::milliseconds(5));
+    }
+    return nullptr;
+}
+
+// the fork handlers: the helper thread does not exist in the child, where it is started again when needed
+bool gil_switch_fork_locked = false;
+
+void gil_switch_fork_prepare() {
+    get_gil_switch_state().lck.lock();
+    gil_switch_fork_locked = true;
+}
+
+void gil_switch_fork_parent() {
+    if (gil_switch_fork_locked) {
+        gil_switch_fork_locked = false;
+        get_gil_switch_state().lck.unlock();
+    }
+}
+
+void gil_switch_fork_child() {
+    if (gil_switch_fork_locked) {
+        GilSwitchState& state = get_gil_switch_state();
+        state.running = false;
+        // only the thread that called fork() exists in the child
+        unsigned long self = PyThread_get_thread_ident();
+        for (size_t i = state.waiting.size(); i > 0; --i) {
+            if (state.waiting[i - 1].thread_id != self) {
+                state.waiting.erase(state.waiting.begin() + (i - 1));
+                state.sections.erase(state.sections.begin() + (i - 1));
+            }
+        }
+        gil_switch_fork_locked = false;
+        state.lck.unlock();
+    }
+}
+}
+
+QorePythonGilWait::QorePythonGilWait(PyThreadState* target) {
+#if PY_VERSION_HEX >= 0x030C0000
+    // the thread state of this thread; with Python 3.11, there is none for a thread that does not hold the GIL, as
+    // _PyThreadState_UncheckedGet() returns the thread state of the thread that holds it, and the thread holds the
+    // GIL in no section (the thread states of the interpreters are swapped without releasing it)
+    PyThreadState* current = _PyThreadState_UncheckedGet();
+#else
+    PyThreadState* current = nullptr;
+#endif
+    qore_python_gil_waiter w = {PyThread_get_thread_ident(), current, target};
+    GilSwitchState& state = get_gil_switch_state();
+    std::lock_guard<std::mutex> al(state.lck);
+    // memory errors leave the section without requests
+    try {
+        state.waiting.push_back(w);
+    } catch (...) {
+        return;
+    }
+    try {
+        state.sections.push_back(this);
+    } catch (...) {
+        state.waiting.pop_back();
+        return;
+    }
+    registered = true;
+    if (state.waiting.size() == 1) {
+        if (!state.running && !state.stop) {
+            static bool fork_handlers = !pthread_atfork(gil_switch_fork_prepare, gil_switch_fork_parent,
+                gil_switch_fork_child);
+            (void)fork_handlers;
+            // if the thread cannot be created, no request is made
+            state.running = !pthread_create(&state.thread, nullptr, gil_switch_main, nullptr);
+        }
+        state.cond.notify_one();
+    }
+}
+
+QorePythonGilWait::~QorePythonGilWait() {
+    if (!registered) {
+        return;
+    }
+    GilSwitchState& state = get_gil_switch_state();
+    std::lock_guard<std::mutex> al(state.lck);
+    std::vector<const QorePythonGilWait*>::iterator i = std::find(state.sections.begin(), state.sections.end(), this);
+    assert(i != state.sections.end());
+    state.waiting.erase(state.waiting.begin() + (i - state.sections.begin()));
+    state.sections.erase(i);
+}
+
+void qore_python_stop_gil_switch() {
+    GilSwitchState& state = get_gil_switch_state();
+    bool running;
+    {
+        std::lock_guard<std::mutex> al(state.lck);
+        state.stop = true;
+        running = state.running;
+        state.running = false;
+        state.cond.notify_one();
+    }
+    // joined before the module is unloaded, as it runs the module's code
+    if (running) {
+        pthread_join(state.thread, nullptr);
+    }
+}
+#else
+void qore_python_stop_gil_switch() {
+}
+#endif
+
 thread_local const QorePythonHelper* QorePythonHelper::current = nullptr;
 
 bool QorePythonHelper::canNest(const QorePythonProgram* pypgm, ExceptionSink* xsink) {
@@ -1575,6 +1726,8 @@ void qore_python_release_context() {
         }
         // without memory for it, the state stays bound to the thread
         if (python_idle_tstate) {
+            // with Python 3.12, swapping to a state of another interpreter takes the GIL again
+            QorePythonGilWait gil_wait(python_idle_tstate);
             PyThreadState_Swap(python_idle_tstate);
         }
     }

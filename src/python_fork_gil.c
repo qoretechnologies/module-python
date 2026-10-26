@@ -94,20 +94,58 @@ int qore_python_fork_child_gil_lost(void) {
 }
 
 #if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030D0000
-void qore_python_request_gil_switch(void) {
+void qore_python_request_gil_switch(const struct qore_python_gil_waiter* waiters, size_t count) {
     struct _gil_runtime_state* gil = qore_python_get_gil();
     if (!gil || _Py_atomic_load_relaxed(&gil->locked) <= 0) {
         return;
     }
+    PyThreadState* holder = (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder);
+    if (!holder) {
+        return;
+    }
     /* the interpreters share the GIL, but a thread that waits for it asks only its own interpreter to release it
        (gil_drop_request and eval_breaker are per interpreter with Python 3.11 and 3.12): a thread of another
-       interpreter that runs Python code without blocking would never release it.  The request is made in every
-       interpreter, as the thread state of the holder cannot be read safely: in an interpreter that does not hold the
-       GIL, it makes its next holder release the GIL once */
+       interpreter that runs Python code without blocking would never release it.  The request is made in the
+       interpreter of the thread that holds the GIL, and only if that thread is not one of the waiting threads: a
+       thread that releases the GIL for a request waits until another thread takes it.  The thread states cannot be
+       freed while the list of interpreters is locked, so the holder is only used if it is found in it */
     PyThread_acquire_lock(_PyRuntime.interpreters.mutex, WAIT_LOCK);
-    for (PyInterpreterState* interp = _PyRuntime.interpreters.head; interp; interp = interp->next) {
-        _Py_atomic_store_relaxed(&interp->ceval.gil_drop_request, 1);
-        _Py_atomic_store_relaxed(&interp->ceval.eval_breaker, 1);
+    PyInterpreterState* holder_interp = NULL;
+    unsigned long holder_id = 0;
+    for (PyInterpreterState* interp = _PyRuntime.interpreters.head; interp && !holder_interp; interp = interp->next) {
+        for (PyThreadState* ts = interp->threads.head; ts; ts = ts->next) {
+            if (ts == holder) {
+                holder_interp = interp;
+                holder_id = ts->thread_id;
+                break;
+            }
+        }
+    }
+    if (holder_interp) {
+        /* the thread that holds a thread state is not known: a waiting thread holds the GIL with the state it holds
+           when its section starts, or with the state with which it takes the GIL; if that state is not known (ex:
+           the state of an interpreter that the thread creates), with a state that the thread created */
+        int waiting = 0;
+        for (size_t i = 0; i < count; ++i) {
+            if (waiters[i].current == holder
+                || (waiters[i].target ? waiters[i].target == holder : waiters[i].thread_id == holder_id)) {
+                waiting = 1;
+                break;
+            }
+        }
+        /* the request is made under the GIL's mutex, like CPython does, so that the holder cannot release the GIL
+           in the meantime: a request left in an interpreter after the GIL has changed hands would make the next
+           thread of that interpreter that runs Python code release the GIL and wait for a thread that might never
+           take it */
+        if (!waiting) {
+            pthread_mutex_lock(&gil->mutex);
+            if (_Py_atomic_load_relaxed(&gil->locked) > 0
+                && (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder) == holder) {
+                _Py_atomic_store_relaxed(&holder_interp->ceval.gil_drop_request, 1);
+                _Py_atomic_store_relaxed(&holder_interp->ceval.eval_breaker, 1);
+            }
+            pthread_mutex_unlock(&gil->mutex);
+        }
     }
     PyThread_release_lock(_PyRuntime.interpreters.mutex);
 }

@@ -118,8 +118,8 @@
       program that another thread deletes no longer crashes
       (<a href="https://github.com/qoretechnologies/qore/issues/5527">issue 5527</a>)
     - with %Python 3.11 and 3.12, a thread that runs %Python code without blocking in one
-      @ref Python::PythonProgram "PythonProgram" no longer keeps calls into other programs waiting until it releases
-      the GIL by itself (see @ref python_threads_shared_gil;
+      @ref Python::PythonProgram "PythonProgram" no longer keeps calls into other programs, or the creation of new
+      ones, waiting until it releases the GIL by itself (see @ref python_threads_shared_gil;
       <a href="https://github.com/qoretechnologies/qore/issues/5528">issue 5528</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of

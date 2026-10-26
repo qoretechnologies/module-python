@@ -76,13 +76,12 @@ p.callFunction("join", t);
 
     @subsection python_threads_shared_gil The Shared GIL with Python 3.11 and 3.12
 
-    With %Python 3.11 and 3.12, the interpreters of the module share one GIL.  %Python asks only the interpreter of a
-    thread that waits for the GIL to release it, so the module asks every interpreter before it waits, so that a
-    thread that runs %Python code without blocking in one @ref Python::PythonProgram "PythonProgram" does not keep
-    calls into another one waiting.  This is not possible when %Python waits for the GIL itself while it creates an
-    interpreter: a thread that never blocks in the interpreter of a deleted program (which is left in memory, see
-    above) keeps the creation of a new @ref Python::PythonProgram "PythonProgram" waiting, as it does with the
-    subinterpreters of %Python itself.  %Python 3.13 and later release the GIL to waiting threads of any interpreter.
+    With %Python 3.11 and 3.12, the interpreters of the module share one GIL, but %Python asks only the interpreter
+    of a thread that waits for the GIL to release it.  So that a thread that runs %Python code without blocking in one
+    @ref Python::PythonProgram "PythonProgram" does not keep calls into other programs (or the creation of a new
+    one) waiting, the module asks the thread that holds the GIL to release it while a thread waits for it, repeating
+    the request every switch interval (5 ms) as %Python's own wait does, with a helper thread that runs only while
+    threads wait.  %Python 3.13 and later release the GIL to waiting threads of any interpreter.
 
     @section python_interrupts Interrupts, Deletion and Signals
 

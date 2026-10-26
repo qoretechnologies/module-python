@@ -1265,7 +1265,12 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
             .gil = PyInterpreterConfig_SHARED_GIL,
         };
         python = nullptr;
-        PyStatus status = Py_NewInterpreterFromConfig(&python, &config);
+        PyStatus status;
+        {
+            // CPython waits for the GIL while it creates the interpreter (see QorePythonGilWait)
+            QorePythonGilWait gil_wait;
+            status = Py_NewInterpreterFromConfig(&python, &config);
+        }
         if (PyStatus_Exception(status)) {
             if (xsink) {
                 xsink->raiseException("PYTHON-COMPILE-ERROR", "error creating the Python subinterpreter: %s",
@@ -1274,6 +1279,8 @@ int QorePythonProgram::createInterpreter(QorePythonGilHelper& qpgh, ExceptionSin
             return -1;
         }
 #else
+        // with Python 3.11, the thread keeps the GIL while it creates the interpreter: the thread states are swapped
+        // without releasing it
         python = Py_NewInterpreter();
 #endif
 
@@ -1761,8 +1768,10 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         if (currently_attached && currently_attached != python && currently_attached->interp != python->interp) {
             released_other_interp_tstate = PyEval_SaveThread();  // Release GIL and detach
         }
-        qore_python_before_gil_wait();
-        PyEval_RestoreThread(python);
+        {
+            QorePythonGilWait gil_wait(python);
+            PyEval_RestoreThread(python);
+        }
         g_state = PyGILState_UNLOCKED;
         _QORE_SET_GIL_HELD(true);  // Track that we now hold the GIL
     }
@@ -1807,8 +1816,10 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         // python is attached, and clears the flag of a state bound before, with the GIL held.  No bound_gilstate flag
         // is changed here (see the same case for Python 3.13 and later above).
         ceval_state = nullptr;
-        qore_python_before_gil_wait();
-        PyEval_RestoreThread(python);
+        {
+            QorePythonGilWait gil_wait(python);
+            PyEval_RestoreThread(python);
+        }
         // Set our tracking now that we have the GIL
         _qore_PyGILState_SetThisThreadState(python);
         _QORE_SET_GIL_HELD(true);  // Track that we now hold the GIL
@@ -1842,8 +1853,10 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     } else {
         // We don't have the GIL - acquire it
         ceval_state = nullptr;
-        qore_python_before_gil_wait();
-        PyEval_RestoreThread(python);
+        {
+            QorePythonGilWait gil_wait(python);
+            PyEval_RestoreThread(python);
+        }
         g_state = PyGILState_UNLOCKED;
         _QORE_SET_GIL_HELD(true);  // Track that we now hold the GIL
     }

@@ -37,10 +37,25 @@ extern "C" {
 int qore_python_fork_child_gil_lost(void);
 
 #if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030D0000
-/* Asks the thread that holds the GIL to release it, if another thread holds it; called before the calling thread
-   waits for the GIL.  With Python 3.11 and 3.12, the interpreters share the GIL, and a waiting thread asks only its own
-   interpreter to release it, so that a thread of another interpreter that runs Python code would keep it. */
-void qore_python_request_gil_switch(void);
+#include <stddef.h>
+/* a thread that can wait for the GIL */
+struct qore_python_gil_waiter {
+    /* the Python thread identifier of the thread */
+    unsigned long thread_id;
+    /* the thread state that the thread holds when the section starts, if any */
+    PyThreadState* current;
+    /* the thread state with which the thread takes the GIL, if known; if not, the thread is assumed to hold any thread
+       state that it created */
+    PyThreadState* target;
+};
+
+/* Asks the thread that holds the GIL to release it, unless it is one of the waiting threads given, which cannot
+   release it for a request: a thread that releases the GIL for a request waits until another thread takes it.  The
+   holder is identified by its thread state, which can be created by another thread than the one that uses it, so it
+   is compared with the thread states of the waiting threads as well as with their thread identifiers.  With Python
+   3.11 and 3.12, the interpreters share the GIL, and a waiting thread asks only its own interpreter to release it, so
+   that a thread of another interpreter that runs Python code would keep it. */
+void qore_python_request_gil_switch(const struct qore_python_gil_waiter* waiters, size_t count);
 #endif
 
 #ifdef DEBUG
