@@ -420,7 +420,8 @@ protected:
 
     Must be called with the GIL held and a current Python thread state.
 
-    @return 0 if Qore code can run on the current thread, -1 if the thread could not be registered
+    @return 0 if Qore code can run on the current thread, -1 if the thread could not be registered or the Qore
+    library has been shut down (q_libqore_shutdown())
 */
 DLLLOCAL int qore_python_register_thread();
 
@@ -475,7 +476,9 @@ public:
     //! Returns true if Qore code can run on the current thread; otherwise raises a Python exception
     DLLLOCAL bool check() const {
         if (!valid) {
-            PyErr_SetString(PyExc_RuntimeError, "the current thread cannot be registered with Qore");
+            PyErr_SetString(PyExc_RuntimeError, q_libqore_shutdown()
+                ? "the Qore library has been shut down"
+                : "the current thread cannot be registered with Qore");
             return false;
         }
         return true;

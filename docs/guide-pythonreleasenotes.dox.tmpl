@@ -207,7 +207,10 @@
       instance of a %Python subclass of a %Qore class is released by %Python's cycle collector when only it references
       its %Qore object (it was never released).  The destructors of %Qore objects released by %Python, and the save
       object callback, run without the GIL, so they cannot deadlock with a thread that holds a %Qore lock and waits for
-      the GIL (<a href="https://github.com/qoretechnologies/qore/issues/5492">issue 5492</a>)
+      the GIL (<a href="https://github.com/qoretechnologies/qore/issues/5492">issue 5492</a>).  A %Qore object that
+      %Python still holds when the \c qoreloader module shuts %Qore down at the exit of the process, for example in a
+      class attribute or a global variable, is left to the exit of the process and its destructor does not run;
+      releasing it after the shutdown crashed the process at exit
     - deep recursion in %Python code called from a %Qore thread with a small stack raises \c RecursionError instead of
       crashing the process with %Python 3.11 - 3.13: the C recursion counter of the thread state is now reduced to the
       levels that the remaining stack of the %Qore thread can hold; the module previously lowered the recursion limit

@@ -515,6 +515,13 @@ int qore_python_check_no_kwargs(PyObject* kwargs, const char* name) {
 }
 
 int qore_python_register_thread() {
+    // once the Qore library has been shut down (qore_cleanup(), which the qoreloader module's atexit handler calls),
+    // no Qore code can run: Python finalization still releases the Python objects of Qore objects after that, such as
+    // a Qore object held by a class attribute, and the Qore objects are left to the exit of the process instead of
+    // running their destructors in a library that has been torn down
+    if (q_libqore_shutdown()) {
+        return -1;
+    }
     int rc = q_register_foreign_thread();
     if (rc == QFT_REGISTERED) {
         // a Qore thread, or a thread registered before

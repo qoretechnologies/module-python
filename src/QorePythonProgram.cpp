@@ -5207,6 +5207,10 @@ static constexpr const char* QORE_PYTHON_QORE_OBJECT_CAPSULE_NAME = "qoreloader.
 static void qore_python_qore_object_capsule_destructor(PyObject* capsule) {
     QoreObject* obj = static_cast<QoreObject*>(PyCapsule_GetPointer(capsule, QORE_PYTHON_QORE_OBJECT_CAPSULE_NAME));
     assert(obj);
+    // after the Qore library has been shut down, the object is left to the exit of the process
+    if (q_libqore_shutdown()) {
+        return;
+    }
     // releases only the memory of a deleted object: no Qore code runs
     obj->tDeref();
 }

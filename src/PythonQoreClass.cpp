@@ -1409,6 +1409,11 @@ void PythonQoreClass::releaseQoreObject(PyQoreObject* self) {
     // removed from the map of Python objects before the GIL can be released (see findProxy())
     deregisterProxy(self);
     self->qobj = nullptr;
+    // after the Qore library has been shut down, the Qore object is left to the exit of the process: releasing it
+    // could run its destructor, which is Qore code (see qore_python_register_thread())
+    if (q_libqore_shutdown()) {
+        return;
+    }
     if (!self->strong) {
         obj->tDeref();
         return;
