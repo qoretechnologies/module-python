@@ -28,6 +28,7 @@
 #include "QoreMetaPathFinder.h"
 #include "QorePythonProgram.h"
 #include "PythonQoreCallable.h"
+#include "QorePythonSignalWakeup.h"
 #ifdef QORE_PYTHON_HAVE_FORK_GIL_CHECK
 #include "python_fork_gil.h"
 #endif
@@ -136,6 +137,7 @@ void qoreloader_free(void* obj) {
     qoreloader_clear(static_cast<PyObject*>(obj));
     if (counted && !--init_count) {
         printd(5, "qoreloader_free() obj: %p qore_needs_shutdown: %d\n", obj, qore_needs_shutdown);
+        QorePythonSignalWakeup::uninstall();
 
         if (qore_python_pgm) {
             qore_python_pgm->doDeref();
@@ -280,6 +282,8 @@ static PyObject* qoreloader_atexit(PyObject* self, PyObject* args) {
 #ifndef Py_GIL_DISABLED
     PyGILState_STATE gstate = PyGILState_Ensure();
 #endif
+    qore_python_exiting = true;
+    QorePythonSignalWakeup::uninstall();
 
     if (!qpy_pgm_set.empty()) {
         assert(mainThreadState);
@@ -290,6 +294,13 @@ static PyObject* qoreloader_atexit(PyObject* self, PyObject* args) {
             i->py_destructor(&xsink);
         }
     }
+
+#ifndef Py_GIL_DISABLED
+    // the idle thread state of this thread (see qore_python_release_context()) is deleted when the thread ends, which
+    // the main thread does not do before Python is finalized; it is deleted before qore_cleanup(), after which Python
+    // is not used by the module
+    qore_python_delete_idle_thread_state();
+#endif
 
     qore_needs_shutdown = false;
     qore_cleanup();
@@ -624,6 +635,10 @@ static int slot_qoreloader_exec(PyObject *m) {
             QorePythonReferenceHolder func(PyCFunction_New(&atexit_md, nullptr));
             PyTuple_SET_ITEM(*args, 0, func.release());
             QorePythonReferenceHolder rv_ignored(PyObject_CallObject(*register_func, *args));
+
+            // signals interrupt the Qore calls of the main thread (does nothing if the thread is not the main
+            // thread of the main interpreter)
+            QorePythonSignalWakeup::install();
         }
     }
 

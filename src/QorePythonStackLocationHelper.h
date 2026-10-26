@@ -78,6 +78,9 @@ private:
     }
 
     DLLLOCAL void checkInit() const;
+
+    //! reads the frames of the Python stack of the current thread, if the context of the program can be acquired
+    DLLLOCAL void readPythonStack() const;
 };
 
 #endif

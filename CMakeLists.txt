@@ -153,6 +153,7 @@ set(CPP_SRC
     src/QorePythonClass.cpp
     src/PythonCallableCallReferenceNode.cpp
     src/qoreloadermodule.cpp
+    src/QorePythonSignalWakeup.cpp
     src/QoreMetaPathFinder.cpp
     src/QoreLoader.cpp
     src/JavaLoader.cpp

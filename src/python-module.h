@@ -73,6 +73,9 @@ DLLLOCAL extern QorePythonClass* QC_PYTHONBASEOBJECT;
 DLLLOCAL extern qore_classid_t CID_PYTHONBASEOBJECT;
 
 DLLLOCAL extern bool python_shutdown;
+//! true while a Python process that hosts Qore exits (see qoreloader_atexit()): the threads that use Python programs
+//! are not cancelled or waited for, as Python abandons daemon threads
+DLLLOCAL extern bool qore_python_exiting;
 
 //! set in a child process created with fork() while a thread that does not exist in the child held the GIL
 /** The GIL can never be acquired in such a process, so Python is not used in it at all, as after it has been shut
@@ -257,6 +260,11 @@ protected:
     bool initialized = false;  // True if successfully initialized (Python is running)
 };
 
+//! called when the current thread runs Qore code without the GIL (see QorePythonSignalWakeup)
+DLLLOCAL void qore_python_signal_enter_qore();
+//! called when the current thread returns to Python after running Qore code (see QorePythonSignalWakeup)
+DLLLOCAL void qore_python_signal_leave_qore();
+
 class QorePythonReleaseGilHelper {
 public:
     DLLLOCAL QorePythonReleaseGilHelper() {
@@ -267,6 +275,7 @@ public:
         _qore_PyGILState_SetThisThreadState(nullptr);
         _QORE_SET_GIL_HELD(false);  // Track that we no longer hold the GIL
         printd(5, "QorePythonReleaseGilHelper: released GIL, saved tstate: %p\n", _save);
+        qore_python_signal_enter_qore();
     }
 
     DLLLOCAL ~QorePythonReleaseGilHelper() {
@@ -291,6 +300,7 @@ public:
         // Restore our tracking now that we have the GIL with our saved thread state
         _qore_PyGILState_SetThisThreadState(_save);
         printd(5, "~QorePythonReleaseGilHelper: GIL acquired\n");
+        qore_python_signal_leave_qore();
     }
 
 private:

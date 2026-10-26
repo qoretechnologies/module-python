@@ -110,6 +110,13 @@
       an object of the class) has one %Python type: the objects of the second one were not instances of the imported
       type, and the other one was not freed (<a href="https://github.com/qoretechnologies/qore/issues/5539">issue
       5539</a>)
+    - deleting a @ref Python::PythonProgram "PythonProgram" while other threads are blocked in %Qore calls made from
+      its %Python code (ex: a daemon thread in \c Queue::get()) no longer waits forever: the calls are cancelled
+      (\c THREAD-CANCELLED); a %Python process that hosts %Qore exits while such threads exist (\c sys.exit() waited
+      forever); \c SIGINT (Ctrl-C) and other signals interrupt a %Qore call of the main thread that blocks when %Python
+      hosts %Qore (see @ref python_interrupts); reading the %Python stack for a %Qore exception raised in a thread of a
+      program that another thread deletes no longer crashes
+      (<a href="https://github.com/qoretechnologies/qore/issues/5527">issue 5527</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

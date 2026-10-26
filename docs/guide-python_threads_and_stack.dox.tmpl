@@ -67,8 +67,9 @@ p.callFunction("join", t);
     with the \c _thread module, still runs in it: destroying the interpreter (ex: deleting a
     @ref Python::PythonProgram "PythonProgram" object) then leaves it in memory, with the thread still running its
     code; a call from that thread to %Qore raises a %Python \c RuntimeError.  With %Python 3.14, the interpreter is
-    finalized, and such threads exit when they next run.  The destruction of an interpreter waits for its threads that
-    are not daemon threads, as %Python does.
+    finalized, and such threads do not run again (%Python stops a thread that tries to run in a finalized
+    interpreter).  The destruction of an interpreter waits for its threads that are not daemon threads, as %Python
+    does.
 
     With a free-threaded %Python build (PEP 703), daemon threads are disabled in the interpreters of the module:
     starting one raises a %Python \c RuntimeError.
@@ -85,6 +86,11 @@ p.callFunction("join", t);
     @note %Python code that is blocked in a call (ex: \c time.sleep() or a blocking read) is interrupted when the call
     returns; the interrupt and the deletion wait for it.
 
+    %Qore calls that other threads make from the %Python code of a @ref Python::PythonProgram "PythonProgram" that is
+    deleted (ex: a %Python thread blocked in \c Queue::get()) are cancelled: they raise \c THREAD-CANCELLED, so that
+    the threads leave the program and the deletion does not wait for them forever; a thread's cancellation ends when
+    it leaves the program.  The same applies to the threads of a %Python process that hosts %Qore when it exits.
+
     A @ref Python::PythonProgram "PythonProgram" deleted by %Qore code that its own %Python code called (ex: a %Qore
     callback that deletes it) is deleted when the thread leaves the program: the current call continues and returns
     normally, and other threads cannot use the program from the time it was deleted.  Likewise, a %Qore %Program
@@ -95,6 +101,14 @@ p.callFunction("join", t);
     processes that %Python code starts inherit the blocked signals.  When %Python is the host (\c import
     \c qoreloader), %Qore is initialized without its signal handling: %Python handles the signals of the process
     (ex: \c KeyboardInterrupt for \c SIGINT), and %Qore APIs that handle signals are not available.
+
+    A signal also interrupts a %Qore call of the main thread that blocks (ex: \c Queue::get() without a timeout) when
+    %Python hosts %Qore: when \c qoreloader is imported by the main thread, it registers a pipe with
+    \c signal.set_wakeup_fd(), and a signal cancels the %Qore call; the exception raised by the signal's %Python
+    handler (ex: \c KeyboardInterrupt) is raised for the call, or \c THREAD-CANCELLED if the handler does not raise
+    one.  A wakeup fd that was set before \c qoreloader was imported still gets the signal numbers; one set afterwards
+    (ex: by \c asyncio) replaces the pipe, so that signals are then handled when the %Qore call returns.  A signal
+    that arrives just before a %Qore call starts is also handled when the call returns.
 
     @section python_fork Processes Created with fork()
 

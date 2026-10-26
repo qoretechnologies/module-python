@@ -23,6 +23,12 @@ def main():
     process_mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
     mask_before = child_mask()
 
+    # a wakeup fd set before qoreloader is imported still gets the signal numbers
+    wakeup_r, wakeup_w = os.pipe()
+    os.set_blocking(wakeup_r, False)
+    os.set_blocking(wakeup_w, False)
+    signal.set_wakeup_fd(wakeup_w, warn_on_full_buffer=False)
+
     import qoreloader  # noqa: F401
     from qore import sprintf
     assert sprintf("%d", 1) == "1"
@@ -48,7 +54,62 @@ def main():
     signal.signal(signal.SIGUSR1, lambda signum, frame: received.append(signum))
     os.kill(os.getpid(), signal.SIGUSR1)
     assert received == [signal.SIGUSR1], received
+
+    # a signal interrupts a Qore call of the main thread that blocks (issue 5527): the exception raised by the
+    # signal's Python handler replaces the Qore exception
+    check_blocking_qore_call(received, wakeup_r)
     print("Standalone signal handling PASS")
+
+
+def check_blocking_qore_call(received, wakeup_r):
+    import qoreloader
+    import threading
+    from qore.__root__.Qore import Program
+    from qore.__root__.Qore.Thread import Queue
+
+    pgm = Program()
+    # the main thread waits in Qore code after telling the other thread that it runs Qore code; the timeout is only a
+    # guard: without the interruption, the call raises QUEUE-TIMEOUT
+    pgm.parse("%new-style\nsub wait_in_qore(Queue ready, Queue q) { ready.push(1); q.get(30s); }", "signals")
+
+    def interrupt_in_qore(signum):
+        ready = Queue()
+        q = Queue()
+
+        def send():
+            ready.get()
+            os.kill(os.getpid(), signum)
+        thread = threading.Thread(target=send)
+        thread.start()
+        try:
+            pgm.callFunction("wait_in_qore", ready, q)
+            return "returned"
+        except KeyboardInterrupt:
+            return "KeyboardInterrupt"
+        except qoreloader.QoreException as e:
+            return str(e).split(":")[0]
+        finally:
+            thread.join()
+
+    assert interrupt_in_qore(signal.SIGINT) == "KeyboardInterrupt"
+    # a handler that does not raise an exception leaves the Qore exception
+    del received[:]
+    assert interrupt_in_qore(signal.SIGUSR1) == "THREAD-CANCELLED"
+    assert received == [signal.SIGUSR1], received
+
+    # the cancellation does not apply to later Qore calls
+    q = Queue()
+    q.push(1)
+    assert q.get() == 1
+    try:
+        q.get(1)
+        raise AssertionError("no exception")
+    except qoreloader.QoreException as e:
+        assert str(e).startswith("QUEUE-TIMEOUT"), str(e)
+
+    # the wakeup fd set before qoreloader was imported got the signal numbers
+    data = os.read(wakeup_r, 100)
+    assert signal.SIGINT in data and signal.SIGUSR1 in data, data
 
 
 if __name__ == "__main__":

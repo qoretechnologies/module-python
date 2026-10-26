@@ -23,6 +23,9 @@
 */
 
 #include "QorePythonStackLocationHelper.h"
+
+#include <string>
+#include <vector>
 #include "QorePythonProgram.h"
 
 #include <frameobject.h>
@@ -88,11 +91,23 @@ void QorePythonStackLocationHelper::checkInit() const {
     init = true;
 
     // no Python stack can be read if Python cannot be used
-    if (python_shutdown) {
-        return;
+    if (!python_shutdown) {
+        readPythonStack();
     }
 
+    if (!size()) {
+        stack_call.push_back(python_no_call_name);
+        stack_loc.push_back(python_loc_builtin);
+    }
+}
+
+void QorePythonStackLocationHelper::readPythonStack() const {
     QorePythonHelper qph(py_pgm);
+    // the context cannot be acquired if the program is deleted by another thread (ex: an exception raised in this
+    // thread when the deletion cancels its Qore call): the Python stack cannot be read without it
+    if (!qph.isValid() || !qore_python_attached_thread_state()) {
+        return;
+    }
 
     // Resolve callables in the current interpreter. A cached main-interpreter
     // function carries its module dictionary and code objects into other interpreters.
@@ -138,11 +153,6 @@ void QorePythonStackLocationHelper::checkInit() const {
         stack_call.push_back(funcname);
         ++depth;
     }
-
-    if (!size()) {
-        stack_call.push_back(python_no_call_name);
-        stack_loc.push_back(python_loc_builtin);
-    }
 }
 
 PyObject* QorePythonStackLocationHelper::normalizePath(const char* path) {
@@ -151,24 +161,63 @@ PyObject* QorePythonStackLocationHelper::normalizePath(const char* path) {
     return normalizePath(path_obj.release());
 }
 
+//! normalizes a POSIX path as posixpath.normpath() does: removes redundant separators and "." components, and
+//! resolves ".." components where possible
+static std::string qore_python_normpath(const std::string& path) {
+    if (path.empty()) {
+        return ".";
+    }
+    // POSIX keeps two initial slashes, and one for one or more than two
+    size_t initial = 0;
+    while (initial < path.size() && path[initial] == '/') {
+        ++initial;
+    }
+    if (initial > 2) {
+        initial = 1;
+    }
+    std::vector<std::string> comps;
+    size_t start = 0;
+    while (start <= path.size()) {
+        size_t end = path.find('/', start);
+        if (end == std::string::npos) {
+            end = path.size();
+        }
+        std::string comp = path.substr(start, end - start);
+        if (comp.empty() || comp == ".") {
+            // skipped
+        } else if (comp != "..") {
+            comps.push_back(comp);
+        } else if (!comps.empty() && comps.back() != "..") {
+            comps.pop_back();
+        } else if (!initial) {
+            // ".." above the start of a relative path is kept; above the root, it is dropped
+            comps.push_back(comp);
+        }
+        start = end + 1;
+    }
+    std::string rv(initial, '/');
+    for (size_t i = 0; i < comps.size(); ++i) {
+        if (i) {
+            rv += '/';
+        }
+        rv += comps[i];
+    }
+    return rv.empty() ? "." : rv;
+}
+
 PyObject* QorePythonStackLocationHelper::normalizePath(PyObject* path_obj) {
     QorePythonReferenceHolder argument(path_obj);
     if (!argument) {
         return nullptr;
     }
-    QorePythonReferenceHolder path_module(PyImport_ImportModule("os.path"));
-    QorePythonReferenceHolder normpath(path_module ? PyObject_GetAttrString(*path_module, "normpath") : nullptr);
-    if (!normpath) {
+    // normalized in C++: calling os.path.normpath(), which is Python code with Python 3.11, would run pending signal
+    // handlers, whose exceptions would be lost (ex: KeyboardInterrupt while the stack of a Qore exception is read)
+    Py_ssize_t size;
+    const char* str = PyUnicode_Check(*argument) ? PyUnicode_AsUTF8AndSize(*argument, &size) : nullptr;
+    if (!str) {
         PyErr_Clear();
         return nullptr;
     }
-    QorePythonReferenceHolder normpath_args(PyTuple_Pack(1, *argument));
-    if (!normpath_args) {
-        return nullptr;
-    }
-    QorePythonReferenceHolder normalized(PyObject_CallObject(*normpath, *normpath_args));
-    if (!normalized) {
-        PyErr_Clear();
-    }
-    return normalized.release();
+    std::string normalized = qore_python_normpath(std::string(str, size));
+    return PyUnicode_FromStringAndSize(normalized.c_str(), normalized.size());
 }

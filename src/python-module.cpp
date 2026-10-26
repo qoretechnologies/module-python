@@ -111,6 +111,7 @@ static mcmap_t mcmap = {
 static bool python_needs_shutdown = false;
 static bool python_initialized = false;
 bool python_shutdown = false;
+bool qore_python_exiting = false;
 bool python_fork_lost = false;
 
 thread_local PyThreadState* python_fork_protocol_tstate = nullptr;

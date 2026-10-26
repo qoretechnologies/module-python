@@ -7,6 +7,7 @@ A thread created by Python has no Qore thread data until it is registered with Q
 runs and is deregistered when it ends.  Previously a Qore function or constructor called on such a thread crashed the
 process.
 """
+import sysconfig
 import threading
 
 import qoreloader  # noqa: F401
@@ -81,6 +82,34 @@ def concurrent_rounds():
     return "ok"
 
 
+EXIT_WITH_BLOCKED_DAEMON = """
+import sys, threading
+import qoreloader
+from qore.__root__.Qore.Thread import Counter, Queue
+q = Queue()
+c = Counter(1)
+def blocked():
+    c.dec()
+    q.get()
+threading.Thread(target=blocked, daemon=True).start()
+c.waitForZero()
+sys.exit(8)
+"""
+
+
+def exit_with_blocked_daemon():
+    """The process exits while a daemon thread is blocked in a Qore call (issue 5527).
+
+    The exit deletes the Qore program of qoreloader, which cancels the Qore calls of the threads that use it;
+    previously the exit waited forever for the daemon thread.
+    """
+    import subprocess
+    import sys
+    completed = subprocess.run([sys.executable, "-B", "-c", EXIT_WITH_BLOCKED_DAEMON], capture_output=True,
+        text=True, timeout=120)
+    return completed.returncode
+
+
 def main():
     assert in_thread(lambda: sprintf("%d", 73)) == "73", "a Qore function called in a thread"
     assert in_thread(construct_and_use) == 1, "a Qore object created and used in a thread"
@@ -89,6 +118,9 @@ def main():
     assert tid > 0, "the thread had a Qore thread ID"
     assert tid not in thread_list(), "the ended thread is deregistered from Qore"
     assert concurrent_rounds() == "ok", "threads reusing the Qore thread IDs of ended threads call Qore"
+    # daemon threads are disabled in free-threaded builds
+    if not sysconfig.get_config_var("Py_GIL_DISABLED"):
+        assert exit_with_blocked_daemon() == 8, "the process exits with a daemon thread blocked in Qore"
     print("Standalone Python threads PASS")
 
 

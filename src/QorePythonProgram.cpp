@@ -35,6 +35,7 @@
 #include "QoreLoader.h"
 #include "PythonQoreClass.h"
 #include "QoreMetaPathFinder.h"
+#include "QorePythonSignalWakeup.h"
 
 #include "PythonCallableCallReferenceNode.h"
 #include "PythonQoreCallable.h"
@@ -133,10 +134,13 @@ void QorePythonProgram::forkChildThreadStates(void* arg) {
     for (auto& i : py_thr_map) {
         i.first->pgm_thr_cnt = 0;
         i.first->pgm_thr_waiting = 0;
+        i.first->pgm_thr_uses.clear();
+        i.first->pgm_cancelled_tids.clear();
     }
     for (const QorePythonHelper* helper = QorePythonHelper::getCurrent(); helper; helper = helper->getPrevious()) {
         if (helper->isCounted()) {
             ++helper->getProgram()->pgm_thr_cnt;
+            ++helper->getProgram()->pgm_thr_uses[fork_tid];
         }
     }
 }
@@ -701,6 +705,29 @@ void QorePythonProgram::checkPendingDelete() {
     weakDeref();
 }
 
+void QorePythonProgram::cancelThreads() {
+    std::vector<int> tids;
+    {
+        AutoLocker al(py_thr_lck);
+        checkForkIntern();
+        // from now on, other threads cannot use the program (see getAcquireThreadState())
+        int tid = q_gettid();
+        deleting_tid = tid;
+        for (auto& i : pgm_thr_uses) {
+            if (i.first != tid) {
+                tids.push_back(i.first);
+            }
+        }
+    }
+    for (int tid : tids) {
+        // a thread whose cancellation was requested by other code keeps it
+        if (qore_cancel_thread(tid, "the Python program was deleted") == 0) {
+            AutoLocker al(py_thr_lck);
+            pgm_cancelled_tids.insert(tid);
+        }
+    }
+}
+
 void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
     if (destroyed || delete_pending) {
         return;
@@ -734,9 +761,41 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
         return;
     }
 
+    if (qore_python_exiting) {
+        // a Python process that hosts Qore exits: Python abandons its daemon threads, which are not woken (with
+        // Python 3.12, a daemon thread that runs while the process exits aborts it), so a program that other threads
+        // use (ex: a daemon thread blocked in a Qore call) is left as it is
+        bool used = false;
+        {
+            AutoLocker al(py_thr_lck);
+            int tid = q_gettid();
+            for (auto& i : pgm_thr_uses) {
+                if (i.first != tid) {
+                    used = true;
+                    break;
+                }
+            }
+        }
+        if (used) {
+            valid = false;
+            return;
+        }
+    } else {
+        // the Qore calls that other threads make from the program's Python code are cancelled (ex: a thread blocked
+        // in Queue::get()), so that the threads can leave the program; otherwise the deletion would wait for them
+        // forever
+        cancelThreads();
+    }
+
     if (qpgm && owns_qore_program_ref) {
         // remove the external data before dereferencing
         qpgm->removeExternalData(QORE_PYTHON_MODULE_NAME);
+        // the threads that use the Qore program can need the GIL to leave it (ex: a cancelled thread returning to
+        // its Python code)
+        std::optional<QorePythonReleaseGilHelper> prgh;
+        if (qore_python_attached_thread_state()) {
+            prgh.emplace();
+        }
         qpgm->waitForTerminationAndDeref(xsink);
     }
     qpgm = nullptr;
@@ -1935,12 +1994,24 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
     // - Constructors use main_ts_lck (not py_thr_lck) for GIL acquisition
     // - getAcquireThreadState() in setContext only briefly holds py_thr_lck, releasing before GIL acquisition
     // So no thread holds py_thr_lck while waiting for the GIL, avoiding deadlocks.
+    bool clear_cancel = false;
     {
         AutoLocker al(py_thr_lck);
         checkForkIntern();
+        int tid = q_gettid();
+        std::map<int, int>::iterator i = pgm_thr_uses.find(tid);
+        if (i != pgm_thr_uses.end() && !--i->second) {
+            pgm_thr_uses.erase(i);
+            // the thread leaves the program, whose deletion cancelled its Qore calls: the cancellation does not
+            // apply to the code that the thread runs outside of the program
+            clear_cancel = pgm_cancelled_tids.erase(tid);
+        }
         if (!--pgm_thr_cnt && pgm_thr_waiting) {
             pgm_thr_cond.signal();
         }
+    }
+    if (clear_cancel) {
+        qore_clear_thread_cancel();
     }
 }
 
@@ -2292,6 +2363,15 @@ PyObject* QorePythonProgram::getPythonQoreException(const QoreHashNode* info, in
 
 void QorePythonProgram::raisePythonException(ExceptionSink& xsink) {
     assert(xsink);
+    // a Qore call of the main thread cancelled by a signal: the exception raised by the signal's Python handler (ex:
+    // KeyboardInterrupt) replaces the Qore exception (THREAD-CANCELLED)
+    if (QorePythonSignalWakeup::checkSignal()) {
+        ExceptionSink xsink2;
+        // the Qore exception is consumed; releasing it can run Qore code, which runs without the GIL
+        ValueHolder info(xsink.getExceptionInfo(), &xsink2);
+        qore_python_release(info);
+        return;
+    }
     // the exception is raised in the interpreter of the current thread, whose program converts the values
     QorePythonProgram* pypgm = getContext();
     if (!pypgm || !pypgm->interpreter || pypgm->interpreter != qore_python_get_interpreter(PyThreadState_Get())) {
@@ -4474,6 +4554,19 @@ int QorePythonProgram::checkPythonException(ExceptionSink* xsink) {
     // the KeyboardInterrupt that an interrupt of the Program raised in the Python code is the Qore interrupt
     // (PROGRAM-INTERRUPTED); the one that the deletion of the program raised is PYTHON-INTERPRETER-DELETED
     if (PyErr_GivenExceptionMatches(ex, PyExc_KeyboardInterrupt)) {
+        // the deletion of the program also cancels the thread (see cancelThreads()), which is not a cancellation of
+        // its Qore code
+        bool deleted;
+        {
+            AutoLocker al(py_thr_lck);
+            deleted = pgm_cancelled_tids.find(q_gettid()) != pgm_cancelled_tids.end();
+        }
+        if (deleted) {
+            PyErr_Clear();
+            xsink->raiseException("PYTHON-INTERPRETER-DELETED", "the Python program was deleted while the thread "
+                "ran its Python code");
+            return -1;
+        }
         if (qore_check_cancel(xsink, "running Python code")) {
             PyErr_Clear();
             return -1;

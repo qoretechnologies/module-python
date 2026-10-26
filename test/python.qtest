@@ -183,6 +183,11 @@ class PythonCycleTracked {
     }
 }
 
+#! throws an exception; used to check the call stacks of Qore exceptions raised from Python code
+sub python_test_throw() {
+    throw "PYTHON-TEST";
+}
+
 #! deletes the object given; used to delete Qore objects of Python objects
 sub python_test_delete_object(object o) {
     delete o;
@@ -328,6 +333,8 @@ class PythonTest inherits Test {
         addTestCase("a Qore class made into a Python type in a nested call", \nestedClassCreationTest());
         addTestCase("reference cycles between Python and Qore objects", \pythonQoreCycleTest());
         addTestCase("deleting a program from its own call path", \selfDeleteTest());
+        addTestCase("deleting a program cancels the Qore calls of its threads", \deleteCancelsQoreCallsTest());
+        addTestCase("the file names of Python frames are normalized", \pythonFrameFileNameTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -3463,6 +3470,98 @@ def go(c, f):
             code get = auto sub () { return remove owner; };
             assertEq("ValueError", pp.callFunction("go", c, new PythonSelfDeleteFactory(get)));
             assertEq(deleted + 1, PythonProgramOwner::deleted, "the child Program was deleted");
+        }
+    }
+
+    # deleting a Python program cancels the Qore calls that other threads make from its Python code, which waited
+    # forever before (issue 5527); a thread's cancellation ends when it leaves the program
+    deleteCancelsQoreCallsTest() {
+        # a Qore thread runs the program's Python code, which calls Qore code that blocks
+        {
+            PythonProgram p("def block(cb):\n    return cb()\n", "delete-cancel.py");
+            Queue entered();
+            Queue results();
+            code cb = auto sub () {
+                entered.push(1);
+                # the timeout is only a guard
+                return (new Queue()).get(60s);
+            };
+            background sub () {
+                try {
+                    p.callFunction("block", cb);
+                    results.push("returned");
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex.err);
+                }
+                # the cancellation does not apply to the code that the thread runs outside of the program
+                try {
+                    (new Queue()).get(1);
+                    results.push("no exception");
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex.err);
+                }
+            }();
+            entered.get(60s);
+            delete p;
+            assertEq("THREAD-CANCELLED", results.get(60s), "the blocked call was cancelled");
+            assertEq("QUEUE-TIMEOUT", results.get(60s), "the cancellation ended when the thread left the program");
+        }
+
+        # a daemon thread created by Python is blocked in a Qore call
+        if (Python::FreeThreading) {
+            # daemon threads are disabled in free-threaded builds
+            return;
+        }
+        {
+            PythonProgram p("
+import threading
+def start(cb):
+    threading.Thread(target=cb, daemon=True).start()
+", "delete-cancel-daemon.py");
+            Queue entered();
+            Queue results();
+            code cb = sub () {
+                entered.push(1);
+                try {
+                    (new Queue()).get(60s);
+                    results.push("returned");
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex.err);
+                }
+            };
+            p.callFunction("start", cb);
+            entered.get(60s);
+            delete p;
+            assertEq("THREAD-CANCELLED", results.get(60s), "the daemon thread's call was cancelled");
+        }
+        # a new program can be used afterwards
+        PythonProgram p2("def f():\n    return 2\n", "delete-cancel-after.py");
+        assertEq(2, p2.callFunction("f"));
+    }
+
+    # the file names of Python frames in the call stacks of Qore exceptions are normalized as by posixpath.normpath();
+    # they are normalized in C++, as calling os.path.normpath() (Python code with Python 3.11) ran pending signal
+    # handlers, whose exceptions were lost (issue 5527)
+    pythonFrameFileNameTest() {
+        hash<string, string> paths = {
+            "/": "/",
+            "//a": "//a",
+            "///a/./b/../c/": "/a/c",
+            "a/../../b": "../b",
+            "/../a": "/a",
+            "./a//b/": "a/b",
+            "a/b/..": "a",
+            "..": "..",
+        };
+        foreach hash<auto> i in (paths.pairIterator()) {
+            PythonProgram pp("from qore.__root__ import python_test_throw\ndef f():\n    python_test_throw()\n",
+                i.key);
+            try {
+                pp.callFunction("f");
+                assertTrue(False, i.key + ": no exception");
+            } catch (hash<ExceptionInfo> ex) {
+                assertEq(i.value, (map $1.file, ex.callstack, $1.lang == "Python")[0], i.key);
+            }
         }
     }
 

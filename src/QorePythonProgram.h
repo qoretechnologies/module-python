@@ -691,6 +691,12 @@ protected:
 
     // for local program thread management
     mutable int pgm_thr_cnt = 0;
+    //! the threads that use the program: TID -> number of uses (the uses counted in pgm_thr_cnt); in the py_thr_lck
+    //! lock
+    mutable std::map<int, int> pgm_thr_uses;
+    //! the threads whose Qore calls the deletion of the program cancelled (see deleteIntern()); each one clears its
+    //! cancellation when it leaves the program; in the py_thr_lck lock
+    mutable std::set<int> pgm_cancelled_tids;
     //! the TID of the thread that deletes the program (see deleteIntern()); in the py_thr_lck lock
     int deleting_tid = 0;
     mutable int pgm_thr_waiting = 0;
@@ -882,6 +888,9 @@ protected:
     //! returns true if the current thread uses the program (a QorePythonHelper of the program exists in the thread)
     DLLLOCAL bool isUsedByCurrentThread() const;
 
+    //! cancels the Qore calls of the other threads that use the program; called when the program is deleted
+    DLLLOCAL void cancelThreads();
+
     //! the child handler of py_thr_lck (see QoreForkHandler.h): the child runs only the thread that called fork()
     /** Initializes the lock again; the uses of each interpreter are counted again with the helpers of the forking
         thread, which is the only thread left, and the thread states recorded for the other threads of the parent are
@@ -950,10 +959,12 @@ protected:
     DLLLOCAL bool getAcquireThreadState(PyThreadState*& python) const {
         AutoLocker al(py_thr_lck);
         checkForkIntern();
-        if (deleting_tid && deleting_tid != q_gettid()) {
+        int tid = q_gettid();
+        if (deleting_tid && deleting_tid != tid) {
             return false;
         }
         ++pgm_thr_cnt;
+        ++pgm_thr_uses[tid];
         python = getThreadStateIntern();
         return true;
     }
