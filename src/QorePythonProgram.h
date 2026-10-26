@@ -697,6 +697,9 @@ protected:
     //! the threads whose Qore calls the deletion of the program cancelled (see deleteIntern()); each one clears its
     //! cancellation when it leaves the program; in the py_thr_lck lock
     mutable std::set<int> pgm_cancelled_tids;
+    //! true if the deletion of the program cancelled the Qore calls of other threads (see deleteIntern()); in the
+    //! py_thr_lck lock
+    bool pgm_threads_cancelled = false;
     //! the TID of the thread that deletes the program (see deleteIntern()); in the py_thr_lck lock
     int deleting_tid = 0;
     mutable int pgm_thr_waiting = 0;

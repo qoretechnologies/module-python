@@ -724,6 +724,7 @@ void QorePythonProgram::cancelThreads() {
         if (qore_cancel_thread(tid, "the Python program was deleted") == 0) {
             AutoLocker al(py_thr_lck);
             pgm_cancelled_tids.insert(tid);
+            pgm_threads_cancelled = true;
         }
     }
 }
@@ -1028,6 +1029,17 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                     leave = hasThreadsNotJoinedAtEnd(sub_tstate);
                 }
 #endif
+                // a thread created by Python whose Qore call the deletion cancelled (see cancelThreads()) runs the
+                // Python code of the interpreter again when the call returns (ex: the exception of the call), so the
+                // interpreter cannot be finalized: it is left in memory, as above
+                if (!leave) {
+                    bool cancelled;
+                    {
+                        AutoLocker al(py_thr_lck);
+                        cancelled = pgm_threads_cancelled;
+                    }
+                    leave = cancelled && hasOtherThreadStates(sub_tstate);
+                }
                 if (leave) {
                     printd(5, "QorePythonProgram::deleteIntern() this: %p interpreter %p left: threads that are not "
                         "waited for have states in it\n", this, interpreter);
