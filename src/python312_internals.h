@@ -201,6 +201,7 @@ DLLLOCAL static inline bool _qore_has_thread_state_attached() {
 }
 
 DLLLOCAL static inline void _qore_acquire_thread_state(PyThreadState* tstate) {
+    qore_python_before_gil_wait();
     PyEval_AcquireThread(tstate);
     // Set thread-local tracking AFTER acquiring the GIL to ensure consistency.
     // PyEval_AcquireThread() either succeeds or aborts (fatal error), so if we

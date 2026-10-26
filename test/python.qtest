@@ -335,6 +335,7 @@ class PythonTest inherits Test {
         addTestCase("deleting a program from its own call path", \selfDeleteTest());
         addTestCase("deleting a program cancels the Qore calls of its threads", \deleteCancelsQoreCallsTest());
         addTestCase("the file names of Python frames are normalized", \pythonFrameFileNameTest());
+        addTestCase("calls into a Python program while a thread runs in another one", \crossInterpreterGilTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -3539,6 +3540,40 @@ def start(cb):
         assertEq(2, p2.callFunction("f"));
     }
 
+    # with Python 3.11 and 3.12, the interpreters share the GIL, but a thread waiting for it asked only its own
+    # interpreter to release it: a call into a Python program waited until a thread running Python code in another
+    # program released the GIL by itself, which a CPU-bound thread does not do (issue 5528)
+    crossInterpreterGilTest() {
+        if (Python::FreeThreading) {
+            testSkip("Python threads in sub-interpreters not supported with free-threading (PEP 703)");
+        }
+        PythonProgram a("
+import threading
+stop = False
+thread = None
+def spin(started):
+    def run():
+        started.dec()
+        i = 0
+        while not stop:
+            i += 1
+    global thread
+    thread = threading.Thread(target=run)
+    thread.start()
+def end():
+    global stop
+    stop = True
+    thread.join()
+", "gil-spin.py");
+        PythonProgram b("def f():\n    return 'called'\n", "gil-call.py");
+        Counter started(1);
+        a.callFunction("spin", started);
+        started.waitForZero();
+        # the thread spins until it is stopped: previously this call waited forever
+        assertEq("called", b.callFunction("f"));
+        a.callFunction("end");
+    }
+
     # the file names of Python frames in the call stacks of Qore exceptions are normalized as by posixpath.normpath();
     # they are normalized in C++, as calling os.path.normpath() (Python code with Python 3.11) ran pending signal
     # handlers, whose exceptions were lost (issue 5527)
@@ -4758,12 +4793,9 @@ def reinit():
     # in free-threaded builds, other Python threads can change a list, a dict or a bytearray while it is converted to
     # Qore; list items are referenced atomically, a copy of a dict is iterated and a bytearray is copied in a critical
     # section.  Previously the conversion of a list read items that another thread had removed and crashed the process
-    # (issue 5523).  With the GIL no other thread runs while a container is converted; there the CPU-bound thread of
-    # the test can also keep the GIL with Python 3.11 and 3.12 (issue 5528).
+    # (issue 5523).  With the GIL no other thread runs while a container is converted, and the test checks the same
+    # results (with Python 3.11 and 3.12, the CPU-bound thread of the test kept the GIL: issue 5528).
     concurrentContainerTest() {
-        if (!Python::FreeThreading) {
-            testSkip("other Python threads cannot change a container while it is converted with the GIL");
-        }
         PythonProgram p("
 import threading
 

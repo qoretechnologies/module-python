@@ -32,7 +32,9 @@
 
 #if PY_VERSION_HEX >= 0x030C0000
 #include "internal/pycore_interp.h"
-#else
+#endif
+#if PY_VERSION_HEX < 0x030D0000
+// _PyRuntime (the GIL of Python 3.11, and the list of interpreters of Python 3.11 and 3.12)
 #include "internal/pycore_runtime.h"
 #endif
 
@@ -90,6 +92,26 @@ int qore_python_fork_child_gil_lost(void) {
     return holder && holder->thread_id == PyThread_get_thread_ident() ? 0 : 1;
 #endif
 }
+
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030D0000
+void qore_python_request_gil_switch(void) {
+    struct _gil_runtime_state* gil = qore_python_get_gil();
+    if (!gil || _Py_atomic_load_relaxed(&gil->locked) <= 0) {
+        return;
+    }
+    /* the interpreters share the GIL, but a thread that waits for it asks only its own interpreter to release it
+       (gil_drop_request and eval_breaker are per interpreter with Python 3.11 and 3.12): a thread of another
+       interpreter that runs Python code without blocking would never release it.  The request is made in every
+       interpreter, as the thread state of the holder cannot be read safely: in an interpreter that does not hold the
+       GIL, it makes its next holder release the GIL once */
+    PyThread_acquire_lock(_PyRuntime.interpreters.mutex, WAIT_LOCK);
+    for (PyInterpreterState* interp = _PyRuntime.interpreters.head; interp; interp = interp->next) {
+        _Py_atomic_store_relaxed(&interp->ceval.gil_drop_request, 1);
+        _Py_atomic_store_relaxed(&interp->ceval.eval_breaker, 1);
+    }
+    PyThread_release_lock(_PyRuntime.interpreters.mutex);
+}
+#endif
 
 #ifdef DEBUG
 #include <errno.h>

@@ -36,6 +36,13 @@ extern "C" {
 */
 int qore_python_fork_child_gil_lost(void);
 
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030D0000
+/* Asks the thread that holds the GIL to release it, if another thread holds it; called before the calling thread
+   waits for the GIL.  With Python 3.11 and 3.12, the interpreters share the GIL, and a waiting thread asks only its own
+   interpreter to release it, so that a thread of another interpreter that runs Python code would keep it. */
+void qore_python_request_gil_switch(void);
+#endif
+
 #ifdef DEBUG
 /* Test hooks (debug builds only): a thread of the module holds the mutex of the GIL, as a thread waiting for the GIL
    does from time to time, until qore_python_test_release_gil_mutex() is called.  Returns 0 once the mutex is held,

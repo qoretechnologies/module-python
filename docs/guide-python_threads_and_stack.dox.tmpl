@@ -74,6 +74,16 @@ p.callFunction("join", t);
     With a free-threaded %Python build (PEP 703), daemon threads are disabled in the interpreters of the module:
     starting one raises a %Python \c RuntimeError.
 
+    @subsection python_threads_shared_gil The Shared GIL with Python 3.11 and 3.12
+
+    With %Python 3.11 and 3.12, the interpreters of the module share one GIL.  %Python asks only the interpreter of a
+    thread that waits for the GIL to release it, so the module asks every interpreter before it waits, so that a
+    thread that runs %Python code without blocking in one @ref Python::PythonProgram "PythonProgram" does not keep
+    calls into another one waiting.  This is not possible when %Python waits for the GIL itself while it creates an
+    interpreter: a thread that never blocks in the interpreter of a deleted program (which is left in memory, see
+    above) keeps the creation of a new @ref Python::PythonProgram "PythonProgram" waiting, as it does with the
+    subinterpreters of %Python itself.  %Python 3.13 and later release the GIL to waiting threads of any interpreter.
+
     @section python_interrupts Interrupts, Deletion and Signals
 
     @ref Qore::SandboxManager::requestInterrupt() "SandboxManager::requestInterrupt()" on the sandbox manager of a

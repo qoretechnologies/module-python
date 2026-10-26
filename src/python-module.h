@@ -125,6 +125,20 @@ DLLLOCAL bool _qore_has_gil(PyThreadState* t_state);
           interpreters
 */
 #if PY_MAJOR_VERSION >= 3
+#if defined(QORE_PYTHON_HAVE_FORK_GIL_CHECK) && !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030D0000
+#include "python_fork_gil.h"
+#endif
+
+//! asks the thread that holds the GIL to release it; called before the current thread waits for the GIL
+/** With Python 3.11 and 3.12, the interpreters of the module share the GIL, but a waiting thread asks only its own
+    interpreter to release it (see qore_python_request_gil_switch())
+*/
+DLLLOCAL static inline void qore_python_before_gil_wait() {
+#if defined(QORE_PYTHON_HAVE_FORK_GIL_CHECK) && !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030D0000
+    qore_python_request_gil_switch();
+#endif
+}
+
 #if PY_MINOR_VERSION >= 14
 // Python 3.14+ (GIL or free-threading)
 #include "python314_internals.h"
@@ -294,6 +308,7 @@ public:
             PyThreadState_Swap(_save);
         } else {
             // GIL is not held - acquire it
+            qore_python_before_gil_wait();
             PyEval_RestoreThread(_save);
             _QORE_SET_GIL_HELD(true);  // Track that we now hold the GIL
         }
