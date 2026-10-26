@@ -1238,6 +1238,17 @@ int PythonQoreClass::py_setattro(PyObject* self, PyObject* attr, PyObject* value
     if (!qeh.check()) {
         return -1;
     }
+    // the Qore class is not freed while the member is written or removed; a class whose Program has been deleted
+    // cannot be used, as for reads
+    QorePythonDeclHandle* cls_handle = findQoreClass(self);
+    if (!cls_handle) {
+        return -1;
+    }
+    QorePythonDeclUse use(cls_handle);
+    if (!use) {
+        cls_handle->raiseDeleted();
+        return -1;
+    }
 
     ExceptionSink xsink;
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
@@ -1264,8 +1275,9 @@ int PythonQoreClass::py_setattro(PyObject* self, PyObject* attr, PyObject* value
             PyErr_Format(PyExc_AttributeError, "'%s' is a private member of Qore class '%s'", member,
                 ocls->getName());
             return -1;
-        } else if (!has_member && ocls->hasPublicMembersInHierarchy()) {
-            // a class with declared members has no other members
+        } else if (!has_member && ocls->hasPublicMembersInHierarchy() && !ocls->hasMemberWriteGate()) {
+            // a class with declared members has no other members, unless a member write gate handles the writes (ex:
+            // the Qore class of a Python class, whose writes are Python attribute writes)
             PyErr_Format(PyExc_AttributeError, "'%s' is not a registered member of Qore class '%s'", member,
                 ocls->getName());
             return -1;
@@ -1279,13 +1291,16 @@ int PythonQoreClass::py_setattro(PyObject* self, PyObject* attr, PyObject* value
                 QorePythonReleaseGilHelper prgh;
                 QorePythonStackLocationHelper slh(qore_python_pgm);
                 if (value) {
-                    obj->setMemberValue(member, nullptr, v.release(), &xsink);
+                    // assigned in the context of the object's class (its private members are refused above): the
+                    // value is checked and converted for the type of the member, as by an assignment in Qore code
+                    obj->setMemberValue(member, ocls, v.release(), &xsink);
                 } else {
                     obj->removeMember(member, &xsink);
                 }
             } else {
                 qore_python_release(v);
             }
+            use.end();
             if (!xsink) {
                 return 0;
             }

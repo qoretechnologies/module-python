@@ -170,6 +170,17 @@ namespace PythonNestedClass {
     }
 }
 
+#! has typed members; used to check that Python writes apply the member types
+class PythonTypedMembers {
+    public {
+        int i = 0;
+        *float f;
+        list<int> l = ();
+        hash<string, int> h = {};
+        string s = "";
+    }
+}
+
 #! counts its destructions; used to check the reference cycles between Python and Qore
 class PythonCycleTracked {
     public {
@@ -336,6 +347,7 @@ class PythonTest inherits Test {
         addTestCase("deleting a program cancels the Qore calls of its threads", \deleteCancelsQoreCallsTest());
         addTestCase("the file names of Python frames are normalized", \pythonFrameFileNameTest());
         addTestCase("calls into a Python program while a thread runs in another one", \crossInterpreterGilTest());
+        addTestCase("Python writes to the members of Qore objects", \typedMemberWriteTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -4161,6 +4173,84 @@ def run():
         assertEq((True, True, False, True), r.dir);
         assertTrue(r.weak);
         assertTrue(r.weak_dead);
+    }
+
+    # Python writes to the members of Qore objects apply the member types as assignments in Qore code do (previously
+    # any value was stored, ex: a float in an int member); writes reach the member write gate of the Qore class of a
+    # Python object of another Python program (previously refused); a member cannot be removed once the Program of the
+    # class has been deleted, as it cannot be read or written (issue 5529)
+    typedMemberWriteTest() {
+        PythonProgram p("
+from qore.__root__ import PythonTypedMembers
+import qoreloader
+
+def write(o, name, value):
+    try:
+        setattr(o, name, value)
+        return 'ok'
+    except qoreloader.QoreException as e:
+        return str(e).split(':')[0]
+
+def make():
+    return PythonTypedMembers()
+", "typed-members.py");
+        object o = p.callFunction("make");
+        assertEq("RUNTIME-TYPE-ERROR", p.callFunction("write", o, "i", 1.5));
+        assertEq(0, o.i, "the int member is unchanged");
+        assertEq("ok", p.callFunction("write", o, "i", 3));
+        assertEq(3, o.i);
+        # an int is converted for a float member, as in Qore
+        assertEq("ok", p.callFunction("write", o, "f", 2));
+        assertEq(2.0, o.f);
+        assertEq("float", o.f.type());
+        assertEq("ok", p.callFunction("write", o, "f", NOTHING));
+        assertEq(NOTHING, o.f);
+        assertEq("ok", p.callFunction("write", o, "l", (1, 2)));
+        assertEq("list<int>", o.l.fullType());
+        assertEq("RUNTIME-TYPE-ERROR", p.callFunction("write", o, "l", ("a",)));
+        assertEq((1, 2), o.l);
+        assertEq("ok", p.callFunction("write", o, "h", {"a": 1}));
+        assertEq("hash<string, int>", o.h.fullType());
+        assertEq("RUNTIME-TYPE-ERROR", p.callFunction("write", o, "h", {"a": "x"}));
+        assertEq("RUNTIME-TYPE-ERROR", p.callFunction("write", o, "s", 1));
+        assertEq("", o.s);
+
+        # the Qore object of a Python object of another Python program
+        PythonProgram p1("
+class Plain:
+    pass
+def make():
+    return Plain()
+def get(o, name):
+    return getattr(o, name)
+", "typed-members-owner.py");
+        PythonProgram p2("def set(o, name, value):\n    setattr(o, name, value)\n", "typed-members-other.py");
+        object plain = p1.callFunction("make");
+        p2.callFunction("set", plain, "y", 3);
+        assertEq(3, p1.callFunction("get", plain, "y"));
+
+        # a member of an object whose class's Program has been deleted
+        PythonProgram p3("
+saved = []
+def save(o):
+    saved.append(o)
+def remove():
+    try:
+        del saved[0].x
+        return 'removed'
+    except RuntimeError as e:
+        return str(e)
+def clear():
+    saved.clear()
+", "typed-members-deleted.py");
+        {
+            Program child(PO_NEW_STYLE);
+            child.parse("class Member { public { int x = 1; } } object sub make() { return new Member(); }",
+                "typed-members-child");
+            p3.callFunction("save", child.callFunction("make"));
+        }
+        assertRegex("the Qore Program that declared it has been deleted", p3.callFunction("remove"));
+        p3.callFunction("clear");
     }
 
     # static members of Qore classes are descriptors of their current values; Qore enums are Python enum classes whose
