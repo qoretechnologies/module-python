@@ -43,6 +43,17 @@ n.me = None     # breaks the cycle: n is released when its last Python reference
     The destructors of %Qore objects released by %Python run without the %Python GIL, on the thread that releases
     them.
 
+    @section python_qore_object_lifecycle_deleted Deleted and Uninitialized Objects
+
+    A %Python object whose %Qore object has been deleted (ex: with \c delete in %Qore code) gives the deleted object
+    when it is passed back to %Qore, as any %Qore reference to a deleted object does, except for an object that
+    %Qore created for a %Qore class that inherits a %Python class: it holds only a weak reference to its %Qore
+    object, and passing it to %Qore after the %Qore object has been deleted raises \c OBJECT-ALREADY-DELETED.
+
+    An object of a %Python subclass of a %Qore class whose \c __init__() does not call the constructor of the %Qore
+    class has no %Qore object: passing it to %Qore raises \c PYTHON-VALUE-ERROR, and reading its %Qore members raises
+    \c AttributeError.
+
     @section python_qore_object_lifecycle_explicit Explicit Qore Object Lifecycle Management
 
     The lifecycle of %Qore objects can additionally be managed explicitly by using the

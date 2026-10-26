@@ -3665,7 +3665,24 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
     // if this is already a Qore object, then return it
     if (PyQoreObject_Check(val)) {
         PyQoreObject* pyobj = reinterpret_cast<PyQoreObject*>(val);
-        return pyobj->qobj ? pyobj->qobj->refSelf() : QoreValue();
+        if (!pyobj->qobj) {
+            // an object without a Qore object: the constructor of the Qore class was not called, ex: by an
+            // __init__() of a Python subclass that does not call it (see python_qore_object_lifecycle_deleted)
+            xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert an object of Python type '%s' to Qore: it "
+                "was not initialized; its __init__() did not call the constructor of its Qore class",
+                Py_TYPE(val)->tp_name);
+            return QoreValue();
+        }
+        // a weak Python object (of a Qore object that Qore created for a Qore class inheriting its Python class)
+        // holds only the existence count of the Qore object: a reference is only taken while the object's destructor
+        // has not started, as for Qore's weak references
+        if (!pyobj->strong && !pyobj->qobj->isCurrent()) {
+            xsink->raiseException("OBJECT-ALREADY-DELETED", "cannot convert an object of Python type '%s' to Qore: its "
+                "Qore object of class '%s' has already been deleted", Py_TYPE(val)->tp_name,
+                pyobj->qobj->getClassName());
+            return QoreValue();
+        }
+        return pyobj->qobj->refSelf();
     }
 
     if (type == &PyBool_Type) {
@@ -3880,8 +3897,15 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
         // allocated, and a reference is only taken while its destructor has not started (as with Qore's weak
         // references)
         QoreObject* qobj = getQoreSubclassObject(val);
-        if (qobj && qobj->isCurrent()) {
-            return qobj->refSelf();
+        if (qobj) {
+            if (qobj->isCurrent()) {
+                return qobj->refSelf();
+            }
+            // the Qore object has been deleted: the Python object is not wrapped as a new Qore object, which would
+            // be an object of another class that bypasses the Qore overrides
+            xsink->raiseException("OBJECT-ALREADY-DELETED", "cannot convert an object of Python type '%s' to Qore: "
+                "its Qore object of class '%s' has already been deleted", Py_TYPE(val)->tp_name, qobj->getClassName());
+            return QoreValue();
         }
     }
 

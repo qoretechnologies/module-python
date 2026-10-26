@@ -127,6 +127,13 @@
       @ref Python::PythonProgram "PythonProgram" (they were refused); a member cannot be removed with \c del once the
       %Program of its class has been deleted, as it cannot be read or written
       (<a href="https://github.com/qoretechnologies/qore/issues/5529">issue 5529</a>)
+    - a %Python object whose %Qore object of a %Qore class inheriting its %Python class has been deleted raises
+      \c OBJECT-ALREADY-DELETED when it is passed to %Qore (it was converted to a new object of another class, whose
+      methods bypassed the %Qore overrides, or gave a reference to the deleted object); an object of a %Python subclass
+      of a %Qore class that was not initialized (its \c __init__() did not call the constructor of the %Qore class)
+      raises \c PYTHON-VALUE-ERROR when it is passed to %Qore instead of being converted to \c NOTHING (see
+      @ref python_qore_object_lifecycle_deleted;
+      <a href="https://github.com/qoretechnologies/qore/issues/5532">issue 5532</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

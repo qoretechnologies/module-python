@@ -171,6 +171,15 @@ namespace PythonNestedClass {
 }
 
 #! has typed members; used to check that Python writes apply the member types
+# a Qore class inherited by a Python class that a Qore class of a child Program inherits (see deletedObjectTest())
+namespace PythonDeleted {
+class Tracked {
+    public {
+        int x = 1;
+    }
+}
+}
+
 class PythonTypedMembers {
     public {
         int i = 0;
@@ -348,6 +357,7 @@ class PythonTest inherits Test {
         addTestCase("the file names of Python frames are normalized", \pythonFrameFileNameTest());
         addTestCase("calls into a Python program while a thread runs in another one", \crossInterpreterGilTest());
         addTestCase("Python writes to the members of Qore objects", \typedMemberWriteTest());
+        addTestCase("Python objects of deleted and uninitialized Qore objects", \deletedObjectTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -1437,8 +1447,8 @@ def test():
     return py_sequence()
     ", "test.py");
 
-            auto o = p.callFunction("test");
-            assertNothing(o);
+            # its __init__() did not call the constructor of the Qore class
+            assertThrows("PYTHON-VALUE-ERROR", "not initialized", \p.callFunction(), "test");
         }
 
         {
@@ -4179,6 +4189,105 @@ def run():
     # any value was stored, ex: a float in an int member); writes reach the member write gate of the Qore class of a
     # Python object of another Python program (previously refused); a member cannot be removed once the Program of the
     # class has been deleted, as it cannot be read or written (issue 5529)
+    deletedObjectTest() {
+        # a Python object saved by a Qore class inheriting a Python class is not revived as a new object when its Qore
+        # object has been deleted
+        {
+            Program pgm(PO_NEW_STYLE);
+            pgm.issueModuleCmd("python", "parse deleted-sub.py saved = []
+class Base:
+    def hook(self):
+        return 'python-hook'
+    def save(self):
+        saved.append(self)
+def get_saved():
+    return saved[0]
+def clear():
+    saved.clear()
+");
+            pgm.issueModuleCmd("python", "export-class Base");
+            pgm.issueModuleCmd("python", "export-func get_saved");
+            pgm.issueModuleCmd("python", "export-func clear");
+            pgm.parse("class Q inherits Base { string hook() { return 'qore-hook'; } }
+object sub new_q() { Q q(); q.save(); return q; }
+auto sub saved() { return get_saved(); }
+sub clr() { clear(); }", "deleted-sub");
+            {
+                object q = pgm.callFunction("new_q");
+                object s = pgm.callFunction("saved");
+                assertTrue(s == q, "the saved object is the Qore object while it exists");
+                assertEq("qore-hook", s.hook());
+                delete q;
+            }
+            assertThrows("OBJECT-ALREADY-DELETED", "type 'Q'.*class 'Q'.*deleted", \pgm.callFunction(), "saved");
+            pgm.callFunction("clr");
+        }
+
+        # a weak Python object of a Qore object (created by Qore for a Qore class inheriting a Python class) gives no
+        # reference to its deleted Qore object
+        {
+            Program pgm(PO_NEW_STYLE);
+            pgm.importClass("PythonDeleted::Tracked");
+            pgm.issueModuleCmd("python", "import-ns PythonDeleted x");
+            pgm.issueModuleCmd("python", "parse deleted-weak.py import qoreloader
+keep = []
+class PyTracked(x.Tracked):
+    def __init__(self):
+        super().__init__()
+        keep.append(self)
+def get_kept():
+    return keep[0]
+def clear():
+    keep.clear()
+");
+            pgm.issueModuleCmd("python", "export-class PyTracked");
+            pgm.issueModuleCmd("python", "export-func get_kept");
+            pgm.issueModuleCmd("python", "export-func clear");
+            pgm.parse("object sub make() { return new PyTracked(); }
+auto sub kept() { return get_kept(); }
+sub clr() { clear(); }", "deleted-weak");
+            {
+                object o = pgm.callFunction("make");
+                assertTrue(pgm.callFunction("kept") == o, "the kept object is the Qore object while it exists");
+                delete o;
+            }
+            for (int i = 0; i < 3; ++i) {
+                assertThrows("OBJECT-ALREADY-DELETED", "PyTracked.*deleted", \pgm.callFunction(), "kept");
+            }
+            pgm.callFunction("clr");
+        }
+
+        # an object of a Python subclass of a Qore class whose __init__() does not call the Qore constructor cannot be
+        # converted to Qore; nor can an object created with __new__() alone
+        {
+            PythonProgram p("
+import qoreloader
+from qore.__root__.Qore.Thread import Sequence, Counter
+from qore.__root__ import Qore
+
+class py_sequence(Sequence):
+    def __init__(self):
+        pass
+
+def no_init():
+    return py_sequence()
+
+def new_only():
+    return Counter.__new__(Counter)
+
+def pass_new_only():
+    try:
+        Qore.type(Counter.__new__(Counter))
+    except Exception as e:
+        return str(e)
+    return 'no exception'
+", "uninit.py");
+            assertThrows("PYTHON-VALUE-ERROR", "py_sequence.*not initialized", \p.callFunction(), "no_init");
+            assertThrows("PYTHON-VALUE-ERROR", "Counter.*not initialized", \p.callFunction(), "new_only");
+            assertRegex("PYTHON-VALUE-ERROR.*not initialized", p.callFunction("pass_new_only"));
+        }
+    }
+
     typedMemberWriteTest() {
         PythonProgram p("
 from qore.__root__ import PythonTypedMembers
