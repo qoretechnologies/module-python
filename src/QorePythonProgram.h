@@ -500,7 +500,9 @@ public:
     DLLLOCAL static PyObject* getPythonDateTime(ExceptionSink* xsink, const DateTime* dt);
 
     //! Returns a Python callable object for the given Qore closure / call reference
-    DLLLOCAL static PyObject* getPythonCallable(ExceptionSink* xsink, const ResolvedCallReferenceNode* call);
+    /** a call reference of a Python callable of this interpreter is converted to the Python callable itself
+    */
+    DLLLOCAL PyObject* getPythonCallable(ExceptionSink* xsink, const ResolvedCallReferenceNode* call);
 
     //! Returns a new reference
     /** if this method returns nullptr, then a Qore exception is guaranteed to have been raised in \a xsink;

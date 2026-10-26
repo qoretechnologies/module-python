@@ -213,6 +213,16 @@ sub python_test_delete_object(object o) {
     delete o;
 }
 
+#! calls the code given with the argument given; used to pass Python callables to Qore code parameters
+auto sub python_test_call_code(code c, auto arg) {
+    return c(arg);
+}
+
+#! returns its argument; used to check that values round-trip through Qore
+auto sub python_test_echo(auto v) {
+    return v;
+}
+
 #! deletes the Program that it holds when it is destroyed; used to delete a Program while Python uses its classes
 class PythonProgramOwner {
     public {
@@ -358,6 +368,8 @@ class PythonTest inherits Test {
         addTestCase("calls into a Python program while a thread runs in another one", \crossInterpreterGilTest());
         addTestCase("Python writes to the members of Qore objects", \typedMemberWriteTest());
         addTestCase("Python objects of deleted and uninitialized Qore objects", \deletedObjectTest());
+        addTestCase("callables round-trip between Qore and Python; bound methods keep their object or class",
+            \callableRoundTripTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -2359,7 +2371,7 @@ class c:
         return self.d['x']
 
     @classmethod
-    def tc():
+    def tc(cls):
         return 2
 
     @staticmethod
@@ -4286,6 +4298,84 @@ def pass_new_only():
             assertThrows("PYTHON-VALUE-ERROR", "Counter.*not initialized", \p.callFunction(), "new_only");
             assertRegex("PYTHON-VALUE-ERROR.*not initialized", p.callFunction("pass_new_only"));
         }
+    }
+
+    callableRoundTripTest() {
+        PythonProgram pp("
+from qore.__root__ import python_test_call_code, python_test_echo
+def f(x):
+    return x
+def h(c):
+    return [c, {'k': c}]
+def call(c):
+    return python_test_call_code(c, 1)
+def add(a, b=2):
+    return a + b
+def function_round_trip():
+    g = python_test_echo(add)
+    return (g is add, g(1, b=5))
+class Meta(type):
+    def mm(cls, x):
+        return (cls.__name__, x)
+class A(metaclass=Meta):
+    def __init__(self):
+        self.n = 'a'
+    @classmethod
+    def cm(cls, x):
+        return (cls.__name__, x)
+    def im(self, x):
+        return (self.n, x)
+    @staticmethod
+    def sm(x):
+        return ('static', x)
+def bound_methods():
+    a = A()
+    return [python_test_call_code(m, 2) for m in (A.cm, a.cm, A.mm, a.im, A.sm)]
+def method_round_trip():
+    a = A()
+    m = a.im
+    g = python_test_echo(m)
+    return (g is m, g(3), python_test_echo(A.cm) == A.cm)
+", "callable-round-trip.py");
+
+        # Qore closures and call references come back from Python as themselves, also nested
+        code q = int sub (int x) { return x + 100; };
+        auto v = pp.callFunction("f", q);
+        assertTrue(v instanceof code, "the value is code");
+        assertTrue(v == q, "the closure comes back unchanged");
+        assertEq(101, v(1));
+        code r = \python_test_echo();
+        assertTrue(pp.callFunction("f", r) == r, "the call reference comes back unchanged");
+        list<auto> l = pp.callFunction("h", q);
+        assertTrue(l[0] == q && l[1].k == q, "nested closures come back unchanged");
+        # and can be passed to Qore code parameters from Python
+        assertEq(101, pp.callFunction("call", q));
+
+        # Python functions and bound methods come back from Qore as themselves, with their keyword arguments
+        assertEq((True, 6), pp.callFunction("function_round_trip"));
+        assertEq((True, ("a", 3), True), pp.callFunction("method_round_trip"));
+
+        # bound methods passed to Qore are called with the object or the class that they are bound to
+        assertEq((("A", 2), ("A", 2), ("A", 2), ("a", 2), ("static", 2)), pp.callFunction("bound_methods"));
+
+        # a Python function of another interpreter is called through its Qore call reference, without keyword
+        # arguments
+        PythonProgram other("
+from qore.__root__ import python_test_echo
+def go(c):
+    g = python_test_echo(c)
+    out = [type(g).__name__, g(1)]
+    try:
+        g(1, b=5)
+    except TypeError as e:
+        out.append(str(e))
+    return out
+", "callable-other.py");
+        code add = pp.getAttribute("add");
+        list<auto> res = other.callFunction("go", add);
+        assertEq("QoreCallable", res[0]);
+        assertEq(3, res[1]);
+        assertRegex("keyword", res[2]);
     }
 
     typedMemberWriteTest() {

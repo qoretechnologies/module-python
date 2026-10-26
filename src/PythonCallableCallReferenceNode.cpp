@@ -33,13 +33,13 @@
 #include "PythonCallableCallReferenceNode.h"
 #include "QorePythonProgram.h"
 
-PythonCallableCallReferenceNode::PythonCallableCallReferenceNode(QorePythonProgram* pypgm, PyObject* val, PyObject* self)
-        : pypgm(pypgm), val(pypgm, val), self(pypgm, self) {
+PythonCallableCallReferenceNode::PythonCallableCallReferenceNode(QorePythonProgram* pypgm, PyObject* val)
+        : pypgm(pypgm), val(pypgm, val) {
 }
 
 QoreValue PythonCallableCallReferenceNode::execValue(const QoreListNode* args, ExceptionSink* xsink) const {
     QoreSandboxProvenanceHelper provenance(this);
-    //printd(5, "PythonCallableCallReferenceNode::execValue() f: %p self: %p\n", *val, *self);
+    //printd(5, "PythonCallableCallReferenceNode::execValue() f: %p\n", *val);
     // the arguments are given as parsed (ex: variable references in the ast exec mode); they are evaluated as Qore
     // code, before the GIL is acquired
     ValueEvalRefHolder evaluated_args(xsink);
@@ -54,12 +54,11 @@ QoreValue PythonCallableCallReferenceNode::execValue(const QoreListNode* args, E
         return QoreValue();
     }
     //QorePythonGilHelper qpgh;
-    return pypgm->callInternal(xsink, *val, args, 0, *self);
+    return pypgm->callInternal(xsink, *val, args);
 }
 
 bool PythonCallableCallReferenceNode::derefImpl(ExceptionSink* xsink) {
     QoreSandboxProvenanceHelper provenance(this);
-    self.reset();
     val.reset();
     return ResolvedCallReferenceNode::derefImpl(xsink);
 }

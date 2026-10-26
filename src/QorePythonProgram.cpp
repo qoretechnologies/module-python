@@ -3511,14 +3511,12 @@ ResolvedCallReferenceNode* QorePythonProgram::getQoreCallRefFromFunc(ExceptionSi
 
 ResolvedCallReferenceNode* QorePythonProgram::getQoreCallRefFromMethod(ExceptionSink* xsink, PyObject* val) {
     assert(PyMethod_Check(val));
-    PyMethodObject* m = reinterpret_cast<PyMethodObject*>(val);
-    Py_INCREF(m->im_func);
-    if (!PyType_Check(m->im_self)) {
-        Py_INCREF(m->im_self);
-    }
+    // the bound method is called as it is, with the object or the class that it is bound to: the class of a class
+    // method or of a method of a metaclass (previously the class was dropped, so that the method was called without
+    // it); it also converts back to Python as the same object
+    Py_INCREF(val);
     weakRef();
-    // NOTE: classmethods will have their "self" arg = the class / type
-    return new PythonCallableCallReferenceNode(this, m->im_func, PyType_Check(m->im_self) ? nullptr : m->im_self);
+    return new PythonCallableCallReferenceNode(this, val);
 }
 
 //! returns the number of significant bits of a non-negative Python int (its bit length without the trailing zero bits:
@@ -3870,6 +3868,17 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
         return getQoreCallRefFromFunc(xsink, val);
     }
 
+    // a Python object of a Qore closure or call reference is the closure or call reference itself
+    if (PyQoreCallable_Check(val)) {
+        ResolvedCallReferenceNode* call = reinterpret_cast<PyQoreCallable*>(val)->callable;
+        if (call) {
+            return call->refRefSelf();
+        }
+        xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert an object of Python type '%s' to Qore: it has no "
+            "Qore callable", Py_TYPE(val)->tp_name);
+        return QoreValue();
+    }
+
     if (PyMethod_Check(val)) {
         return getQoreCallRefFromMethod(xsink, val);
     }
@@ -4120,6 +4129,15 @@ PyObject* QorePythonProgram::getPythonDateTime(ExceptionSink* xsink, const DateT
 }
 
 PyObject* QorePythonProgram::getPythonCallable(ExceptionSink* xsink, const ResolvedCallReferenceNode* call) {
+    // a Python callable of this interpreter is the callable itself, so that it keeps its identity and its keyword
+    // arguments
+    const PythonCallableCallReferenceNode* py_call = dynamic_cast<const PythonCallableCallReferenceNode*>(call);
+    if (py_call) {
+        PyObject* rv = py_call->getPythonCallable(this);
+        if (rv) {
+            return rv;
+        }
+    }
     QorePythonImplicitQoreArgHelper qpiqoh((void*)call);
     return PyObject_CallObject((PyObject*)&PythonQoreCallable_Type, nullptr);
 }

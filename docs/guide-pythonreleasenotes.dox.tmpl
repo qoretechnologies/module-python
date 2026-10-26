@@ -134,6 +134,13 @@
       raises \c PYTHON-VALUE-ERROR when it is passed to %Qore instead of being converted to \c NOTHING (see
       @ref python_qore_object_lifecycle_deleted;
       <a href="https://github.com/qoretechnologies/qore/issues/5532">issue 5532</a>)
+    - callables round-trip between %Qore and %Python: a %Qore closure or call reference comes back from %Python as
+      itself (it came back as a \c QoreCallable object, which could not be called or passed to a \c code parameter),
+      and a %Python function or method comes back from %Qore to the same interpreter as itself (it came back as a
+      \c QoreCallable object, without its identity and keyword arguments); class methods and methods of metaclasses
+      given to %Qore are called with their class (it was dropped, so that the arguments were shifted) (see
+      @ref python_qore_to_python;
+      <a href="https://github.com/qoretechnologies/qore/issues/5530">issue 5530</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

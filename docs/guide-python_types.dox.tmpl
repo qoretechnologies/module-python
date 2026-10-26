@@ -16,7 +16,7 @@
     |\c int|\c int
     |\c list|\c list
     |\c string|\c str
-    |\c code (closure or call reference)|\c callable
+    |\c code (closure or call reference)|a callable \c QoreCallable object, or the original %Python callable (see below)
     |\c nothing (NOTHING), \c null (NULL)|\c None
     |\c object|the %Python object of the %Qore object (see @ref python_objects_conversion)
     |enum value|the member of the %Python enum class of the %Qore enum
@@ -28,6 +28,12 @@
     binary approximation, and its \c decimal.Decimal has the shortest decimal digits that give the same value.
 
     A value of any other %Qore type (ex: a reference) raises a \c PYTHON-VALUE-ERROR exception.
+
+    Callables round-trip: a %Qore closure or call reference converted to %Python and back is the same closure or call
+    reference, and a %Python function or method converted to %Qore and back to %Python in the same interpreter is the
+    same function or method, which keeps its keyword arguments.  A bound method is called with the object or the
+    class that it is bound to (ex: the class of a class method).  A %Python function of another interpreter is called
+    from %Python through its %Qore call reference, which takes no keyword arguments.
 
     An absolute %Qore date/time value in the current time zone is a naive \c datetime.datetime (%Python's local time);
     a value in another time zone is an aware \c datetime.datetime with the value's UTC offset, so that the instant is
@@ -60,6 +66,7 @@
     |\c set, \c frozenset|\c list (in iteration order)
     |\c memoryview|\c binary
     |\c function, \c method|\c code
+    |\c QoreCallable (a %Qore closure or call reference)|the closure or call reference (\c code)
     |\c None|\c nothing (NOTHING)
     |the %Python object of a %Qore object|the %Qore object
     |member of the %Python enum class of a %Qore enum|the %Qore enum value

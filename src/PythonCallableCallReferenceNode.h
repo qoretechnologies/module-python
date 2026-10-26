@@ -39,7 +39,11 @@
 class PythonCallableCallReferenceNode : public ResolvedCallReferenceNode {
 public:
     //! all args must already be referenced before the call
-    DLLLOCAL PythonCallableCallReferenceNode(QorePythonProgram* pypgm, PyObject* val, PyObject* self = nullptr);
+    /** @param val the Python callable; a bound method is kept as it is, so that it is called with the object or the
+        class that it is bound to (ex: the class of a class method), and so that it is converted back to Python as the
+        same object
+    */
+    DLLLOCAL PythonCallableCallReferenceNode(QorePythonProgram* pypgm, PyObject* val);
 
     DLLLOCAL virtual QoreValue execValue(const QoreListNode* args, ExceptionSink* xsink) const override;
 
@@ -53,13 +57,22 @@ public:
         return "python callable call";
     }
 
+    //! returns a new reference to the Python callable if it belongs to the interpreter of the given program, nullptr
+    //! otherwise (ex: once its interpreter has been deleted); must be called with the GIL held
+    DLLLOCAL PyObject* getPythonCallable(const QorePythonProgram* py_pgm) const {
+        if (val.getOwner() != py_pgm || !*val) {
+            return nullptr;
+        }
+        Py_INCREF(*val);
+        return *val;
+    }
+
 protected:
     DLLLOCAL bool derefImpl(ExceptionSink* xsink) override;
 
 private:
     mutable QorePythonProgramWeakReferenceHolder pypgm;
     QorePythonPersistentReferenceHolder val;
-    QorePythonPersistentReferenceHolder self;
 };
 
 #endif
