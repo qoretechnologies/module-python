@@ -152,6 +152,13 @@
       \c PYTHON-VALUE-ERROR (it became an infinity or 0); the round trips of integral \c decimal.Decimal values are
       documented (see @ref python_typesguide;
       <a href="https://github.com/qoretechnologies/qore/issues/5531">issue 5531</a>)
+    - an exception of the save object callback is raised in %Python as the %Qore exception (it was a \c SystemError);
+      %Qore copies (\c copy()) of the %Qore objects of %Python objects get copies of the %Python objects, as made by
+      \c copy.copy() (they raised \c OBJECT-INCOMPATIBLE); the fields of a named tuple with the same name raise
+      \c PYTHON-VALUE-ERROR (they overwrote each other); failures of the %Python C API in conversions to lists and
+      dicts are reported; documentation fixes in the \c qoreloader guide and the \c load_java() docstring (see
+      @ref python_objects_conversion;
+      <a href="https://github.com/qoretechnologies/qore/issues/5534">issue 5534</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

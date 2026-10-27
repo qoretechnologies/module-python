@@ -840,6 +840,17 @@ protected:
             const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink);
     DLLLOCAL static void execPythonDestructor(const QorePythonClass& thisclass, PyObject* pycls, QoreObject* self,
             QorePythonPrivateData* pd, ExceptionSink* xsink);
+    //! the copy method of the Qore classes of Python types: the copy gets a copy of the Python object (see
+    //! copyPythonObject())
+    DLLLOCAL static void execPythonCopy(const QoreClass& thisclass, PyObject* pycls, QoreObject* self,
+            QoreObject* old, QorePythonPrivateData* pd, RuntimeConfig& rc, ExceptionSink* xsink);
+
+    //! returns a copy of the Python object of a Qore object for its copy (self), as copy.copy() makes; nullptr with
+    //! a Qore exception on error
+    DLLLOCAL PyObject* copyPythonObject(ExceptionSink* xsink, PyObject* pyobj, QoreObject* self);
+
+    //! sets the Qore object of an object of the Python type generated for a Qore class that inherits a Python class
+    DLLLOCAL int setQoreSubclassObject(ExceptionSink* xsink, PyObject* pyobj, QoreObject* self);
 
     DLLLOCAL static QoreValue execPythonStaticMethod(const QoreMethod& meth, PyObject* m, const QoreListNode* args,
             q_rt_flags_t rtflags, ExceptionSink* xsink);

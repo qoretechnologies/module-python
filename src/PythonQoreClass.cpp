@@ -1057,8 +1057,11 @@ int PythonQoreClass::newQoreObject(ExceptionSink& xsink, PyQoreObject* pyself, Q
         qobj->setPrivate(qcls->getID(), new QorePythonPrivateData(qore_python_pgm, (PyObject*)pyself));
         pyself->qobj_refs_self = true;
     }
-    // call the save object callback, if any
-    qore_python_pgm->saveQoreObjectFromPython(qobj, xsink);
+    // call the save object callback, if any; its exception is raised in Python (and cleared from xsink)
+    if (qore_python_pgm->saveQoreObjectFromPython(qobj, xsink)) {
+        assert(PyErr_Occurred());
+        return -1;
+    }
     if (!xsink) {
         return 0;
     }

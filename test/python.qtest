@@ -171,6 +171,22 @@ namespace PythonNestedClass {
 }
 
 #! has typed members; used to check that Python writes apply the member types
+#! a Qore class with a copy method, inherited by Python classes (see copyAndCallbackTest())
+class PythonCopyBase {
+    public {
+        int x = 1;
+        static int copies = 0;
+    }
+
+    string hook() {
+        return "qore";
+    }
+
+    copy() {
+        ++copies;
+    }
+}
+
 # a Qore class inherited by a Python class that a Qore class of a child Program inherits (see deletedObjectTest())
 namespace PythonDeleted {
 class Tracked {
@@ -378,6 +394,8 @@ class PythonTest inherits Test {
         addTestCase("call stacks of exceptions through nested Qore/Python calls", \nestedCallStackTest());
         addTestCase("naive datetimes are Python's local time, with its fold; Decimals outside the range of a number",
             \localTimeConversionTest());
+        addTestCase("exceptions of the save object callback; copies of Python objects; named tuple fields",
+            \copyAndCallbackTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -4506,6 +4524,120 @@ now: True
         assertEq("Decimal('Infinity')", pp.callFunction("t", pp.callFunction("mk", "Infinity")));
         assertEq("Decimal('0')", pp.callFunction("t", pp.callFunction("mk", "0E-400000000")));
         assertEq("1000000000000000000000000000000", pp.callFunction("t", pp.callFunction("mk", "1E+30")));
+    }
+
+    # an exception of the save object callback is raised in Python as the Qore exception (it was a SystemError); Qore
+    # copies of Python objects copy the Python object as copy.copy() does (they raised OBJECT-INCOMPATIBLE); the
+    # fields of a named tuple with the same name raise an exception (they overwrote each other) (issue 5534)
+    copyAndCallbackTest() {
+        {
+            PythonProgram pp("
+from qore.__root__ import PythonCopyBase
+from qore.__root__.Qore.Thread import Counter
+class Sub(PythonCopyBase):
+    pass
+def make(cls):
+    try:
+        cls()
+    except Exception as e:
+        return (type(e).__name__, e.err, e.desc)
+    return 'no exception'
+def counter():
+    return make(Counter)
+def sub():
+    return make(Sub)
+", "save-callback.py");
+            pp.setSaveObjectCallback(sub (object o) { throw "SAVE-ERR", "callback failed for " + o.className(); });
+            assertEq(("QoreException", "SAVE-ERR", "callback failed for Counter"), pp.callFunction("counter"));
+            assertEq(("QoreException", "SAVE-ERR", "callback failed for Sub"), pp.callFunction("sub"));
+        }
+
+        PythonProgram pp("
+import collections
+from qore.__root__ import PythonCopyBase
+class Sub(PythonCopyBase):
+    def __init__(self):
+        super().__init__()
+        self.tag = 'sub'
+        self.items = [1]
+    def hook(self):
+        return 'py:' + self.tag
+class Plain:
+    def __init__(self):
+        self.v = [1]
+    def get(self):
+        return self.v
+class Fields(tuple):
+    _fields = ('a', 'a')
+def make():
+    return Sub()
+def plain():
+    return Plain()
+def items(o):
+    return o.items
+def same_items(a, b):
+    return a.items is b.items
+def fields():
+    return Fields((1, 2))
+def point():
+    return collections.namedtuple('Point', ['x', 'y'])(1, 2)
+", "copy.py");
+        int copies = PythonCopyBase::copies;
+
+        # an object of a Python subclass of a Qore class: the Qore members are copied by Qore, which calls the Qore
+        # copy() method, and the Python attributes are copied as by copy.copy() (a shallow copy)
+        {
+            object o = pp.callFunction("make");
+            object c = o.copy();
+            assertEq(copies + 1, PythonCopyBase::copies);
+            assertFalse(c == o);
+            assertEq("Sub", c.className());
+            assertEq("py:sub", c.hook());
+            c.x = 2;
+            assertEq(1, o.x);
+            assertEq(2, c.x);
+            assertTrue(pp.callFunction("same_items", o, c), "the attributes are copied shallowly");
+            assertEq((1,), pp.callFunction("items", c));
+        }
+
+        # a Python object: copy.copy()
+        {
+            object p = pp.callFunction("plain");
+            object pc = p.copy();
+            assertEq("Plain", pc.className());
+            assertEq((1,), pc.get());
+            pc.v = (2,);
+            assertEq((1,), p.get());
+            assertEq((2,), pc.get());
+        }
+
+        # an object of a Qore class that inherits a Python class
+        {
+            Program pgm(PO_NEW_STYLE);
+            pgm.issueModuleCmd("python", "parse copy-sub.py class Base:
+    def __init__(self):
+        self.n = 1
+    def hook(self):
+        return 'python-hook'
+    def call_hook(self):
+        return self.hook()
+    def get_n(self):
+        return self.n
+");
+            pgm.issueModuleCmd("python", "export-class Base");
+            pgm.parse("class Q inherits Base { string hook() { return 'qore-hook'; } }
+object sub new_q() { return new Q(); }", "copy-sub");
+            object q = pgm.callFunction("new_q");
+            object qc = q.copy();
+            assertFalse(qc == q);
+            assertEq("Q", qc.className());
+            assertEq("qore-hook", qc.call_hook(), "the copy calls the Qore override");
+            assertEq(1, qc.get_n());
+        }
+
+        # named tuples
+        assertEq({"x": 1, "y": 2}, pp.callFunction("point"));
+        assertThrows("PYTHON-VALUE-ERROR", "field 'a' is given more than once", \pp.callFunction(), "fields");
     }
 
     typedMemberWriteTest() {

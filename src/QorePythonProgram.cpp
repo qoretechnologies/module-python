@@ -3288,6 +3288,12 @@ QoreHashNode* QorePythonProgram::getQoreHashFromNamedTuple(ExceptionSink* xsink,
             qore_python_conversion_error(this, xsink);
             return nullptr;
         }
+        // fields with the same name would overwrite each other, as keys of a dict that give the same Qore hash key
+        if (rv->existsKey(field)) {
+            xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert a Python named tuple of type '%s' to a Qore "
+                "hash: the field '%s' is given more than once in its _fields", Py_TYPE(val)->tp_name, field);
+            return nullptr;
+        }
         ValueHolder qval(getQoreValue(xsink, PyTuple_GET_ITEM(val, i), rset), xsink);
         if (*xsink) {
             return nullptr;
@@ -4063,6 +4069,10 @@ QoreValue QorePythonProgram::getQoreAttr(PyObject* obj, const char* attr, Except
 
 PyObject* QorePythonProgram::getPythonList(ExceptionSink* xsink, const QoreListNode* l) {
     QorePythonReferenceHolder list(PyList_New(l->size()));
+    if (!list) {
+        checkPythonException(xsink);
+        return nullptr;
+    }
     ConstListIterator i(l);
     while (i.next()) {
         QorePythonReferenceHolder val(getPythonValue(i.getValue(), xsink));
@@ -4117,6 +4127,10 @@ PyObject* QorePythonProgram::getPythonTupleValue(ExceptionSink* xsink, const Qor
 
 PyObject* QorePythonProgram::getPythonDict(ExceptionSink* xsink, const QoreHashNode* h) {
     QorePythonReferenceHolder dict(PyDict_New());
+    if (!dict) {
+        checkPythonException(xsink);
+        return nullptr;
+    }
     ConstHashIterator i(h);
     while (i.next()) {
         // Use getKey() which returns const char* (borrowed reference) instead of
@@ -4132,7 +4146,10 @@ PyObject* QorePythonProgram::getPythonDict(ExceptionSink* xsink, const QoreHashN
             return nullptr;
         }
         assert(val);
-        PyDict_SetItem(*dict, *key, *val);
+        if (PyDict_SetItem(*dict, *key, *val) < 0) {
+            checkPythonException(xsink);
+            return nullptr;
+        }
     }
 
     return dict.release();
@@ -5368,6 +5385,7 @@ QorePythonClass* QorePythonProgram::setupQorePythonClass(ExceptionSink* xsink, Q
     cls->addConstructor((void*)type, (q_external_constructor_t)execPythonConstructor, Public,
             QCF_USES_EXTRA_ARGS, QDOM_UNCONTROLLED_API);
     cls->setDestructor((void*)type, (q_external_destructor_t)execPythonDestructor);
+    cls->setCopy((void*)type, (q_external_copy_t)execPythonCopy);
 
     // create Python mapping for QoreClass if necessary
     if (!PyQoreObjectType_Check(type)) {
@@ -5672,16 +5690,7 @@ int QorePythonProgram::newQoreSubclassObject(ExceptionSink* xsink, PyTypeObject*
         checkPythonException(xsink);
         return -1;
     }
-    self->tRef();
-    QorePythonReferenceHolder capsule(PyCapsule_New(self, QORE_PYTHON_QORE_OBJECT_CAPSULE_NAME,
-        qore_python_qore_object_capsule_destructor));
-    if (!capsule) {
-        self->tDeref();
-        checkPythonException(xsink);
-        return -1;
-    }
-    if (PyObject_SetAttrString(*pyobj, QORE_PYTHON_QORE_OBJECT_SLOT, *capsule) < 0) {
-        checkPythonException(xsink);
+    if (setQoreSubclassObject(xsink, *pyobj, self)) {
         return -1;
     }
     PyObject* obj = *pyobj;
@@ -5692,6 +5701,78 @@ int QorePythonProgram::newQoreSubclassObject(ExceptionSink* xsink, PyTypeObject*
         return -1;
     }
     return 0;
+}
+
+int QorePythonProgram::setQoreSubclassObject(ExceptionSink* xsink, PyObject* pyobj, QoreObject* self) {
+    self->tRef();
+    QorePythonReferenceHolder capsule(PyCapsule_New(self, QORE_PYTHON_QORE_OBJECT_CAPSULE_NAME,
+        qore_python_qore_object_capsule_destructor));
+    if (!capsule) {
+        self->tDeref();
+        checkPythonException(xsink);
+        return -1;
+    }
+    if (PyObject_SetAttrString(pyobj, QORE_PYTHON_QORE_OBJECT_SLOT, *capsule) < 0) {
+        checkPythonException(xsink);
+        return -1;
+    }
+    return 0;
+}
+
+PyObject* QorePythonProgram::copyPythonObject(ExceptionSink* xsink, PyObject* pyobj, QoreObject* self) {
+    bool subclass_obj = getQoreSubclassObject(pyobj);
+    bool qore_obj = PyQoreObject_Check(pyobj);
+    if (!subclass_obj && !qore_obj) {
+        // a Python object is copied with copy.copy()
+        QorePythonReferenceHolder copy_mod(PyImport_ImportModule("copy"));
+        QorePythonReferenceHolder rv(copy_mod ? PyObject_CallMethod(*copy_mod, "copy", "O", pyobj) : nullptr);
+        if (!rv) {
+            checkPythonException(xsink);
+            return nullptr;
+        }
+        return rv.release();
+    }
+
+    // the Python part of a Qore object (an object of a Python subclass of a Qore class or of the Python class
+    // generated for a Qore class that inherits a Python class) is a new object of the same type for the copy of the
+    // Qore object, whose members Qore copies, with a copy of the attributes of the object, as copy.copy() makes for
+    // Python objects; its __init__() is not called, as for copy.copy()
+    PyTypeObject* type = Py_TYPE(pyobj);
+    QorePythonReferenceHolder args(PyTuple_New(0));
+    QorePythonReferenceHolder rv(args && type->tp_new ? type->tp_new(type, *args, nullptr) : nullptr);
+    if (!rv) {
+        if (!checkPythonException(xsink)) {
+            xsink->raiseException("PYTHON-VALUE-ERROR", "cannot copy an object of Python type '%s'", type->tp_name);
+        }
+        return nullptr;
+    }
+    if (qore_obj) {
+        // the Qore object of the copy was created by Qore, which manages its lifetime (as when Qore creates an object
+        // of a Qore class that inherits a Python class)
+        PyQoreObject* pyself = reinterpret_cast<PyQoreObject*>(*rv);
+        assert(!pyself->qobj);
+        self->tRef();
+        pyself->qobj = self;
+    }
+    if (subclass_obj && setQoreSubclassObject(xsink, *rv, self)) {
+        return nullptr;
+    }
+    // the attributes of the object (its __dict__, if it has one)
+    QorePythonReferenceHolder dict(PyObject_GenericGetDict(pyobj, nullptr));
+    if (!dict) {
+        if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            checkPythonException(xsink);
+            return nullptr;
+        }
+        PyErr_Clear();
+    } else if (PyDict_Size(*dict)) {
+        QorePythonReferenceHolder dict_copy(PyDict_Copy(*dict));
+        if (!dict_copy || PyObject_GenericSetDict(*rv, *dict_copy, nullptr) < 0) {
+            checkPythonException(xsink);
+            return nullptr;
+        }
+    }
+    return rv.release();
 }
 
 PyObject* QorePythonProgram::callQoreOverride(PyObject* name, PyObject* args) {
@@ -5978,6 +6059,32 @@ void QorePythonProgram::execPythonConstructor(const QoreMethod& meth, PyObject* 
 
     // check base class initialization
     self->setPrivate(meth.getClass()->getID(), new QorePythonPrivateData(pypgm, pyobj.release()));
+}
+
+void QorePythonProgram::execPythonCopy(const QoreClass& thisclass, PyObject* pycls, QoreObject* self, QoreObject* old,
+        QorePythonPrivateData* pd, RuntimeConfig& rc, ExceptionSink* xsink) {
+    QorePythonProgram* pypgm = pd->getOwner();
+    // set Qore program context for Qore APIs
+    QoreExternalProgramContextHelper pch(xsink, pypgm->qpgm);
+    if (*xsink) {
+        return;
+    }
+    QorePythonHelper qph(pypgm, xsink);
+    if (*xsink || pypgm->checkValid(xsink)) {
+        return;
+    }
+    PyObject* pyobj = pd->get();
+    if (!pyobj) {
+        xsink->raiseException("PYTHON-INTERPRETER-DELETED", "cannot copy an object of class '%s': its Python object "
+            "has been released with its interpreter", thisclass.getName());
+        return;
+    }
+    QorePythonReferenceHolder copy(pypgm->copyPythonObject(xsink, pyobj, self));
+    if (!copy) {
+        assert(*xsink);
+        return;
+    }
+    self->setPrivate(thisclass.getID(), new QorePythonPrivateData(pypgm, copy.release()));
 }
 
 void QorePythonProgram::execPythonDestructor(const QorePythonClass& thisclass, PyObject* pycls, QoreObject* self,

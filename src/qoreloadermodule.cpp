@@ -75,7 +75,8 @@ static PyObject* qoreloader_test_release_gil_mutex(PyObject* self, PyObject* arg
 
 static PyMethodDef qoreloader_methods[] = {
     {"load_java", qoreloader_load_java, METH_VARARGS, "Import the given Java path to the parent Qore program if " \
-        "possible; args: import_str (ex: 'org.qore.lang.restclient.*')"},
+        "possible; args: import_str, a class path (ex: 'org.qore.lang.restclient.RestClient'); wildcard imports are " \
+        "not supported"},
     {"issue_module_cmd", qoreloader_issue_module_cmd, METH_VARARGS, "Issue the given module command on the given " \
         "module; args: module_name, cmd"},
 #if defined(DEBUG) && defined(QORE_PYTHON_HAVE_FORK_GIL_CHECK)
