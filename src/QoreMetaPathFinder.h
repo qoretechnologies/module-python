@@ -29,10 +29,10 @@
 
 class QoreMetaPathFinder {
 public:
-    //! initializer function
-    DLLLOCAL static int init();
+    //! returns a new type of the finder for the current interpreter (see QorePythonInterpreterTypes)
+    DLLLOCAL static PyObject* createType();
 
-    //! module initializer function
+    //! adds a finder to sys.meta_path in the current interpreter; returns -1 with a Python exception on error
     DLLLOCAL static int setupModules();
 
     //! destructor function

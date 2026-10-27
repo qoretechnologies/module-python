@@ -25,9 +25,8 @@
 
 #include "QorePythonProgram.h"
 
-DLLLOCAL int initModuleNamespace();
-
-DLLLOCAL extern PyTypeObject ModuleNamespace_Type;
+//! returns a new type of the modules of namespaces for the current interpreter (see QorePythonInterpreterTypes)
+DLLLOCAL PyObject* ModuleNamespace_CreateType();
 
 DLLLOCAL bool ModuleNamespace_Check(PyObject* obj);
 

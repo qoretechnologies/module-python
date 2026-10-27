@@ -340,6 +340,30 @@ Thread states are cached in `py_thr_map` (per-PythonProgram, per-thread):
 - Thread states are reused across `setContext()/releaseContext()` cycles
 - When a thread exits, its thread states are cleaned up
 
+### Interpreters Created by Python, and the Types of the Module
+
+The types of the `qoreloader` module (the base type of the Python types of Qore classes, `QoreCallable`, the loaders
+of Qore and Java modules and their finder in `sys.meta_path`, the modules of Java namespaces and the registrations of
+Python threads) are heap types created for each interpreter when the module is initialized in it
+(`QorePythonInterpreterTypes`, kept in the state of the module and released in its `m_free`), with the objects of the
+loaders.  Python objects, types included, cannot be shared by interpreters: an isolated sub-interpreter (PEP 684) has
+its own GIL and its own memory allocator, and with free-threaded Python each interpreter counts the references of its
+heap types itself.  The types were static types of the extension shared by all interpreters, which crashed Python
+3.16 (the per-type lookup cache of a static type was freed by the allocator of another interpreter) and free-threaded
+Python (issue 5536).  `qore_python_get_interpreter_types()` finds the types of the current interpreter in a map keyed
+by the interpreter, with a cache in each thread that is checked against a generation counter, incremented when types
+are registered or deregistered (the address of a deleted interpreter can be reused).  The types do not reference the
+module (`PyType_FromSpec()`, not `PyType_FromModuleAndSpec()`), so that they do not keep it alive.
+
+When Python is the host, a sub-interpreter that imports `qoreloader` gets its own `QorePythonProgram`, with its own
+Qore Program, as the main interpreter has the global program (`qore_python_pgm`): created with the attached thread
+state of the sub-interpreter in `slot_qoreloader_exec()`, found by `QorePythonProgram::getContext()` by the
+interpreter (the map of programs and their thread states), and released in the module's `m_free`, while the
+sub-interpreter exists.  Previously the code running in a sub-interpreter used the global program, whose caches of
+Python types belong to the main interpreter.  An interpreter that a `QorePythonProgram` creates has that program: its
+import of `qoreloader` is marked (`qore_python_program_interpreter_import`).  Test: the sub-interpreter scenario of
+`test/standalone-loader.py`, which creates and closes sub-interpreters after the main interpreter imported the module.
+
 ## Qore Classes for Python Classes
 
 `getNamespaceForClass()` resolves an automatically imported type's `__module__` before using the import context.

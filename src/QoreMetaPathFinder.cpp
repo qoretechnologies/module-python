@@ -23,6 +23,7 @@
 #include "QoreLoader.h"
 #include "JavaLoader.h"
 #include "QorePythonProgram.h"
+#include "QorePythonInterpreterTypes.h"
 
 PyDoc_STRVAR(QoreMetaPathFinder_doc,
 "QoreMetaPathFinder()\n\
@@ -34,60 +35,38 @@ static PyMethodDef QoreMetaPathFinder_methods[] = {
     {nullptr, nullptr},
 };
 
-PyTypeObject QoreMetaPathFinder_Type = {
-    PyVarObject_HEAD_INIT(nullptr, 0)
-    "QoreMetaPathFinder",         // tp_name
-    0,                            // tp_basicsize
-    0,                            // tp_itemsize
-    // Slots
-    (destructor)QoreMetaPathFinder::dealloc,  // tp_dealloc
-    0,                            // tp_vectorcall_offset
-    0,                            // tp_getattr
-    0,                            // tp_setattr
-    0,                            // tp_as_async
-    QoreMetaPathFinder::repr,     // tp_repr
-    0,                            // tp_as_number
-    0,                            // tp_as_sequence
-    0,                            // tp_as_mapping
-    0,                            // tp_hash
-    0,                            // tp_call
-    0,                            // tp_str
-    PyObject_GenericGetAttr,      // tp_getattro
-    0,                            // tp_setattro
-    0,                            // tp_as_buffer
-    Py_TPFLAGS_DEFAULT,           // tp_flags
-    QoreMetaPathFinder_doc,       // tp_doc
-    0,                            // tp_traverse
-    0,                            // tp_clear
-    0,                            // tp_richcompare
-    0,                            // tp_weaklistoffset
-    0,                            // tp_iter
-    0,                            // tp_iternext
-    QoreMetaPathFinder_methods,   // tp_methods
-    0,                            // tp_members
-    0,                            // tp_getset
-    &PyBaseObject_Type,           // tp_base
-    0,                            // tp_dict
-    0,                            // tp_descr_get
-    0,                            // tp_descr_set
-    0,                            // tp_dictoffset
-    0,                            // tp_init
-    PyType_GenericAlloc,          // tp_alloc
-    PyType_GenericNew,            // tp_new
-    PyObject_Del,                 // tp_free
+static PyType_Slot QoreMetaPathFinder_slots[] = {
+    {Py_tp_dealloc, (void*)QoreMetaPathFinder::dealloc},
+    {Py_tp_repr, (void*)QoreMetaPathFinder::repr},
+    {Py_tp_doc, (void*)QoreMetaPathFinder_doc},
+    {Py_tp_methods, (void*)QoreMetaPathFinder_methods},
+    {0, nullptr},
 };
 
-int QoreMetaPathFinder::init() {
-    if (PyType_Ready(&QoreMetaPathFinder_Type) < 0) {
-        printd(5, "QoreMetaPathFinder::init() type initialization failed\n");
-        return -1;
-    }
+static PyType_Spec QoreMetaPathFinder_spec = {
+    .name = "qoreloader.QoreMetaPathFinder",
+    .basicsize = sizeof(PyObject),
+    .itemsize = 0,
+    .flags = Py_TPFLAGS_DEFAULT,
+    .slots = QoreMetaPathFinder_slots,
+};
 
-    return 0;
+PyObject* QoreMetaPathFinder::createType() {
+    return PyType_FromSpec(&QoreMetaPathFinder_spec);
 }
 
 int QoreMetaPathFinder::setupModules() {
-    QorePythonReferenceHolder mpf(PyObject_CallObject((PyObject*)&QoreMetaPathFinder_Type, nullptr));
+    // the finder of the current interpreter
+    const QorePythonInterpreterTypes* types = qore_python_get_interpreter_types();
+    if (!types) {
+        PyErr_SetString(PyExc_RuntimeError, "the qoreloader module is not initialized in the current interpreter");
+        return -1;
+    }
+    QorePythonReferenceHolder mpf(PyObject_CallObject(reinterpret_cast<PyObject*>(types->meta_path_finder),
+        nullptr));
+    if (!mpf) {
+        return -1;
+    }
     printd(5, "QoreMetaPathFinder::setupModules() created finder %p\n", *mpf);
 
     // get sys module
@@ -119,8 +98,10 @@ int QoreMetaPathFinder::setupModules() {
 }
 
 void QoreMetaPathFinder::dealloc(PyObject* self) {
-    //PyObject_GC_UnTrack(self);
-    Py_TYPE(self)->tp_free(self);
+    // the object of a heap type holds a reference to its type
+    PyTypeObject* type = Py_TYPE(self);
+    type->tp_free(self);
+    Py_DECREF(type);
 }
 
 PyObject* QoreMetaPathFinder::repr(PyObject* obj) {

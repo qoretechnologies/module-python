@@ -31,7 +31,13 @@ struct PyQoreCallable {
     ResolvedCallReferenceNode* callable;
 };
 
-DLLLOCAL extern PyTypeObject PythonQoreCallable_Type;
+//! returns a new type of the Python objects of Qore callables for the current interpreter (see
+//! QorePythonInterpreterTypes)
+DLLLOCAL PyObject* qore_python_create_callable_type();
+
+//! returns the type of the Python objects of Qore callables of the current interpreter (a borrowed reference), or
+//! nullptr with a Python exception if the qoreloader module is not initialized in the interpreter
+DLLLOCAL PyTypeObject* qore_python_get_callable_type();
 
 DLLLOCAL bool PyQoreCallable_Check(PyObject* obj);
 

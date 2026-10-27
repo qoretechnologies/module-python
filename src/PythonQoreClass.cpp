@@ -23,6 +23,7 @@
 #include "QoreLoader.h"
 #include "QorePythonProgram.h"
 #include "QorePythonStackLocationHelper.h"
+#include "QorePythonInterpreterTypes.h"
 #include "QorePythonDeclHandle.h"
 
 #include <string.h>
@@ -103,7 +104,26 @@ void PythonQoreClass::py_free(PyQoreObject* self) {
 }
 
 bool PyQoreObject_Check(PyObject* obj) {
-    return obj && PyObject_TypeCheck(obj, &PythonQoreObjectBase_Type);
+    if (!obj) {
+        return false;
+    }
+    const QorePythonInterpreterTypes* types = qore_python_get_interpreter_types();
+    return types && PyObject_TypeCheck(obj, types->qore_object_base);
+}
+
+PyObject* PythonQoreClass::createBaseType() {
+    static PyType_Slot slots[] = {
+        {Py_tp_doc, (void*)"base class for Python objects based on Qore classes"},
+        {0, nullptr},
+    };
+    static PyType_Spec spec = {
+        .name = "qoreloader.PythonQoreObjectBase",
+        .basicsize = 0,
+        .itemsize = 0,
+        .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+        .slots = slots,
+    };
+    return PyType_FromSpec(&spec);
 }
 
 bool PyQoreObjectType_Check(PyTypeObject* type) {
@@ -140,6 +160,13 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
         {nullptr, 0, 0, 0, nullptr},
     };
 
+    // the base type of the Python types of Qore classes in the current interpreter
+    const QorePythonInterpreterTypes* types = qore_python_get_interpreter_types();
+    if (!types) {
+        PyErr_SetString(PyExc_RuntimeError, "the qoreloader module is not initialized in the current interpreter");
+        return;
+    }
+
     PyType_Slot slots[] = {
         {Py_tp_doc, (void*)docstr},
         {Py_tp_dealloc, (void*)PythonQoreClass::py_dealloc},
@@ -149,7 +176,7 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
         {Py_tp_getattro, (void*)PythonQoreClass::py_getattro},
         {Py_tp_setattro, (void*)PythonQoreClass::py_setattro},
         {Py_tp_members, (void*)members},
-        {Py_tp_base, (void*)&PythonQoreObjectBase_Type},
+        {Py_tp_base, (void*)types->qore_object_base},
         {Py_tp_alloc, (void*)PyType_GenericAlloc},
         {Py_tp_init, (void*)PythonQoreClass::py_init},
         {Py_tp_new, (void*)PythonQoreClass::py_new},
@@ -187,7 +214,7 @@ PythonQoreClass::PythonQoreClass(QorePythonProgram* pypgm, const char* module_na
             // the type of a Python class (the parent class is a Qore class of a Python class) does not have the
             // layout of the types of Qore classes, so it cannot be the base class; the methods of the parent class
             // are added instead
-            if (!PyType_IsSubtype(base_type, &PythonQoreObjectBase_Type)) {
+            if (!PyType_IsSubtype(base_type, types->qore_object_base)) {
                 break;
             }
             bases = PyTuple_New(1);

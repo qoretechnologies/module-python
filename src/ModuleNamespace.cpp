@@ -21,6 +21,7 @@
 */
 
 #include "ModuleNamespace.h"
+#include "QorePythonInterpreterTypes.h"
 
 static PyMethodDef ModuleNamespace_methods[] = {
     {nullptr, nullptr},
@@ -33,65 +34,43 @@ Python modules for imported Qore namespaces.");
 
 static PyObject* ModuleNamespace_getattro(PyObject* self, PyObject* key);
 
-PyTypeObject ModuleNamespace_Type = {
-    PyVarObject_HEAD_INIT(nullptr, 0)
-    "ModuleNamespace",            // tp_name
-    0,                            // tp_basicsize
-    0,                            // tp_itemsize
-    // Slots
-    nullptr,                      // tp_dealloc
-    0,                            // tp_vectorcall_offset
-    0,                            // tp_getattr
-    0,                            // tp_setattr
-    0,                            // tp_as_async
-    nullptr,                      // tp_repr
-    0,                            // tp_as_number
-    0,                            // tp_as_sequence
-    0,                            // tp_as_mapping
-    0,                            // tp_hash
-    0,                            // tp_call
-    0,                            // tp_str
-    ModuleNamespace_getattro,     // tp_getattro
-    nullptr,                      // tp_setattro
-    0,                            // tp_as_buffer
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, // tp_flags
-    ModuleNamespace_doc,          // tp_doc
-    0,                            // tp_traverse
-    0,                            // tp_clear
-    0,                            // tp_richcompare
-    0,                            // tp_weaklistoffset
-    0,                            // tp_iter
-    0,                            // tp_iternext
-    ModuleNamespace_methods,      // tp_methods
-    0,                            // tp_members
-    0,                            // tp_getset
-    &PyModule_Type,               // tp_base
-    0,                            // tp_dict
-    0,                            // tp_descr_get
-    0,                            // tp_descr_set
-    0,                            // tp_dictoffset
-    nullptr,                      // tp_init
-    nullptr,                      // tp_alloc
-    nullptr,                      // tp_new
-    nullptr,                      // tp_free
-};
+// the modules of namespaces are modules (a subtype of PyModule_Type) with the namespace after the module's data
+static int ModuleNamespace_traverse(PyObject* self, visitproc visit, void* arg) {
+    // the object of a heap type holds a reference to its type
+    Py_VISIT(Py_TYPE(self));
+    return PyModule_Type.tp_traverse(self, visit, arg);
+}
 
-int initModuleNamespace() {
-    ModuleNamespace_Type.tp_basicsize = PyModule_Type.tp_basicsize + sizeof(ModuleNamespace);
-    ModuleNamespace_Type.tp_dictoffset = PyModule_Type.tp_dictoffset;
-    ModuleNamespace_Type.tp_traverse = PyModule_Type.tp_traverse;
-    ModuleNamespace_Type.tp_clear = PyModule_Type.tp_clear;
+static void ModuleNamespace_dealloc(PyObject* self) {
+    PyTypeObject* type = Py_TYPE(self);
+    PyModule_Type.tp_dealloc(self);
+    Py_DECREF(type);
+}
 
-    if (PyType_Ready(&ModuleNamespace_Type) < 0) {
-        printd(5, "initModuleNamespace() module type initialization failed\n");
-        return -1;
-    }
-
-    return 0;
+PyObject* ModuleNamespace_CreateType() {
+    PyType_Slot slots[] = {
+        {Py_tp_dealloc, (void*)ModuleNamespace_dealloc},
+        {Py_tp_traverse, (void*)ModuleNamespace_traverse},
+        {Py_tp_clear, (void*)PyModule_Type.tp_clear},
+        {Py_tp_getattro, (void*)ModuleNamespace_getattro},
+        {Py_tp_doc, (void*)ModuleNamespace_doc},
+        {Py_tp_methods, (void*)ModuleNamespace_methods},
+        {0, nullptr},
+    };
+    PyType_Spec spec = {
+        .name = "qoreloader.ModuleNamespace",
+        .basicsize = static_cast<int>(PyModule_Type.tp_basicsize + sizeof(ModuleNamespace)),
+        .itemsize = 0,
+        .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+        .slots = slots,
+    };
+    QorePythonReferenceHolder bases(PyTuple_Pack(1, reinterpret_cast<PyObject*>(&PyModule_Type)));
+    return bases ? PyType_FromSpecWithBases(&spec, *bases) : nullptr;
 }
 
 bool ModuleNamespace_Check(PyObject* obj) {
-    return PyObject_TypeCheck(obj, &ModuleNamespace_Type);
+    const QorePythonInterpreterTypes* types = qore_python_get_interpreter_types();
+    return types && PyObject_TypeCheck(obj, types->module_namespace);
 }
 
 static ModuleNamespace* get_namespace(PyObject* py_mns) {
@@ -103,7 +82,13 @@ PyObject* ModuleNamespace_New(const char* name, const QoreNamespace* ns) {
     // This properly calls tp_new and tp_init, ensuring the module dictionary is initialized
     QorePythonReferenceHolder args(PyTuple_New(1));
     PyTuple_SET_ITEM(*args, 0, PyUnicode_FromString(name));
-    QorePythonReferenceHolder self(PyObject_Call((PyObject*)&ModuleNamespace_Type, *args, nullptr));
+    const QorePythonInterpreterTypes* types = qore_python_get_interpreter_types();
+    if (!types) {
+        PyErr_SetString(PyExc_RuntimeError, "the qoreloader module is not initialized in the current interpreter");
+        return nullptr;
+    }
+    QorePythonReferenceHolder self(PyObject_Call(reinterpret_cast<PyObject*>(types->module_namespace), *args,
+        nullptr));
     if (!self) {
         return nullptr;
     }

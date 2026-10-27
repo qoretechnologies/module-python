@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import sysconfig
 import tempfile
 
 SUB_CODE = """
@@ -77,13 +76,13 @@ def child_sub_first():
     c = Counter(2)
     c.dec()
     assert c.getCount() == 1
-    if sysconfig.get_config_var("Py_GIL_DISABLED"):
-        # closing such a sub-interpreter crashes with free-threaded Python (qoretechnologies/qore#5536)
-        print("sub-interpreters after the main interpreter: skipped (issue 5536)")
-    else:
-        for _ in range(2):
-            error = run_in_subinterpreter(SUB_CODE)
-            assert error is None, error
+    # each sub-interpreter has its own Python program and Qore Program, whose Python objects are not shared with the
+    # main interpreter (the Python types of the main interpreter's Qore classes were used in sub-interpreters, which
+    # crashed free-threaded Python, and with Python 3.11 the main interpreter could not call Qore after a
+    # sub-interpreter was destroyed: qoretechnologies/qore#5536)
+    for _ in range(3):
+        error = run_in_subinterpreter(SUB_CODE)
+        assert error is None, error
     # closing the sub-interpreters did not shut Qore down
     c.dec()
     assert c.getCount() == 0

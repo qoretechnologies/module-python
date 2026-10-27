@@ -74,6 +74,10 @@ public:
     //! Python context using the main interpreter
     DLLLOCAL QorePythonProgram();
 
+    //! Python context using the interpreter of the given attached thread state, which it does not own, with its own
+    //! Qore Program: the Python program of a sub-interpreter that imports qoreloader when Python is the host
+    DLLLOCAL explicit QorePythonProgram(PyThreadState* python);
+
     //! Creates the Python program of a Qore Program that loads the module; does not own the QoreProgram reference
     /** @param xsink errors are raised here, and the program is then invalid; if nullptr, they are printed (the API
         that copies the external data of a Program has no ExceptionSink)
@@ -1028,6 +1032,9 @@ protected:
 
     //! Creates a QoreProgram object owned by this object
     DLLLOCAL void createQoreProgram();
+
+    //! initializes a program for an interpreter that it does not own, given by the attached thread state, if any
+    DLLLOCAL void initForInterpreter(PyThreadState* python);
 };
 
 class QorePythonProgramData : public AbstractPrivateData, public QorePythonProgram {

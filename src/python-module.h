@@ -523,7 +523,9 @@ DLLLOCAL extern QoreThreadLock qpy_subclass_type_lock;
 DLLLOCAL extern QoreThreadLock qpy_proxy_lock;
 
 //! Initializes the type used to deregister threads that Python created; called once in the main interpreter
-DLLLOCAL int qore_python_thread_registration_init();
+//! returns a new type of the registrations of Python threads with Qore for the current interpreter (see
+//! QorePythonInterpreterTypes)
+DLLLOCAL PyObject* qore_python_create_thread_sentinel_type();
 
 //! Replaces os.putenv() and os.unsetenv() in the current interpreter with functions that change the environment
 //! under the lock that serializes the environment with Qore
@@ -778,9 +780,6 @@ DLLLOCAL void qore_python_release(ValueHolder& v);
 //! releases the list held while the GIL is held: without the GIL if this can run Qore code
 DLLLOCAL void qore_python_release(ReferenceHolder<QoreListNode>& l);
 
-// Base type for Qore objects in Python
-DLLLOCAL extern PyTypeObject PythonQoreObjectBase_Type;
-
 // Python program control for Qore interfacing
 DLLLOCAL extern QorePythonProgram* qore_python_pgm;
 
@@ -806,6 +805,29 @@ DLLLOCAL PyObject* qore_python_get_qore_static_member_type();
 
 //! Creates the global QOre Python program object
 DLLLOCAL int init_global_qore_python_pgm();
+
+//! true while the module imports qoreloader into an interpreter that a QorePythonProgram created and owns: such an
+//! interpreter has its program, while a sub-interpreter that Python creates gets one when it imports qoreloader
+DLLLOCAL extern thread_local bool qore_python_program_interpreter_import;
+
+//! marks the import of qoreloader into an interpreter that a QorePythonProgram created (see
+//! qore_python_program_interpreter_import)
+class QorePythonProgramInterpreterImportHelper {
+public:
+    DLLLOCAL QorePythonProgramInterpreterImportHelper() : old(qore_python_program_interpreter_import) {
+        qore_python_program_interpreter_import = true;
+    }
+
+    DLLLOCAL ~QorePythonProgramInterpreterImportHelper() {
+        qore_python_program_interpreter_import = old;
+    }
+
+    QorePythonProgramInterpreterImportHelper(const QorePythonProgramInterpreterImportHelper&) = delete;
+    QorePythonProgramInterpreterImportHelper& operator=(const QorePythonProgramInterpreterImportHelper&) = delete;
+
+private:
+    bool old;
+};
 
 //! Returns true if the current thread is holding the GIL
 // NOTE: For Python 3.12, the default uses our tracking instead of Python's TSS

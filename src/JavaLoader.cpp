@@ -24,13 +24,12 @@
 #include "QorePythonProgram.h"
 #include "PythonQoreClass.h"
 #include "ModuleNamespace.h"
+#include "QorePythonInterpreterTypes.h"
 
 #include <dlfcn.h>
 
 #include <memory>
 
-QorePythonManualReferenceHolder JavaLoader::loader_cls;
-QorePythonManualReferenceHolder JavaLoader::loader;
 
 static PyMethodDef JavaLoader_methods[] = {
     {"create_module", JavaLoader::create_module, METH_VARARGS, "JavaLoader.create_module() implementation"},
@@ -43,85 +42,46 @@ PyDoc_STRVAR(JavaLoader_doc,
 \n\
 Python modules for Java through the Qore library.");
 
-PyTypeObject JavaLoader_Type = {
-    PyVarObject_HEAD_INIT(nullptr, 0)
-    "JavaLoader",                 // tp_name
-    0,                            // tp_basicsize
-    0,                            // tp_itemsize
-    // Slots
-    (destructor)JavaLoader::dealloc,  // tp_dealloc
-    0,                            // tp_vectorcall_offset
-    0,                            // tp_getattr
-    0,                            // tp_setattr
-    0,                            // tp_as_async
-    JavaLoader::repr,             // tp_repr
-    0,                            // tp_as_number
-    0,                            // tp_as_sequence
-    0,                            // tp_as_mapping
-    0,                            // tp_hash
-    0,                            // tp_call
-    0,                            // tp_str
-    PyObject_GenericGetAttr,      // tp_getattro
-    0,                            // tp_setattro
-    0,                            // tp_as_buffer
-    Py_TPFLAGS_DEFAULT,           // tp_flags
-    JavaLoader_doc,               // tp_doc
-    0,                            // tp_traverse
-    0,                            // tp_clear
-    0,                            // tp_richcompare
-    0,                            // tp_weaklistoffset
-    0,                            // tp_iter
-    0,                            // tp_iternext
-    JavaLoader_methods,           // tp_methods
-    0,                            // tp_members
-    0,                            // tp_getset
-    &PyBaseObject_Type,           // tp_base
-    0,                            // tp_dict
-    0,                            // tp_descr_get
-    0,                            // tp_descr_set
-    0,                            // tp_dictoffset
-    0,                            // tp_init
-    PyType_GenericAlloc,          // tp_alloc
-    PyType_GenericNew,            // tp_new
-    PyObject_Del,                 // tp_free
+static PyType_Slot JavaLoader_slots[] = {
+    {Py_tp_dealloc, (void*)JavaLoader::dealloc},
+    {Py_tp_repr, (void*)JavaLoader::repr},
+    {Py_tp_doc, (void*)JavaLoader_doc},
+    {Py_tp_methods, (void*)JavaLoader_methods},
+    {0, nullptr},
 };
 
-int JavaLoader::init() {
-    if (initModuleNamespace()) {
-        return -1;
-    }
+static PyType_Spec JavaLoader_spec = {
+    .name = "qoreloader.JavaLoader",
+    .basicsize = sizeof(PyObject),
+    .itemsize = 0,
+    .flags = Py_TPFLAGS_DEFAULT,
+    .slots = JavaLoader_slots,
+};
 
-    if (PyType_Ready(&JavaLoader_Type) < 0) {
-        printd(5, "JavaLoader::init() type initialization failed\n");
-        return -1;
-    }
-
-    QorePythonReferenceHolder args(PyTuple_New(0));
-    loader = PyObject_CallObject((PyObject*)&JavaLoader_Type, *args);
-    //loader = PyObject_CallObject((PyObject*)*loader_cls, *args);
-
-    return 0;
-}
-
-void JavaLoader::del() {
-    loader.purge();
-    loader_cls.purge();
+PyObject* JavaLoader::createType() {
+    return PyType_FromSpec(&JavaLoader_spec);
 }
 
 PyObject* JavaLoader::getLoaderRef() {
-    assert(*loader);
-    Py_INCREF(*loader);
-    return *loader;
+    PyObject* loader = getLoader();
+    Py_XINCREF(loader);
+    return loader;
 }
 
 PyObject* JavaLoader::getLoader() {
-    assert(*loader);
-    return *loader;
+    const QorePythonInterpreterTypes* types = qore_python_get_interpreter_types();
+    if (!types) {
+        PyErr_SetString(PyExc_RuntimeError, "the qoreloader module is not initialized in the current interpreter");
+        return nullptr;
+    }
+    return types->java_loader_obj;
 }
 
 void JavaLoader::dealloc(PyObject* self) {
-    //PyObject_GC_UnTrack(self);
-    Py_TYPE(self)->tp_free(self);
+    // the object of a heap type holds a reference to its type
+    PyTypeObject* type = Py_TYPE(self);
+    type->tp_free(self);
+    Py_DECREF(type);
 }
 
 PyObject* JavaLoader::repr(PyObject* obj) {

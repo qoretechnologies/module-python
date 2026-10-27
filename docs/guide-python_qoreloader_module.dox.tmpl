@@ -25,7 +25,11 @@
     The state of the module for the process (the %Qore library, the global %Qore program and the cleanup at exit)
     belongs to the main %Python interpreter, which keeps it until the process exits: \c qoreloader must be imported
     in the main interpreter before it is imported in a sub-interpreter, otherwise the import raises \c ImportError.
-    Sub-interpreters can then import \c qoreloader and be closed at any time.
+    Sub-interpreters can then import \c qoreloader and be closed at any time.  Each sub-interpreter that imports
+    \c qoreloader has its own %Qore program, as the main interpreter has the global one: the %Qore modules, classes
+    and objects used in one interpreter are separate from the ones of the other interpreters (the %Python objects of
+    one interpreter cannot be used in another one), and the program of a sub-interpreter is deleted when the
+    sub-interpreter is closed.
 
     @section python_qoreloader_import_qore Using the qoreloader Module to Import Qore APIs
 

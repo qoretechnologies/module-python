@@ -22,6 +22,7 @@
 #include "PythonQoreCallable.h"
 #include "QorePythonProgram.h"
 #include "QorePythonStackLocationHelper.h"
+#include "QorePythonInterpreterTypes.h"
 
 static int qore_callable_init(PyObject* self, PyObject* args, PyObject* kwds);
 static PyObject* qore_callable_new(PyTypeObject* type, PyObject* args, PyObject* kw);
@@ -30,22 +31,42 @@ static PyObject* qore_callable_repr(PyObject* obj);
 static PyObject* qore_callable_call(PyQoreCallable* self, PyObject* args, PyObject* kwargs);
 static void qore_callable_free(PyQoreCallable* self);
 
-PyTypeObject PythonQoreCallable_Type = {
-    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "QoreCallable",
-    .tp_basicsize = sizeof(PyQoreCallable),
-    .tp_dealloc = (destructor)qore_callable_dealloc,
-    .tp_repr = qore_callable_repr,
-    .tp_call = (ternaryfunc)qore_callable_call,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_doc = "Qore callable type",
-    .tp_init = qore_callable_init,
-    .tp_new = qore_callable_new,
-    .tp_free = (freefunc)qore_callable_free,
-};
+PyObject* qore_python_create_callable_type() {
+    static PyType_Slot slots[] = {
+        {Py_tp_dealloc, (void*)qore_callable_dealloc},
+        {Py_tp_repr, (void*)qore_callable_repr},
+        {Py_tp_call, (void*)qore_callable_call},
+        {Py_tp_doc, (void*)"Qore callable type"},
+        {Py_tp_init, (void*)qore_callable_init},
+        {Py_tp_new, (void*)qore_callable_new},
+        {Py_tp_free, (void*)qore_callable_free},
+        {0, nullptr},
+    };
+    static PyType_Spec spec = {
+        .name = "qoreloader.QoreCallable",
+        .basicsize = sizeof(PyQoreCallable),
+        .itemsize = 0,
+        .flags = Py_TPFLAGS_DEFAULT,
+        .slots = slots,
+    };
+    return PyType_FromSpec(&spec);
+}
+
+PyTypeObject* qore_python_get_callable_type() {
+    const QorePythonInterpreterTypes* types = qore_python_get_interpreter_types();
+    if (!types) {
+        PyErr_SetString(PyExc_RuntimeError, "the qoreloader module is not initialized in the current interpreter");
+        return nullptr;
+    }
+    return types->qore_callable;
+}
 
 bool PyQoreCallable_Check(PyObject* obj) {
-    return obj && PyObject_TypeCheck(obj, &PythonQoreCallable_Type);
+    if (!obj) {
+        return false;
+    }
+    const QorePythonInterpreterTypes* types = qore_python_get_interpreter_types();
+    return types && PyObject_TypeCheck(obj, types->qore_callable);
 }
 
 int qore_callable_init(PyObject* self, PyObject* args, PyObject* kwds) {
@@ -92,7 +113,10 @@ void qore_callable_dealloc(PyQoreCallable* self) {
         }
         self->callable = nullptr;
     }
-    Py_TYPE(self)->tp_free(self);
+    // the object of a heap type holds a reference to its type
+    PyTypeObject* type = Py_TYPE(self);
+    type->tp_free(self);
+    Py_DECREF(type);
 }
 
 PyObject* qore_callable_repr(PyObject* obj) {

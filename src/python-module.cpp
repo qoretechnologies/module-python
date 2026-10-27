@@ -34,6 +34,7 @@
 #include "QC_PythonProgram.h"
 #include "QorePythonProgram.h"
 #include "QorePythonStackLocationHelper.h"
+#include "QorePythonInterpreterTypes.h"
 #include "python_fork_gil.h"
 
 #include <qore/QoreForkHandler.h>
@@ -486,12 +487,11 @@ static void qore_python_thread_sentinel_dealloc(PyObject* self) {
         python_thread_registered = false;
         q_deregister_foreign_thread();
     }
-    Py_TYPE(self)->tp_free(self);
+    // the object of a heap type holds a reference to its type
+    PyTypeObject* type = Py_TYPE(self);
+    type->tp_free(self);
+    Py_DECREF(type);
 }
-
-static PyTypeObject QorePythonThreadSentinel_Type = {
-    PyVarObject_HEAD_INIT(nullptr, 0)
-};
 
 //! Deregisters a thread that Python created when the native thread exits, if it is still registered
 /** Normally the thread is deregistered when its Python thread state is cleared; this covers a thread whose state
@@ -514,13 +514,20 @@ static thread_local QorePythonThreadExit python_thread_exit;
 //! The key of the sentinel in the dictionary of a Python thread state
 static constexpr const char* QORE_PYTHON_THREAD_SENTINEL_KEY = "__qore_thread_registration__";
 
-int qore_python_thread_registration_init() {
-    QorePythonThreadSentinel_Type.tp_name = "qoreloader.QoreThreadRegistration";
-    QorePythonThreadSentinel_Type.tp_basicsize = sizeof(QorePythonThreadSentinel);
-    QorePythonThreadSentinel_Type.tp_dealloc = qore_python_thread_sentinel_dealloc;
-    QorePythonThreadSentinel_Type.tp_flags = Py_TPFLAGS_DEFAULT;
-    QorePythonThreadSentinel_Type.tp_doc = "registration of a Python thread with Qore";
-    return PyType_Ready(&QorePythonThreadSentinel_Type);
+PyObject* qore_python_create_thread_sentinel_type() {
+    static PyType_Slot slots[] = {
+        {Py_tp_dealloc, (void*)qore_python_thread_sentinel_dealloc},
+        {Py_tp_doc, (void*)"registration of a Python thread with Qore"},
+        {0, nullptr},
+    };
+    static PyType_Spec spec = {
+        .name = "qoreloader.QoreThreadRegistration",
+        .basicsize = sizeof(QorePythonThreadSentinel),
+        .itemsize = 0,
+        .flags = Py_TPFLAGS_DEFAULT,
+        .slots = slots,
+    };
+    return PyType_FromSpec(&spec);
 }
 
 int qore_python_check_no_kwargs(PyObject* kwargs, const char* name) {
@@ -552,9 +559,11 @@ int qore_python_register_thread() {
     python_thread_registered = true;
 
     // the thread is deregistered when its Python thread state is cleared
-    PyObject* dict = (QorePythonThreadSentinel_Type.tp_flags & Py_TPFLAGS_READY) ? PyThreadState_GetDict() : nullptr;
+    // the type of the current interpreter, if the qoreloader module is initialized in it
+    const QorePythonInterpreterTypes* types = qore_python_get_interpreter_types();
+    PyObject* dict = types ? PyThreadState_GetDict() : nullptr;
     if (dict) {
-        QorePythonThreadSentinel* sentinel = PyObject_New(QorePythonThreadSentinel, &QorePythonThreadSentinel_Type);
+        QorePythonThreadSentinel* sentinel = PyObject_New(QorePythonThreadSentinel, types->thread_sentinel);
         if (sentinel) {
             sentinel->thread = pthread_self();
             int set_rc = PyDict_SetItemString(dict, QORE_PYTHON_THREAD_SENTINEL_KEY,
@@ -1060,9 +1069,9 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
             "posix and time modules");
     }
 
-    // Initialize the process-wide bridge types in the main interpreter. If the
-    // first import happens in a transient subinterpreter, the static type objects
-    // and cached loader callables outlive the interpreter that created them.
+    // the qoreloader module is initialized in the main interpreter first: the state of the module for the process
+    // belongs to the main interpreter, and each interpreter that imports the module then gets its own types (see
+    // QorePythonInterpreterTypes)
     {
         QorePythonReferenceHolder loader_module(PyImport_ImportModule("qoreloader"));
         if (!loader_module) {

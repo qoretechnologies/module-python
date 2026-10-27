@@ -29,6 +29,7 @@
 #include "QorePythonProgram.h"
 #include "PythonQoreCallable.h"
 #include "QorePythonSignalWakeup.h"
+#include "QorePythonInterpreterTypes.h"
 #ifdef QORE_PYTHON_HAVE_FORK_GIL_CHECK
 #include "python_fork_gil.h"
 #endif
@@ -39,6 +40,7 @@
 #include <string>
 
 QorePythonProgram* qore_python_pgm = nullptr;
+thread_local bool qore_python_program_interpreter_import = false;
 
 PyDoc_STRVAR(module_doc, "This module provides dynamic access to Qore APIs.");
 
@@ -91,13 +93,6 @@ static PyMethodDef qoreloader_methods[] = {
 
 bool qore_needs_shutdown = false;
 
-PyTypeObject PythonQoreObjectBase_Type = {
-    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "PythonQoreObjectBase",
-    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
-    .tp_doc = "base class for Python objects based on Qore classes",
-};
-
 static int init_count = 0;
 
 //! the state of the qoreloader module in an interpreter
@@ -108,6 +103,12 @@ struct qoreloader_state {
     PyObject* qore_static_member_type;
     //! true if the module is counted in init_count (the module is freed also when its initialization fails before)
     bool counted;
+    //! the Python program of a sub-interpreter, with its own Qore Program, as the main interpreter has the global
+    //! program (qore_python_pgm): the Python objects of the main interpreter, such as the Python types of Qore
+    //! classes, cannot be used in another interpreter
+    QorePythonProgram* pypgm;
+    //! the types of the module in the interpreter (see QorePythonInterpreterTypes)
+    QorePythonInterpreterTypes types;
 };
 
 static qoreloader_state* qoreloader_get_state(PyObject* m) {
@@ -119,6 +120,7 @@ static int qoreloader_traverse(PyObject* m, visitproc visit, void* arg) {
     if (st) {
         Py_VISIT(st->qore_exception_type);
         Py_VISIT(st->qore_static_member_type);
+        return qore_python_interpreter_types_traverse(st->types, visit, arg);
     }
     return 0;
 }
@@ -135,7 +137,18 @@ static int qoreloader_clear(PyObject* m) {
 void qoreloader_free(void* obj) {
     qoreloader_state* st = qoreloader_get_state(static_cast<PyObject*>(obj));
     bool counted = st && st->counted;
-    qoreloader_clear(static_cast<PyObject*>(obj));
+    // the program of a sub-interpreter is released while its interpreter exists; releasing it runs Qore code (the
+    // deletion of its Qore Program), which needs a thread registered with Qore
+    if (st && st->pypgm) {
+        QorePythonProgram* pypgm = st->pypgm;
+        st->pypgm = nullptr;
+        if (!q_libqore_shutdown()) {
+            QoreThreadAttachHelper attach_helper;
+            if (!attach_helper.attach()) {
+                pypgm->doDeref();
+            }
+        }
+    }
     if (counted && !--init_count) {
         printd(5, "qoreloader_free() obj: %p qore_needs_shutdown: %d\n", obj, qore_needs_shutdown);
         QorePythonSignalWakeup::uninstall();
@@ -145,12 +158,14 @@ void qoreloader_free(void* obj) {
             qore_python_pgm = nullptr;
         }
 
-        QoreLoader::del();
-        JavaLoader::del();
-
         if (qore_needs_shutdown) {
             qore_cleanup();
         }
+    }
+    qoreloader_clear(static_cast<PyObject*>(obj));
+    // the types of the interpreter are released last: the programs released above use them
+    if (st) {
+        qore_python_interpreter_types_clear(st->types);
     }
 }
 
@@ -212,7 +227,8 @@ int qpy_register_fork_handlers() {
     qpy_proxy_lock_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_qore_object_proxies",
         qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock, &qpy_proxy_lock);
     if (!qpy_lock_fork_reg || !qpy_global_lock_fork_reg || !qpy_subclass_type_lock_fork_reg
-        || !qpy_proxy_lock_fork_reg || QorePythonDeclHandle::registerForkHandler()) {
+        || !qpy_proxy_lock_fork_reg || QorePythonDeclHandle::registerForkHandler()
+        || qore_python_interpreter_types_register_fork_handler()) {
         qpy_unregister_fork_handlers();
         return -1;
     }
@@ -220,6 +236,7 @@ int qpy_register_fork_handlers() {
 }
 
 void qpy_unregister_fork_handlers() {
+    qore_python_interpreter_types_unregister_fork_handler();
     QorePythonDeclHandle::unregisterForkHandler();
     qore_unregister_fork_handler(qpy_proxy_lock_fork_reg);
     qpy_proxy_lock_fork_reg = nullptr;
@@ -552,6 +569,10 @@ static int slot_qoreloader_exec(PyObject *m) {
     }
     ++init_count;
     qoreloader_get_state(m)->counted = true;
+    // the types of the module in this interpreter, which the rest of the initialization uses
+    if (qore_python_interpreter_types_init(qoreloader_get_state(m)->types)) {
+        return -1;
+    }
     printd(5, "slot_qoreloader_exec() ic: %d\n", init_count);
     if (init_count == 1) {
         // initialize qore library if necessary
@@ -585,30 +606,6 @@ static int slot_qoreloader_exec(PyObject *m) {
         }
 
         if (init_global_qore_python_pgm()) {
-            return -1;
-        }
-
-        if (PyType_Ready(&PythonQoreObjectBase_Type) < 0) {
-            return -1;
-        }
-
-        if (PyType_Ready(&PythonQoreCallable_Type) < 0) {
-            return -1;
-        }
-
-        if (qore_python_thread_registration_init() < 0) {
-            return -1;
-        }
-
-        if (QoreLoader::init()) {
-            return -1;
-        }
-
-        if (JavaLoader::init()) {
-            return -1;
-        }
-
-        if (QoreMetaPathFinder::init()) {
             return -1;
         }
 
@@ -647,7 +644,26 @@ static int slot_qoreloader_exec(PyObject *m) {
         return -1;
     }
 
-    QoreMetaPathFinder::setupModules();
+    // a sub-interpreter that Python created has its own Python program, which the code running in it gets (see
+    // QorePythonProgram::getContext()), as the Python objects of the main interpreter's program cannot be used in it;
+    // an interpreter that a QorePythonProgram created has that program
+    if (!qore_python_program_interpreter_import
+        && qore_python_get_interpreter(PyThreadState_Get()) != PyInterpreterState_Main()) {
+        QoreThreadAttachHelper attach_helper;
+        if (attach_helper.attach()) {
+            PyErr_SetString(PyExc_ImportError, "cannot register the thread with Qore: the maximum number of Qore "
+                "threads has been reached");
+            return -1;
+        }
+        qoreloader_get_state(m)->pypgm = new QorePythonProgram(qore_python_attached_thread_state());
+    }
+
+    if (QoreMetaPathFinder::setupModules()) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_ImportError, "cannot add the qoreloader finder to sys.meta_path");
+        }
+        return -1;
+    }
 
     // changes to os.environ in this interpreter are serialized with the environment changes of Qore
     if (qore_python_install_environment_functions()) {

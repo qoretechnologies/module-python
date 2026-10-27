@@ -161,6 +161,7 @@ set(CPP_SRC
     src/PythonQoreCallable.cpp
     src/ModuleNamespace.cpp
     src/QorePythonStackLocationHelper.cpp
+    src/QorePythonInterpreterTypes.cpp
     src/QorePythonDeclHandle.cpp
 )
 

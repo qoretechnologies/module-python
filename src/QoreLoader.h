@@ -36,15 +36,15 @@ typedef std::map<const char*, const QoreListNode*, ltstr> mod_dep_map_t;
 
 class QoreLoader {
 public:
-    //! initializer function
-    DLLLOCAL static int init();
+    //! returns a new type of the loader for the current interpreter (see QorePythonInterpreterTypes)
+    DLLLOCAL static PyObject* createType();
 
-    DLLLOCAL static void del();
-
-    //! returns the loader object with the reference count incremented
+    //! returns the loader object of the current interpreter with the reference count incremented; nullptr with a
+    //! Python exception if the qoreloader module is not initialized in the interpreter
     DLLLOCAL static PyObject* getLoaderRef();
 
-    //! returns the loader object
+    //! returns the loader object of the current interpreter; nullptr with a Python exception if the qoreloader module
+    //! is not initialized in the interpreter
     DLLLOCAL static PyObject* getLoader();
 
     //! type functions
@@ -56,8 +56,6 @@ public:
     DLLLOCAL static PyObject* exec_module(PyObject* self, PyObject* args);
 
 private:
-    DLLLOCAL static QorePythonManualReferenceHolder loader_cls;
-    DLLLOCAL static QorePythonManualReferenceHolder loader;
 
     //! A Qore module can declare items in more than one root namespace, so a Python module can be backed by several
     typedef std::vector<const QoreNamespace*> nsvec_t;

@@ -81,6 +81,10 @@ public:
     */
     DLLLOCAL static PyObject* findProxy(QoreObject* obj);
 
+    //! returns a new base type of the Python types of Qore classes for the current interpreter (see
+    //! QorePythonInterpreterTypes)
+    DLLLOCAL static PyObject* createBaseType();
+
     //! returns the handle of the Qore class of a Python type made for a Qore class
     /** @return the handle, valid as long as the type is, or nullptr with a Python exception set
 

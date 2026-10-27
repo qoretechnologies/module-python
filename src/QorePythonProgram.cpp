@@ -239,6 +239,18 @@ QorePythonProgram::QorePythonProgram() : save_object_callback(nullptr) {
         interpreter = _PyGILState_GetInterpreterStateUnsafe();
     }
 #endif
+    initForInterpreter(python);
+}
+
+QorePythonProgram::QorePythonProgram(PyThreadState* python) : save_object_callback(nullptr) {
+    assert(python);
+    printd(5, "QorePythonProgram::QorePythonProgram() this: %p interpreter: %p\n", this, python->interp);
+    qpy_global_register(this);
+    interpreter = python->interp;
+    initForInterpreter(python);
+}
+
+void QorePythonProgram::initForInterpreter(PyThreadState* python) {
     owns_interpreter = false;
 
     createQoreProgram();
@@ -298,8 +310,12 @@ QorePythonProgram::QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns, Exc
     setGlobalDictionary(*module);
     assert(!PyErr_Occurred());
 
-    // import qoreloader module
-    QorePythonReferenceHolder qoreloader(PyImport_ImportModule("qoreloader"));
+    // import qoreloader module into the interpreter of this program
+    QorePythonReferenceHolder qoreloader;
+    {
+        QorePythonProgramInterpreterImportHelper import_helper;
+        qoreloader = PyImport_ImportModule("qoreloader");
+    }
     if (!qoreloader) {
         if (!checkPythonException(xsink)) {
             xsink->raiseException("PYTHON-COMPILE-ERROR", "cannot load the 'qoreloader' module");
@@ -359,8 +375,12 @@ QorePythonProgram::QorePythonProgram(const QoreString& source_code, const QoreSt
         return;
     }
 
-    // import qoreloader module
-    QorePythonReferenceHolder qoreloader(PyImport_ImportModule("qoreloader"));
+    // import qoreloader module into the interpreter of this program
+    QorePythonReferenceHolder qoreloader;
+    {
+        QorePythonProgramInterpreterImportHelper import_helper;
+        qoreloader = PyImport_ImportModule("qoreloader");
+    }
     if (!qoreloader) {
         if (!checkPythonException(xsink)) {
             xsink->raiseException("PYTHON-COMPILE-ERROR", "cannot load the 'qoreloader' module");
@@ -4290,7 +4310,11 @@ PyObject* QorePythonProgram::getPythonCallable(ExceptionSink* xsink, const Resol
         }
     }
     QorePythonImplicitQoreArgHelper qpiqoh((void*)call);
-    return PyObject_CallObject((PyObject*)&PythonQoreCallable_Type, nullptr);
+    PyTypeObject* callable_type = qore_python_get_callable_type();
+    if (!callable_type) {
+        return nullptr;
+    }
+    return PyObject_CallObject(reinterpret_cast<PyObject*>(callable_type), nullptr);
 }
 
 PyObject* QorePythonProgram::getPythonValue(QoreValue val, ExceptionSink* xsink) {
