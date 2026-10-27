@@ -77,9 +77,8 @@ def child_sub_first():
     c = Counter(2)
     c.dec()
     assert c.getCount() == 1
-    if sysconfig.get_config_var("Py_GIL_DISABLED") or sys.version_info < (3, 12):
-        # closing such a sub-interpreter crashes with free-threaded Python, and with Python 3.11 the main interpreter
-        # cannot call Qore afterwards (qoretechnologies/qore#5536)
+    if sysconfig.get_config_var("Py_GIL_DISABLED"):
+        # closing such a sub-interpreter crashes with free-threaded Python (qoretechnologies/qore#5536)
         print("sub-interpreters after the main interpreter: skipped (issue 5536)")
     else:
         for _ in range(2):

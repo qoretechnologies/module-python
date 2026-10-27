@@ -162,6 +162,9 @@
       dicts are reported; documentation fixes in the \c qoreloader guide and the \c load_java() docstring (see
       @ref python_objects_conversion;
       <a href="https://github.com/qoretechnologies/qore/issues/5534">issue 5534</a>)
+    - with %Python 3.11, a Qore call from the main interpreter after a sub-interpreter that imported \c qoreloader was
+      destroyed no longer aborts the process: the thread returned to %Python without a thread state attached
+      (<a href="https://github.com/qoretechnologies/qore/issues/5536">issue 5536</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

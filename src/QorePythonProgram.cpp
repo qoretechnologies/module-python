@@ -1838,12 +1838,17 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
     // on the same thread, PyGILState_Check() can return false even when our thread holds the GIL
     // with a different thread state. Use _qore_PyCeval_GetGilLockedStatus() which checks the
     // actual thread ID instead of relying on TSS matching.
-    t_state = PyGILState_GetThisThreadState();
     // IMPORTANT: If is_python_created_thread is true (set earlier when we detected a Python-created
     // thread like threading.Thread), we already have the GIL and should not try to acquire it.
     // Use _qore_PyCeval_GetGilLockedStatus() which checks if tstate_current->thread_id matches
     // our thread ID, which correctly handles sub-interpreters on the same thread.
     bool have_gil = is_python_created_thread || _qore_PyCeval_GetGilLockedStatus();
+    // the state that the thread has attached, which releaseContext() attaches again, as with Python 3.12: the state
+    // bound for the GIL state API can be another one, or none: CPython clears it when it deletes the bound state, ex:
+    // the state of a subinterpreter that the module bound to the thread, when the subinterpreter is destroyed; the
+    // thread then returned to Python without a state attached (issue 5536)
+    PyThreadState* attached = have_gil ? qore_python_attached_thread_state() : nullptr;
+    t_state = attached ? attached : PyGILState_GetThisThreadState();
     printd(5, "QorePythonProgram::setContext() Python <3.12 is_python_created_thread: %d have_gil: %d "
         "t_state: %p tid: %d\n", is_python_created_thread, have_gil, t_state, q_gettid());
 
