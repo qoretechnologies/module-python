@@ -218,6 +218,11 @@ auto sub python_test_call_code(code c, auto arg) {
     return c(arg);
 }
 
+#! returns a Qore string literal for the given string; used to write scripts
+string sub make_python_literal(string s) {
+    return "\"" + replace(replace(replace(s, "\\", "\\\\"), "\"", "\\\""), "\n", "\\n") + "\"";
+}
+
 #! returns its argument; used to check that values round-trip through Qore
 auto sub python_test_echo(auto v) {
     return v;
@@ -371,6 +376,8 @@ class PythonTest inherits Test {
         addTestCase("callables round-trip between Qore and Python; bound methods keep their object or class",
             \callableRoundTripTest());
         addTestCase("call stacks of exceptions through nested Qore/Python calls", \nestedCallStackTest());
+        addTestCase("naive datetimes are Python's local time, with its fold; Decimals outside the range of a number",
+            \localTimeConversionTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -4415,6 +4422,90 @@ def go(c):
                     sprintf("max %d", max));
             }
         }
+    }
+
+    # naive datetimes are Python's local time (the local time of the process), with Python's semantics for ambiguous
+    # and nonexistent times (fold), also when the time zone of the Program differs; dates of other zones are aware
+    # datetimes; run in other processes with TZ=Europe/Prague, as the local time zone of a process is fixed by Qore
+    # (issue 5531)
+    localTimeConversionTest() {
+        TmpDir tmp("python-local-time-");
+        string py = "import datetime
+def mk(s):
+    return eval(s)
+def ts(d):
+    return int(d.timestamp())
+def t(x):
+    return repr(x)
+def now():
+    return datetime.datetime.now()
+";
+        hash<string, string> scripts = {
+            # the Program's time zone is the local time zone of the process
+            "local": "%modern
+%requires python
+PythonProgram pp(" + make_python_literal(py) + ", \"local-time.py\");
+# ambiguous and nonexistent local times: the instant given by Python
+foreach string e in (\"datetime.datetime(2026,10,25,2,30)\", \"datetime.datetime(2026,10,25,2,30,fold=1)\",
+        \"datetime.datetime(2026,3,29,2,30)\", \"datetime.datetime(2026,3,29,2,30,fold=1)\") {
+    date d = pp.callFunction(\"mk\", e);
+    printf(\"%s: %d %d\\n\", e, get_epoch_seconds(d), pp.callFunction(\"ts\", pp.callFunction(\"mk\", e)));
+}
+# the first and second 02:30 on 2026-10-25 are naive datetimes with their fold
+foreach int secs in ((1792888200, 1792891800, 1792895400)) {
+    date d = localtime(secs);
+    printf(\"%d: %s %d\\n\", secs, pp.callFunction(\"t\", d), pp.callFunction(\"ts\", d));
+}
+# a date of another zone is an aware datetime
+printf(\"%s\\n\", pp.callFunction(\"t\", 2026-01-01T12:00:00-05:00));
+",
+            # the Program's time zone differs from the local time zone of the process
+            "program-zone": "%modern
+%set-time-zone America/New_York
+%requires python
+PythonProgram pp(" + make_python_literal(py) + ", \"program-zone.py\");
+date d = 2026-01-01T12:00:00;
+printf(\"%s %d\\n\", pp.callFunction(\"t\", d), pp.callFunction(\"ts\", d));
+date n = pp.callFunction(\"now\");
+printf(\"now: %y\\n\", (now_us() - n).durationSeconds() < 60);
+printf(\"%s\\n\", pp.callFunction(\"mk\", \"datetime.datetime(2026,1,1,18,0)\").format(\"YYYY-MM-DD HH:mm:SS Z\"));
+",
+        };
+        hash<string, string> expected = {
+            "local": "datetime.datetime(2026,10,25,2,30): 1792888200 1792888200
+datetime.datetime(2026,10,25,2,30,fold=1): 1792891800 1792891800
+datetime.datetime(2026,3,29,2,30): 1774747800 1774747800
+datetime.datetime(2026,3,29,2,30,fold=1): 1774744200 1774744200
+1792888200: datetime.datetime(2026, 10, 25, 2, 30) 1792888200
+1792891800: datetime.datetime(2026, 10, 25, 2, 30, fold=1) 1792891800
+1792895400: datetime.datetime(2026, 10, 25, 3, 30) 1792895400
+datetime.datetime(2026, 1, 1, 12, 0, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=68400)))
+",
+            "program-zone": "datetime.datetime(2026, 1, 1, 12, 0, "
+                "tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=68400))) 1767286800
+now: True
+2026-01-01 12:00:00 -05:00
+",
+        };
+        foreach hash<auto> i in (scripts.pairIterator()) {
+            string script = tmp.path + "/" + i.key + ".q";
+            File f();
+            f.open2(script, O_WRONLY | O_CREAT | O_TRUNC);
+            f.write(i.value);
+            f.close();
+            assertEq(expected{i.key}, backquote(sprintf("TZ=Europe/Prague qore %s 2>&1", script)), i.key);
+        }
+
+        # a finite Decimal outside the exponent range of a Qore number raises an exception (it was an infinity or 0);
+        # integral Decimals outside the range of a 64-bit integer come back as int
+        PythonProgram pp("import decimal\ndef mk(s):\n    return decimal.Decimal(s)\ndef t(x):\n    return repr(x)\n",
+            "decimal-range.py");
+        foreach string v in (("1E+400000000", "-1E+400000000", "1E-400000000", "1.5E+400000000")) {
+            assertThrows("PYTHON-VALUE-ERROR", "outside the exponent range", \pp.callFunction(), ("mk", v), v);
+        }
+        assertEq("Decimal('Infinity')", pp.callFunction("t", pp.callFunction("mk", "Infinity")));
+        assertEq("Decimal('0')", pp.callFunction("t", pp.callFunction("mk", "0E-400000000")));
+        assertEq("1000000000000000000000000000000", pp.callFunction("t", pp.callFunction("mk", "1E+30")));
     }
 
     typedMemberWriteTest() {

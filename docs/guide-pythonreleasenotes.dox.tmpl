@@ -145,6 +145,13 @@
       from %Qore into %Python gave the %Python frames of all the calls on the thread, so that the call stack was
       repeated at each level and grew quadratically (deep mutual recursion did not finish)
       (<a href="https://github.com/qoretechnologies/qore/issues/5533">issue 5533</a>)
+    - naive datetimes are %Python's local time (the local time zone of the process) in both directions, with
+      %Python's semantics for ambiguous and nonexistent local times (\c fold); they were taken in the time zone of the
+      %Program, so that the instant changed when it differed from the local time zone of the process, and \c fold was
+      ignored; a finite \c decimal.Decimal outside the exponent range of a %Qore number raises
+      \c PYTHON-VALUE-ERROR (it became an infinity or 0); the round trips of integral \c decimal.Decimal values are
+      documented (see @ref python_typesguide;
+      <a href="https://github.com/qoretechnologies/qore/issues/5531">issue 5531</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

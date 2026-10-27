@@ -48,6 +48,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <ctime>
 #include <vector>
 #include <string>
 
@@ -3406,6 +3407,101 @@ BinaryNode* QorePythonProgram::getQoreBinaryFromByteArray(PyObject* val) {
     return rv.release();
 }
 
+//! the days since 1970-01-01 of a date of the proleptic Gregorian calendar, as used by Python's datetime
+static int64 qore_python_days_from_civil(int64 y, int64 m, int64 d) {
+    y -= m <= 2;
+    int64 era = (y >= 0 ? y : y - 399) / 400;
+    int64 yoe = y - era * 400;
+    int64 doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int64 doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+//! gets the local time of the process (Python's local time: the local time of the C library) at the given seconds
+//! since the epoch, as seconds since the epoch of the local wall clock; returns false if it cannot be determined
+static bool qore_python_local_seconds(int64 u, int64& local) {
+    time_t t = static_cast<time_t>(u);
+    if (static_cast<int64>(t) != u) {
+        return false;
+    }
+    struct tm tm;
+#ifdef _Q_WINDOWS
+    if (localtime_s(&tm, &t)) {
+        return false;
+    }
+#else
+    if (!localtime_r(&t, &tm)) {
+        return false;
+    }
+#endif
+    local = qore_python_days_from_civil(static_cast<int64>(tm.tm_year) + 1900, tm.tm_mon + 1, tm.tm_mday) * 86400
+        + tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec;
+    return true;
+}
+
+//! the largest change of a UTC offset, as in Python's datetime
+static constexpr int64 QORE_PYTHON_MAX_FOLD_SECONDS = 24 * 3600;
+
+//! gets the seconds since the epoch of a local wall clock time (seconds since the epoch of the wall clock) with the
+//! given fold, as datetime.timestamp() does for naive datetimes (CPython's local_to_seconds()): an ambiguous time is
+//! the earlier instant with fold 0 and the later one with fold 1, and a time in a gap is shifted by the gap; returns
+//! false if the local time cannot be determined
+static bool qore_python_local_to_seconds(int64 t, bool fold, int64& rv) {
+    int64 lt;
+    if (!qore_python_local_seconds(t, lt)) {
+        return false;
+    }
+    int64 a = lt - t;
+    int64 u1 = t - a;
+    int64 t1;
+    if (!qore_python_local_seconds(u1, t1)) {
+        return false;
+    }
+    int64 b;
+    if (t1 == t) {
+        // one solution; look for an earlier one (fold 0) or a later one (fold 1)
+        int64 u2 = fold ? u1 + QORE_PYTHON_MAX_FOLD_SECONDS : u1 - QORE_PYTHON_MAX_FOLD_SECONDS;
+        if (!qore_python_local_seconds(u2, lt)) {
+            return false;
+        }
+        b = lt - u2;
+        if (a == b) {
+            rv = u1;
+            return true;
+        }
+    } else {
+        b = t1 - u1;
+        assert(a != b);
+    }
+    int64 u2 = t - b;
+    int64 t2;
+    if (!qore_python_local_seconds(u2, t2)) {
+        return false;
+    }
+    if (t2 == t) {
+        rv = u2;
+        return true;
+    }
+    if (t1 == t) {
+        rv = u1;
+        return true;
+    }
+    // the time is in a gap
+    rv = fold ? std::min(u1, u2) : std::max(u1, u2);
+    return true;
+}
+
+//! returns the fold of the local wall clock time of the given seconds since the epoch, as datetime.fromtimestamp()
+//! does (1 for the later instant of an ambiguous time); local is the local wall clock time of u
+static bool qore_python_local_fold(int64 u, int64 local) {
+    int64 probe;
+    if (!qore_python_local_seconds(u - QORE_PYTHON_MAX_FOLD_SECONDS, probe)) {
+        return false;
+    }
+    int64 transition = local - probe - QORE_PYTHON_MAX_FOLD_SECONDS;
+    return transition < 0 && qore_python_local_seconds(u + transition, probe) && probe == local;
+}
+
 DateTimeNode* QorePythonProgram::getQoreDateTimeFromDelta(PyObject* val) {
     assert(PyDelta_Check(val));
     // datetime.timedelta keeps its seconds and microseconds positive (-1 second is days=-1, seconds=86399); the Qore
@@ -3431,8 +3527,9 @@ DateTimeNode* QorePythonProgram::getQoreDateTimeFromDelta(PyObject* val) {
 DateTimeNode* QorePythonProgram::getQoreDateTimeFromDateTime(ExceptionSink* xsink, PyObject* val) {
     assert(PyDateTime_Check(val));
 
-    // a naive datetime is in the current time zone; nullptr is UTC
-    const AbstractQoreZoneInfo* zone = currentTZ();
+    // the zone of an aware datetime; nullptr is UTC
+    const AbstractQoreZoneInfo* zone = nullptr;
+    bool aware = false;
 
     // Use the PyDateTime_DATE_GET_TZINFO() macro to directly access the tzinfo field.
     //
@@ -3454,14 +3551,34 @@ DateTimeNode* QorePythonProgram::getQoreDateTimeFromDateTime(ExceptionSink* xsin
             qore_python_conversion_error(this, xsink);
             return nullptr;
         }
-        if (*delta != Py_None && getQoreOffsetZone(xsink, *delta, zone)) {
-            return nullptr;
+        if (*delta != Py_None) {
+            if (getQoreOffsetZone(xsink, *delta, zone)) {
+                return nullptr;
+            }
+            aware = true;
         }
     }
 
-    return DateTimeNode::makeAbsolute(zone, PyDateTime_GET_YEAR(val), PyDateTime_GET_MONTH(val),
-        PyDateTime_GET_DAY(val), PyDateTime_DATE_GET_HOUR(val), PyDateTime_DATE_GET_MINUTE(val),
-        PyDateTime_DATE_GET_SECOND(val), PyDateTime_DATE_GET_MICROSECOND(val));
+    if (aware) {
+        return DateTimeNode::makeAbsolute(zone, PyDateTime_GET_YEAR(val), PyDateTime_GET_MONTH(val),
+            PyDateTime_GET_DAY(val), PyDateTime_DATE_GET_HOUR(val), PyDateTime_DATE_GET_MINUTE(val),
+            PyDateTime_DATE_GET_SECOND(val), PyDateTime_DATE_GET_MICROSECOND(val));
+    }
+
+    // a naive datetime is Python's local time (the local time of the process), with Python's semantics for ambiguous
+    // and nonexistent times (fold); the instant is given in the current time zone (of the Program), which can differ
+    int64 wall = qore_python_days_from_civil(PyDateTime_GET_YEAR(val), PyDateTime_GET_MONTH(val),
+        PyDateTime_GET_DAY(val)) * 86400 + PyDateTime_DATE_GET_HOUR(val) * 3600
+        + PyDateTime_DATE_GET_MINUTE(val) * 60 + PyDateTime_DATE_GET_SECOND(val);
+    int64 secs;
+    if (!qore_python_local_to_seconds(wall, PyDateTime_DATE_GET_FOLD(val), secs)) {
+        xsink->raiseException("PYTHON-DATETIME-ERROR", "cannot convert the naive datetime %04d-%02d-%02d "
+            "%02d:%02d:%02d to Qore: its local time cannot be determined", PyDateTime_GET_YEAR(val),
+            PyDateTime_GET_MONTH(val), PyDateTime_GET_DAY(val), PyDateTime_DATE_GET_HOUR(val),
+            PyDateTime_DATE_GET_MINUTE(val), PyDateTime_DATE_GET_SECOND(val));
+        return nullptr;
+    }
+    return DateTimeNode::makeAbsolute(currentTZ(), secs, PyDateTime_DATE_GET_MICROSECOND(val));
 }
 
 DateTimeNode* QorePythonProgram::getQoreDateTimeFromDate(PyObject* val) {
@@ -4086,15 +4203,19 @@ PyObject* QorePythonProgram::getPythonDateTime(ExceptionSink* xsink, const DateT
     qore_tm info;
     dt->getInfo(info);
 
-    // a date in the current time zone is a naive datetime (Python's local time), which is converted back in the
-    // current time zone; a date in another zone is an aware datetime with the date's UTC offset, so that the instant
-    // is preserved
-    bool naive = info.zone == currentTZ();
+    // a date with the UTC offset of Python's local time (the local time of the process) is a naive datetime, with
+    // the fold of an ambiguous time, as given by datetime.fromtimestamp(); other dates (ex: in the zone of a Program
+    // that differs from the local zone of the process) are aware datetimes with the date's UTC offset, so that the
+    // instant is preserved
+    int64 secs = dt->getEpochSecondsUTC();
+    int64 local;
+    bool naive = qore_python_local_seconds(secs, local) && local - secs == info.utc_secs_east;
+    int fold = naive && qore_python_local_fold(secs, local) ? 1 : 0;
 
     if (PyDateTimeAPI) {
         if (naive) {
-            return PyDateTime_FromDateAndTime(info.year, info.month, info.day, info.hour, info.minute, info.second,
-                info.us);
+            return PyDateTime_FromDateAndTimeAndFold(info.year, info.month, info.day, info.hour, info.minute,
+                info.second, info.us, fold);
         }
         QorePythonReferenceHolder offset(PyDelta_FromDSU(0, info.utc_secs_east, 0));
         QorePythonReferenceHolder tz(offset ? PyTimeZone_FromOffset(*offset) : nullptr);
@@ -4127,8 +4248,13 @@ PyObject* QorePythonProgram::getPythonDateTime(ExceptionSink* xsink, const DateT
             return nullptr;
         }
     }
-    return PyObject_CallFunction(*datetime_cls, "iiiiiiiO", info.year, info.month, info.day, info.hour, info.minute,
-        info.second, info.us, *tz);
+    QorePythonReferenceHolder args(Py_BuildValue("iiiiiiiO", info.year, info.month, info.day, info.hour,
+        info.minute, info.second, info.us, *tz));
+    QorePythonReferenceHolder kwargs(args ? Py_BuildValue("{s:i}", "fold", fold) : nullptr);
+    if (!kwargs) {
+        return nullptr;
+    }
+    return PyObject_Call(*datetime_cls, *args, *kwargs);
 }
 
 PyObject* QorePythonProgram::getPythonCallable(ExceptionSink* xsink, const ResolvedCallReferenceNode* call) {
@@ -4369,7 +4495,21 @@ QoreNumberNode* QorePythonProgram::getQoreNumberFromDecimal(ExceptionSink* xsink
         qore_python_conversion_error(this, xsink);
         return nullptr;
     }
-    return new QoreNumberNode(cstr);
+    SimpleRefHolder<QoreNumberNode> rv(new QoreNumberNode(cstr));
+    // a finite Decimal outside the exponent range of a Qore number would be an infinity or zero
+    if (rv->inf() || rv->zero()) {
+        QorePythonReferenceHolder same(PyObject_CallMethod(val, rv->inf() ? "is_infinite" : "is_zero", nullptr));
+        if (!same) {
+            qore_python_conversion_error(this, xsink);
+            return nullptr;
+        }
+        if (*same != Py_True) {
+            xsink->raiseException("PYTHON-VALUE-ERROR", "cannot convert the Python Decimal '%s' to a Qore number: "
+                "it is outside the exponent range of a Qore number", cstr);
+            return nullptr;
+        }
+    }
+    return rv.release();
 }
 
 QoreValue QorePythonProgram::callFunction(ExceptionSink* xsink, const QoreString& func_name, const QoreListNode* args,

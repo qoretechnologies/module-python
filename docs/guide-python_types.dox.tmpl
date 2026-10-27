@@ -24,7 +24,9 @@
 
     A %Qore \c number outside the 64-bit signed integer range with an integral value that it holds exactly (as it holds
     the %Python \c int values that it is converted from) is a %Python \c int; all other numbers, including NaN and
-    infinity, are \c decimal.Decimal values, so that both types round-trip.  A number converted from a \c float holds a
+    infinity, are \c decimal.Decimal values, so that %Python \c int values and non-integral \c decimal.Decimal values
+    round-trip with their types; an integral \c decimal.Decimal outside the 64-bit signed integer range (ex:
+    \c Decimal('1E+30')) comes back as an \c int with the same value.  A number converted from a \c float holds a
     binary approximation, and its \c decimal.Decimal has the shortest decimal digits that give the same value.
 
     A value of any other %Qore type (ex: a reference) raises a \c PYTHON-VALUE-ERROR exception.
@@ -35,10 +37,12 @@
     class that it is bound to (ex: the class of a class method).  A %Python function of another interpreter is called
     from %Python through its %Qore call reference, which takes no keyword arguments.
 
-    An absolute %Qore date/time value in the current time zone is a naive \c datetime.datetime (%Python's local time);
-    a value in another time zone is an aware \c datetime.datetime with the value's UTC offset, so that the instant is
-    preserved.  A relative date/time value is a \c datetime.timedelta; years are converted to 365 days and months to
-    30 days.
+    An absolute %Qore date/time value with the UTC offset of %Python's local time (the local time zone of the process)
+    is a naive \c datetime.datetime, with \c fold set for the second occurrence of an ambiguous local time, as given
+    by \c datetime.datetime.fromtimestamp(); a value with another UTC offset (ex: in the time zone of a %Program that
+    differs from the local time zone of the process) is an aware \c datetime.datetime with the value's UTC offset, so
+    that the instant is preserved.  A relative date/time value is a \c datetime.timedelta; years are converted to 365
+    days and months to 30 days.
 
     @note \c datetime.datetime supports years 1 - 9999 only; converting an absolute %Qore date/time value with a
     year outside this range raises an exception, as the value has no %Python representation.  When a value that cannot
@@ -79,8 +83,14 @@
 
     A \c dict whose keys give the same %Qore hash key (ex: \c 1 and \c '1') raises a \c PYTHON-VALUE-ERROR exception.
 
-    A naive \c datetime.datetime is in the current time zone; an aware one is in a time zone with its UTC offset (UTC
-    for an offset of 0), and an offset with microseconds, which a %Qore time zone cannot have, raises a
+    A finite \c decimal.Decimal outside the exponent range of a %Qore number (ex: \c Decimal('1E+400000000')) raises a
+    \c PYTHON-VALUE-ERROR exception, as does an \c int with more significant bits than the maximum precision of a
+    %Qore number.
+
+    A naive \c datetime.datetime is %Python's local time (the local time zone of the process), with %Python's
+    semantics for ambiguous and nonexistent local times (\c fold, as for \c datetime.datetime.timestamp()), and is
+    given in the current time zone (of the %Program), which can differ; an aware one is in a time zone with its UTC
+    offset (UTC for an offset of 0), and an offset with microseconds, which a %Qore time zone cannot have, raises a
     \c PYTHON-DATETIME-ERROR exception.  A \c datetime.time is a time of day on 1970-01-01, as with the time values of
     %Qore's database drivers, in the time zone of its UTC offset or in the current time zone; it is converted back to
     %Python as a \c datetime.datetime.  A \c datetime.timedelta is a relative date/time value whose components all
