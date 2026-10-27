@@ -187,6 +187,15 @@
         copies get the slots of the objects
       - the call stacks of %Qore exceptions have each frame once also through attribute access, generators and the
         constructors of %Qore classes inheriting %Python classes
+    - %Python lists and dicts can be passed to %Qore parameters with typed containers (ex: \c list<int>,
+      \c hash<string, string>) when their values match, with %Qore's matching of untyped containers
+      (<a href="https://github.com/qoretechnologies/qore/issues/5541">issue 5541</a>); they gave
+      \c RUNTIME-OVERLOAD-ERROR (<a href="https://github.com/qoretechnologies/qore/issues/5531">issue 5531</a>)
+    - the members of the %Qore base classes of the %Qore classes of %Python classes are initialized when %Qore creates
+      the objects, with %Qore's initialization of the members of the parents of classes created at runtime
+      (<a href="https://github.com/qoretechnologies/qore/issues/5554">issue 5554</a>); they were not initialized, and
+      a read in \c __init__() raised \c OBJECT-INCOMPATIBLE
+      (<a href="https://github.com/qoretechnologies/qore/issues/5544">issue 5544</a>)
     - known issue: in a %Python process that uses %Qore through the \c qoreloader module, \c os.fork() crashes the
       child while %Qore programs exist (each has a %Python sub-interpreter), as %Python does with any sub-interpreter
       (<a href="https://github.com/python/cpython/issues/139759">CPython issue 139759</a>); %Qore's \c fork() can be

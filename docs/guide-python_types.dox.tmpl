@@ -81,6 +81,11 @@
     \c complex, or objects supporting the buffer protocol other than \c memoryview, such as \c array.array) are
     converted to a %Qore object using a dynamically-created class that wraps the %Python type or class.
 
+    A \c list, \c tuple or \c dict is a \c list<auto> or \c hash<auto>, which can be passed to a %Qore parameter
+    with a typed container (ex: \c list<int>, \c hash<string, string>, \c list<list<int>>) when its values match the
+    types of the container, as with an assignment in %Qore code; values that do not match select no variant
+    (\c RUNTIME-OVERLOAD-ERROR).
+
     A \c dict whose keys give the same %Qore hash key (ex: \c 1 and \c '1') raises a \c PYTHON-VALUE-ERROR exception.
 
     A finite \c decimal.Decimal outside the exponent range of a %Qore number (ex: \c Decimal('1E+400000000')) raises a

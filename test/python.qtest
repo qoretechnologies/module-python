@@ -239,6 +239,30 @@ string sub make_python_literal(string s) {
     return "\"" + replace(replace(replace(s, "\\", "\\\\"), "\"", "\\\""), "\n", "\\n") + "\"";
 }
 
+#! takes typed containers; used to check that Python lists and dicts can be passed to typed container parameters
+string sub python_test_typed_list(list<int> l) {
+    return sprintf("%s %y", l.fullType(), l);
+}
+
+string sub python_test_typed_hash(hash<string, string> h) {
+    return sprintf("%s %y", h.fullType(), h);
+}
+
+string sub python_test_nested_list(list<list<int>> l) {
+    return sprintf("%s %y", l.fullType(), l);
+}
+
+string sub python_test_hash_of_lists(hash<string, list<string>> h) {
+    return sprintf("%s %y", h.fullType(), h);
+}
+
+#! has a method with a typed container parameter (see python_test_typed_list())
+class PythonTypedParams {
+    string names(list<string> l) {
+        return l.join(",");
+    }
+}
+
 #! returns its argument; used to check that values round-trip through Qore
 auto sub python_test_echo(auto v) {
     return v;
@@ -403,6 +427,8 @@ class PythonTest inherits Test {
             \localTimeConversionTest());
         addTestCase("exceptions of the save object callback; copies of Python objects; named tuple fields",
             \copyAndCallbackTest());
+        addTestCase("Python lists and dicts passed to typed container parameters", \typedContainerParamTest());
+        addTestCase("members of the Qore base classes of the Qore classes of Python classes", \baseMemberInitTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -4752,6 +4778,71 @@ object sub new_q() { return new Q(); }", "copy-slots");
         # named tuples
         assertEq({"x": 1, "y": 2}, pp.callFunction("point"));
         assertThrows("PYTHON-VALUE-ERROR", "field 'a' is given more than once", \pp.callFunction(), "fields");
+    }
+
+    # Python lists and dicts (list<auto> and hash<auto> in Qore) can be passed to parameters with typed containers when
+    # their values match, as with an assignment; values that do not match select no variant (issue 5531)
+    typedContainerParamTest() {
+        PythonProgram pp("
+from qore.__root__ import python_test_typed_list, python_test_typed_hash, python_test_nested_list
+from qore.__root__ import python_test_hash_of_lists, PythonTypedParams
+def go():
+    return [
+        python_test_typed_list([1, 2]),
+        python_test_typed_hash({'Content-Type': 'text/plain'}),
+        python_test_nested_list([[1, 2], [3]]),
+        python_test_hash_of_lists({'a': ['b', 'c']}),
+        PythonTypedParams().names(['x', 'y']),
+    ]
+def bad_list():
+    return python_test_typed_list([1, 'x'])
+def bad_hash():
+    return python_test_typed_hash({'a': 1})
+def round_trip(l):
+    return python_test_typed_list(l)
+", "typed-params.py");
+        assertEq((
+            "list<int> [1, 2]",
+            "hash<string, string> {Content-Type: \"text/plain\"}",
+            "list<list<int>> [[1, 2], [3]]",
+            "hash<string, list<string>> {a: [\"b\", \"c\"]}",
+            "x,y",
+        ), pp.callFunction("go"));
+        assertThrows("RUNTIME-OVERLOAD-ERROR", \pp.callFunction(), "bad_list");
+        assertThrows("RUNTIME-OVERLOAD-ERROR", \pp.callFunction(), "bad_hash");
+        # a Qore list<int> converted to Python and passed back
+        list<int> l = (3, 4);
+        assertEq("list<int> [3, 4]", pp.callFunction("round_trip", l));
+    }
+
+    # the members of the Qore base class of the Qore class of a Python class are initialized when Qore creates the
+    # object, and can be read and written from Qore and from Python, also in __init__() (they were not initialized,
+    # and a read in __init__() raised OBJECT-INCOMPATIBLE) (issue 5544)
+    baseMemberInitTest() {
+        Program pgm(PO_NEW_STYLE);
+        pgm.importClass("PythonDeleted::Tracked");
+        pgm.issueModuleCmd("python", "import-ns PythonDeleted x");
+        pgm.issueModuleCmd("python", "parse base-members.py import qoreloader
+class PyTracked(x.Tracked):
+    def __init__(self):
+        super().__init__()
+        self.seen = self.x
+        self.x = 5
+    def get(self):
+        return (self.seen, self.x)
+    def set_bad(self):
+        self.x = 'abc'
+");
+        pgm.issueModuleCmd("python", "export-class PyTracked");
+        pgm.parse("object sub make() { return new PyTracked(); }", "base-members");
+        object o = pgm.callFunction("make");
+        assertEq((1, 5), o.get());
+        assertEq(5, o.x);
+        o.x = 7;
+        assertEq((1, 7), o.get());
+        # the type of the member applies to writes from Python
+        assertThrows("RUNTIME-TYPE-ERROR", \o.set_bad());
+        assertEq(7, o.x);
     }
 
     typedMemberWriteTest() {
