@@ -322,6 +322,11 @@ class PythonGilTestLocker {
 
 class PythonTest inherits Test {
     public {
+        #! the iterations after which a thread spinning in Python code stops by itself (see crossInterpreterGilTest())
+        /** much longer than a call takes when the thread is asked to release the GIL
+        */
+        const GilSpinBound = 300000000;
+
         const ExprTests = (
             {"expr": "1 + 1", "val": 2},
             {"expr": "1.1", "val": 1.1},
@@ -387,6 +392,8 @@ class PythonTest inherits Test {
         addTestCase("deleting a program cancels the Qore calls of its threads", \deleteCancelsQoreCallsTest());
         addTestCase("the file names of Python frames are normalized", \pythonFrameFileNameTest());
         addTestCase("calls into a Python program while a thread runs in another one", \crossInterpreterGilTest());
+        addTestCase("a Qore thread that called a Python program ends while a thread runs in another one",
+            \threadExitGilTest());
         addTestCase("Python writes to the members of Qore objects", \typedMemberWriteTest());
         addTestCase("Python objects of deleted and uninitialized Qore objects", \deletedObjectTest());
         addTestCase("callables round-trip between Qore and Python; bound methods keep their object or class",
@@ -3607,16 +3614,21 @@ def start(cb):
         if (Python::FreeThreading) {
             testSkip("Python threads in sub-interpreters not supported with free-threading (PEP 703)");
         }
-        PythonProgram a("
+        # the thread spins until it is stopped or reaches its bound, so that a call that waits for it fails instead of
+        # waiting forever; end() returns why it stopped
+        PythonProgram a(sprintf("
 import threading
 stop = False
 thread = None
+reason = None
 def spin(started):
     def run():
+        global reason
         started.dec()
         i = 0
-        while not stop:
+        while not stop and i < %d:
             i += 1
+        reason = 'stopped' if i < %d else 'bound'
     global thread
     thread = threading.Thread(target=run)
     thread.start()
@@ -3624,14 +3636,33 @@ def end():
     global stop
     stop = True
     thread.join()
-", "gil-spin.py");
-        PythonProgram b("def f():\n    return 'called'\n", "gil-call.py");
+    return reason
+", GilSpinBound, GilSpinBound), "gil-spin.py");
+        PythonProgram b("def f():\n    return 'called'\ndef nested(c):\n    return c()\n", "gil-call.py");
+        PythonProgram c("def g():\n    return 'nested'\n", "gil-nested.py");
         Counter started(1);
         a.callFunction("spin", started);
         started.waitForZero();
-        # the thread spins until it is stopped: previously this call waited forever
+        # the thread spins until it is stopped: previously this call waited forever; with Python 3.12, releasing the
+        # call's context swaps the thread state, which takes the GIL again, and waited until the thread ended when it
+        # took the GIL in the meantime
         assertEq("called", b.callFunction("f"));
-        a.callFunction("end");
+        # contexts of two other programs: b calls Qore, which calls c, without the GIL, and takes it again when the
+        # call returns
+        assertEq("nested", b.callFunction("nested", auto sub () { return c.callFunction("g"); }));
+        assertEq("stopped", a.callFunction("end"));
+    }
+
+    # with Python 3.12, a Qore thread that called a Python program deletes its idle thread state when it ends, with the
+    # GIL, which it waited for until a thread running Python code in another program ended; the thread's cleanup ends
+    # before Qore exits, so the scenario runs in another process, which prints "stopped" if the thread spinning in the
+    # other program was stopped after the thread had ended, or "bound" if it reached its bound first
+    threadExitGilTest() {
+        if (Python::FreeThreading) {
+            testSkip("Python threads in sub-interpreters not supported with free-threading (PEP 703)");
+        }
+        string script = get_script_dir() + "python-gil-thread-exit.q";
+        assertEq("stopped\n", backquote(sprintf("qore %s 2>&1", script)));
     }
 
     # the file names of Python frames in the call stacks of Qore exceptions are normalized as by posixpath.normpath();

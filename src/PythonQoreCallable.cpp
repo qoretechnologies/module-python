@@ -154,7 +154,7 @@ PyObject* qore_callable_call(PyQoreCallable* self, PyObject* args, PyObject* kwa
     // the exception must be raised in the thread state that Python called us with
     PyThreadState* exit_tstate = qore_python_attached_thread_state();
     if (exit_tstate != entry_tstate) {
-        PyThreadState_Swap(entry_tstate);
+        qore_python_swap_thread_state(entry_tstate);
     }
 
     assert(xsink);

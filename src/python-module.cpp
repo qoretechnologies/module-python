@@ -168,7 +168,12 @@ namespace {
 // takes the GIL again with the thread state that the thread released to call Qore's fork() (see
 // QorePythonReleaseGilHelper), as the helper does when the call returns
 void python_fork_protocol_acquire(PyThreadState* tstate) {
-    PyEval_RestoreThread(tstate);
+    {
+        // a thread of another interpreter can hold the GIL; the helper's fork handlers run after this one (see
+        // qore_python_register_gil_switch_fork_handlers())
+        QorePythonGilWait gil_wait(tstate);
+        PyEval_RestoreThread(tstate);
+    }
     _QORE_SET_GIL_HELD(true);
     _qore_PyGILState_SetThisThreadState(tstate);
 }
@@ -248,7 +253,14 @@ int qore_python_register_fork_protocol(QoreString& err) {
         err.sprintf("cannot keep the module '%s' loaded: %s", info.dli_fname, dlerror());
         return -1;
     }
-    int rc = pthread_atfork(python_fork_protocol_prepare, python_fork_protocol_parent, python_fork_protocol_child);
+    // registered first, so that its prepare handler runs after the one of the protocol, which takes the GIL in a
+    // QorePythonGilWait section
+    int rc = qore_python_register_gil_switch_fork_handlers();
+    if (rc) {
+        err.sprintf("cannot register the fork handlers of the module: %s", strerror(rc));
+        return -1;
+    }
+    rc = pthread_atfork(python_fork_protocol_prepare, python_fork_protocol_parent, python_fork_protocol_child);
     if (rc) {
         err.sprintf("cannot register the fork handlers of the module: %s", strerror(rc));
         return -1;
@@ -1472,9 +1484,9 @@ QorePythonGilWait::QorePythonGilWait(PyThreadState* target) {
     registered = true;
     if (state.waiting.size() == 1) {
         if (!state.running && !state.stop) {
-            static bool fork_handlers = !pthread_atfork(gil_switch_fork_prepare, gil_switch_fork_parent,
-                gil_switch_fork_child);
-            (void)fork_handlers;
+            // normally registered when the module is initialized, as a thread must not register fork handlers while
+            // fork handlers run (see qore_python_register_gil_switch_fork_handlers())
+            qore_python_register_gil_switch_fork_handlers();
             // if the thread cannot be created, no request is made
             state.running = !pthread_create(&state.thread, nullptr, gil_switch_main, nullptr);
         }
@@ -1494,6 +1506,11 @@ QorePythonGilWait::~QorePythonGilWait() {
     state.sections.erase(i);
 }
 
+int qore_python_register_gil_switch_fork_handlers() {
+    static int rc = pthread_atfork(gil_switch_fork_prepare, gil_switch_fork_parent, gil_switch_fork_child);
+    return rc;
+}
+
 void qore_python_stop_gil_switch() {
     GilSwitchState& state = get_gil_switch_state();
     bool running;
@@ -1510,6 +1527,10 @@ void qore_python_stop_gil_switch() {
     }
 }
 #else
+int qore_python_register_gil_switch_fork_handlers() {
+    return 0;
+}
+
 void qore_python_stop_gil_switch() {
 }
 #endif
@@ -1762,7 +1783,11 @@ void qore_python_delete_idle_thread_state() {
         PyThreadState_Delete(tstate);
         return;
     }
-    PyEval_RestoreThread(tstate);
+    {
+        // a thread of another interpreter can hold the GIL (see QorePythonGilWait)
+        QorePythonGilWait gil_wait(tstate);
+        PyEval_RestoreThread(tstate);
+    }
     PyThreadState_Clear(tstate);
     // unbinds the state from the thread and releases the GIL
     PyThreadState_DeleteCurrent();
@@ -1886,7 +1911,7 @@ QorePythonGilHelper::~QorePythonGilHelper() {
         // in Python 3.11 if the GIL is not held properly (e.g., after PyInterpreterState_Delete).
         PyThreadState* current = _qore_PyCeval_GetThreadState();
         if (current != new_thread_state) {
-            PyThreadState_Swap(new_thread_state);
+            qore_python_swap_thread_state(new_thread_state);
         }
         qore_python_release_context();
         // _qore_release_thread_state already cleared _qore_tss_tstate to nullptr.

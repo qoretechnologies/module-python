@@ -120,7 +120,10 @@
     - with %Python 3.11 and 3.12, a thread that runs %Python code without blocking in one
       @ref Python::PythonProgram "PythonProgram" no longer keeps calls into other programs, or the creation of new
       ones, waiting until it releases the GIL by itself (see @ref python_threads_shared_gil;
-      <a href="https://github.com/qoretechnologies/qore/issues/5528">issue 5528</a>)
+      <a href="https://github.com/qoretechnologies/qore/issues/5528">issue 5528</a>); with %Python 3.12, this also
+      applies when a call returns from a program or switches between programs, when a %Qore thread that called
+      %Python code ends, when %Python code calls %Qore's \c fork(), and when a %Python reference is released without
+      the GIL, which could wait until that thread released the GIL by itself, intermittently or always
     - %Python writes to the members of %Qore objects apply the types of the members, as assignments in %Qore code do
       (values are converted or \c RUNTIME-TYPE-ERROR is raised; previously any value was stored, ex: a \c float in an
       \c int member); writes reach the member write gate of the %Qore class of a %Python object of another

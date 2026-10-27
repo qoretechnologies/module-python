@@ -786,7 +786,7 @@ PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* 
     // exception to be on the thread state it passed when calling us.
     PyThreadState* exit_tstate = qore_python_attached_thread_state();
     if (exit_tstate != entry_tstate) {
-        PyThreadState_Swap(entry_tstate);
+        qore_python_swap_thread_state(entry_tstate);
     }
 
     if (xsink) {
@@ -882,7 +882,7 @@ PyObject* PythonQoreClass::exec_qore_static_method(const QoreMethod& m, PyObject
     // exception to be on the thread state it passed when calling us.
     PyThreadState* exit_tstate = qore_python_attached_thread_state();
     if (exit_tstate != entry_tstate) {
-        PyThreadState_Swap(entry_tstate);
+        qore_python_swap_thread_state(entry_tstate);
     }
 
     if (xsink) {

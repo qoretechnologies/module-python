@@ -26,6 +26,8 @@ class PythonForkTest inherits QUnit::Test {
             \hostedForkInterpreterTest());
         addTestCase("os.fork() in a Python process while a thread holds the mutex of the GIL",
             \hostedOsForkGilMutexTest());
+        addTestCase("Qore's fork() called from Python in a Python process while a thread runs in an interpreter of "
+            "Qore", \hostedForkSpinnerTest());
         set_return_value(main());
     }
 
@@ -352,6 +354,63 @@ _, status = os.waitpid(pid, 0)
 print('child: %s status: %d' % (data.decode().strip(), status))
 ");
         assertRegex("child: call: 42 status: 0", output);
+    }
+
+    # Qore's fork() called from Python in a Python process hosting Qore while a thread runs Python code without
+    # blocking in an interpreter of Qore: the module's fork handler takes the GIL for Python's fork protocol, which,
+    # with Python 3.11 and 3.12, waited until the thread released the GIL by itself, as the thread's interpreter was not
+    # asked to release it.  The thread is bounded, so that the test fails instead of waiting forever: the script prints
+    # "stopped" if the thread was stopped after the fork, or "bound" if it reached its bound first.
+    hostedForkSpinnerTest() {
+        if (!Option::HAVE_FORK) {
+            testSkip("fork() is not available");
+        }
+        if (Python::FreeThreading) {
+            testSkip("there is no GIL with free-threading (PEP 703)");
+        }
+        string output = runHosted("fork-spinner.py", "
+import os
+import qoreloader
+from qore.__root__.Qore import fork
+from qore.__root__.Python import PythonProgram
+
+p = PythonProgram('''
+import threading
+stop = False
+thread = None
+reason = None
+def spin():
+    started = threading.Event()
+    def run():
+        global reason
+        started.set()
+        i = 0
+        while not stop and i < 300000000:
+            i += 1
+        reason = 'stopped' if i < 300000000 else 'bound'
+    global thread
+    thread = threading.Thread(target=run)
+    thread.start()
+    started.wait()
+def end():
+    global stop
+    stop = True
+    thread.join()
+    return reason
+''', 'spin.py')
+p.callFunction('spin')
+pid = fork()
+if pid == 0:
+    os._exit(0)
+# stopped before os.waitpid(), which takes the GIL again in Python's own code: with Python 3.11 and 3.12, it waits until
+# the thread releases the GIL by itself
+reason = p.callFunction('end')
+os.waitpid(pid, 0)
+print('spinner: %s' % reason)
+");
+        # the child cannot return to Python code if the thread held the GIL when it was created, so its status is not
+        # checked
+        assertRegex("spinner: stopped", output);
     }
 
     # os.fork() in a Python process hosting Qore while another thread holds the mutex of the GIL, as a thread waiting

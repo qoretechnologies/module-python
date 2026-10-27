@@ -166,6 +166,30 @@ public:
 //! stops the helper thread of QorePythonGilWait; called when the module is deleted
 DLLLOCAL void qore_python_stop_gil_switch();
 
+//! registers the fork handlers of the helper thread of QorePythonGilWait once; returns 0 or an error number
+/** Called before the fork handlers of Python's fork protocol are registered, whose prepare handler takes the GIL in a
+    QorePythonGilWait section: prepare handlers run in the reverse order of their registration, so the helper's lock,
+    which its prepare handler takes, is free while the GIL is taken.  Does nothing with other Python versions.
+*/
+DLLLOCAL int qore_python_register_gil_switch_fork_handlers();
+
+//! Attaches a thread state to the thread with PyThreadState_Swap() and returns the state that was attached
+/** With Python 3.12, PyThreadState_Swap() releases the GIL held with the attached state and takes it again with the
+    new state, also when the state does not change, so the thread waits for the GIL in a QorePythonGilWait section,
+    like every other acquisition of the GIL: otherwise a thread of another interpreter that runs Python code without
+    blocking keeps the GIL, and the thread waits until that code ends.  With Python 3.11, the attached state is changed
+    without releasing the GIL.
+*/
+DLLLOCAL static inline PyThreadState* qore_python_swap_thread_state(PyThreadState* tstate) {
+#if defined(QORE_PYTHON_GIL_SWITCH) && PY_VERSION_HEX >= 0x030C0000
+    if (tstate) {
+        QorePythonGilWait gil_wait(tstate);
+        return PyThreadState_Swap(tstate);
+    }
+#endif
+    return PyThreadState_Swap(tstate);
+}
+
 #if PY_MINOR_VERSION >= 14
 // Python 3.14+ (GIL or free-threading)
 #include "python314_internals.h"
@@ -332,7 +356,7 @@ public:
         if (_qore_PyCeval_GetGilLockedStatus()) {
             // GIL is already held (by nested code) - just swap to our thread state
             printd(5, "~QorePythonReleaseGilHelper: GIL already held, swapping to saved tstate\n");
-            PyThreadState_Swap(_save);
+            qore_python_swap_thread_state(_save);
         } else {
             // GIL is not held - acquire it
             QorePythonGilWait gil_wait(_save);
@@ -684,7 +708,12 @@ public:
             }
 #else
             if (Py_IsInitialized() && !_qore_has_gil(_qore_PyRuntimeGILState_GetThreadState())) {
-                PyGILState_STATE gstate = PyGILState_Ensure();
+                PyGILState_STATE gstate;
+                {
+                    // takes the GIL with the state bound to the thread, or with a new state
+                    QorePythonGilWait gil_wait(PyGILState_GetThisThreadState());
+                    gstate = PyGILState_Ensure();
+                }
                 py_deref();
                 PyGILState_Release(gstate);
             } else {

@@ -81,7 +81,9 @@ p.callFunction("join", t);
     @ref Python::PythonProgram "PythonProgram" does not keep calls into other programs (or the creation of a new
     one) waiting, the module asks the thread that holds the GIL to release it while a thread waits for it, repeating
     the request every switch interval (5 ms) as %Python's own wait does, with a helper thread that runs only while
-    threads wait.  %Python 3.13 and later release the GIL to waiting threads of any interpreter.
+    threads wait.  This applies to every wait for the GIL, including, with %Python 3.12, the waits when a thread
+    changes its %Python thread state (ex: when a call into a program returns) and when a %Qore thread that called
+    %Python code ends.  %Python 3.13 and later release the GIL to waiting threads of any interpreter.
 
     @section python_interrupts Interrupts, Deletion and Signals
 

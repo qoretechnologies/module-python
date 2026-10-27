@@ -191,8 +191,8 @@ DLLLOCAL static inline PyThreadState* _qore_PyCeval_SwapThreadState(PyThreadStat
 
 #define _QORE_PYTHON_REENABLE_GIL_CHECK /* no-op in bundled internals - check is always enabled */
 
-// In GIL-enabled mode, use standard PyThreadState_Swap
-#define _QORE_PYTHREAD_STATE_SWAP(new_state) PyThreadState_Swap(new_state)
+// PyThreadState_Swap() releases the GIL and takes it again (see qore_python_swap_thread_state())
+#define _QORE_PYTHREAD_STATE_SWAP(new_state) qore_python_swap_thread_state(new_state)
 
 
 // Thread state management functions for GIL-enabled Python

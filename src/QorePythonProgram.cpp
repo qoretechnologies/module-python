@@ -979,7 +979,7 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                     return;
                 }
                 qore_py_set_bound_gilstate(sub_tstate, 0);
-                PyThreadState* old_tstate = PyThreadState_Swap(sub_tstate);
+                PyThreadState* old_tstate = qore_python_swap_thread_state(sub_tstate);
                 _qore_PyGILState_SetThisThreadState(sub_tstate);
                 py_thr_set_t states;
                 {
@@ -1049,7 +1049,7 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
                 }
                 initial_thread_state = nullptr;
                 interpreter = nullptr;
-                PyThreadState_Swap(old_tstate);
+                qore_python_swap_thread_state(old_tstate);
                 _qore_PyGILState_SetThisThreadState(old_tstate);
             }
             // Signal that an interpreter has been destroyed - must be AFTER deletion
@@ -1811,7 +1811,7 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         g_state = PyGILState_LOCKED;
         // PyThreadState_Swap updates both the attached state and autoTSSkey
         if (attached != python) {
-            PyThreadState_Swap(python);
+            qore_python_swap_thread_state(python);
         }
     } else {
         // We don't have the GIL - acquire it
@@ -2001,7 +2001,7 @@ void QorePythonProgram::releaseContext(const QorePythonThreadInfo& oldstate) con
         // in Python 3.11 if the GIL is not held properly (e.g., after PyInterpreterState_Delete).
         PyThreadState* current = _qore_PyCeval_GetThreadState();
         if (current != python) {
-            PyThreadState_Swap(python);
+            qore_python_swap_thread_state(python);
         }
         qore_python_release_context();
         // NOTE we cannot assert !PyGILState_Check() here, as we have released the GIL, and another thread may have
@@ -5841,7 +5841,7 @@ PyObject* QorePythonProgram::callQoreOverride(PyObject* name, PyObject* args) {
     // the exception must be raised in the thread state that Python called us with
     PyThreadState* exit_tstate = qore_python_attached_thread_state();
     if (exit_tstate != entry_tstate) {
-        PyThreadState_Swap(entry_tstate);
+        qore_python_swap_thread_state(entry_tstate);
     }
     assert(xsink);
     pypgm->raisePythonException(xsink);
