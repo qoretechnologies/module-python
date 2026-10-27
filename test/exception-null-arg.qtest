@@ -1,0 +1,102 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# Tests a Qore exception with NULL as its argument or description raised in Python: the QoreException has the same
+# attributes and arguments in every execution mode, as in the AST interpreter.  The AST interpreter and the IR and JIT
+# engines hold a literal NULL differently, so the exceptions are thrown from code parsed in each execution mode: from
+# functions and methods, with a literal NULL and NULL from a variable.
+
+%modern
+
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires python
+%requires QUnit
+
+%exec-class PythonExceptionNullArgTest
+
+class PythonExceptionNullArgTest inherits QUnit::Test {
+    public {
+        #! the execution modes that the exceptions are thrown in
+        const Modes = {"ast": EM_AST, "ir": EM_IR, "jit": EM_JIT, "tiered": EM_TIERED};
+
+        #! the Python code that describes the QoreException raised by a Qore callable
+        const PythonCode = "from qoreloader import QoreException
+def describe(f):
+    try:
+        f()
+    except QoreException as e:
+        return {'err': e.err, 'desc': e.desc, 'arg_is_none': e.arg is None, 'args': list(e.args), 'str': str(e)}
+";
+
+        #! the Qore code run in each execution mode; each function returns the callable that throws
+        const QoreCode = "%modern
+code sub arg_literal() {
+    return sub () { throw \"NULL-ARG\", \"null arg\", NULL; };
+}
+code sub arg_variable() {
+    auto n = NULL;
+    return sub () { throw \"NULL-ARG\", \"null arg\", n; };
+}
+code sub desc_literal() {
+    return sub () { throw \"NULL-DESC\", NULL; };
+}
+code sub desc_variable() {
+    auto n = NULL;
+    return sub () { throw \"NULL-DESC\", n; };
+}
+class Thrower {
+    static code argLiteral() {
+        return sub () { throw \"NULL-ARG\", \"null arg\", NULL; };
+    }
+    code descLiteral() {
+        return sub () { throw \"NULL-DESC\", NULL; };
+    }
+}
+code sub method_arg_literal() {
+    return Thrower::argLiteral();
+}
+code sub method_desc_literal() {
+    return (new Thrower()).descLiteral();
+}
+";
+
+        #! the QoreException of a NULL argument
+        const NullArg = {
+            "err": "NULL-ARG",
+            "desc": "null arg",
+            "arg_is_none": True,
+            "args": ("NULL-ARG", "null arg"),
+            "str": "NULL-ARG: null arg",
+        };
+
+        #! the QoreException of a NULL description
+        const NullDesc = {
+            "err": "NULL-DESC",
+            "desc": NOTHING,
+            "arg_is_none": True,
+            "args": ("NULL-DESC",),
+            "str": "NULL-DESC",
+        };
+    }
+
+    constructor() : Test("Python exception NULL argument test", "1.0") {
+        addTestCase("a Qore exception with a NULL argument or description in each execution mode", \nullTest());
+        set_return_value(main());
+    }
+
+    nullTest() {
+        PythonProgram py(PythonCode, "null_arg.py");
+        foreach hash<auto> mode in (Modes.pairIterator()) {
+            Program pgm();
+            pgm.setExecMode(mode.value);
+            pgm.parse(QoreCode, "null-arg-" + mode.key);
+            foreach string func in ("arg_literal", "arg_variable", "method_arg_literal") {
+                assertEq(NullArg, py.callFunction("describe", pgm.callFunction(func)), mode.key + " " + func);
+            }
+            foreach string func in ("desc_literal", "desc_variable", "method_desc_literal") {
+                assertEq(NullDesc, py.callFunction("describe", pgm.callFunction(func)), mode.key + " " + func);
+            }
+        }
+    }
+}
