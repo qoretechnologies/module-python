@@ -59,6 +59,8 @@ struct QorePythonInterpreterTypes {
     PyObject* java_loader_obj = nullptr;
     //! the interpreter that the types belong to, while they are registered
     PyInterpreterState* interp = nullptr;
+    //! the identifier of the interpreter, which is unique, unlike the address of the interpreter
+    int64_t interp_id = -1;
 };
 
 //! Creates the types of the current interpreter and registers them; must be called with the GIL held

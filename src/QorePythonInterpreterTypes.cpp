@@ -33,10 +33,13 @@
 
 #include <atomic>
 #include <map>
+#include <utility>
 
 namespace {
 //! the types of the interpreters that initialized the qoreloader module; guarded by types_lock
-typedef std::map<PyInterpreterState*, QorePythonInterpreterTypes*> types_map_t;
+//! the identifier of the interpreter is kept with the types, which are not used if the identifier differs: they belong
+//! to an interpreter that ended at the same address without freeing the module, whose types may be gone
+typedef std::map<PyInterpreterState*, std::pair<int64_t, QorePythonInterpreterTypes*>> types_map_t;
 types_map_t types_map;
 QoreThreadLock types_lock;
 QoreForkHandlerRegistration* types_lock_fork_reg = nullptr;
@@ -48,6 +51,7 @@ std::atomic<unsigned long> types_generation{0};
 //! the types last found by a thread
 struct TypesCache {
     PyInterpreterState* interp = nullptr;
+    int64_t interp_id = -1;
     unsigned long generation = 0;
     const QorePythonInterpreterTypes* types = nullptr;
 };
@@ -73,6 +77,22 @@ int set_loader(PyObject*& target, PyTypeObject* type) {
 
 int qore_python_interpreter_types_init(QorePythonInterpreterTypes& types) {
     assert(!types.interp);
+    PyInterpreterState* interp = PyInterpreterState_Get();
+    int64_t interp_id = PyInterpreterState_GetID(interp);
+    // the module can be initialized again in an interpreter (ex: after it was removed from sys.modules) only once the
+    // module initialized before has been freed: the Python types of Qore classes made by its program derive from its
+    // types, which would no longer be found; the types of an interpreter that ended without freeing the module (ex:
+    // an interpreter left in memory, or deleted in a child of fork()) are replaced, as the address of an interpreter
+    // can be the one of an interpreter that ended
+    {
+        AutoLocker al(types_lock);
+        types_map_t::const_iterator i = types_map.find(interp);
+        if (i != types_map.end() && i->second.first == interp_id) {
+            PyErr_SetString(PyExc_ImportError, "the qoreloader module is already initialized in this interpreter; it "
+                "cannot be initialized again before the module initialized before is freed");
+            return -1;
+        }
+    }
     if (set_type(types.qore_object_base, PythonQoreClass::createBaseType())
         || set_type(types.qore_callable, qore_python_create_callable_type())
         || set_type(types.module_namespace, ModuleNamespace_CreateType())
@@ -86,13 +106,12 @@ int qore_python_interpreter_types_init(QorePythonInterpreterTypes& types) {
         return -1;
     }
 
-    PyInterpreterState* interp = PyInterpreterState_Get();
     bool registered;
     {
         AutoLocker al(types_lock);
         // memory errors leave the types unregistered
         try {
-            types_map[interp] = &types;
+            types_map[interp] = std::make_pair(interp_id, &types);
             registered = true;
         } catch (...) {
             registered = false;
@@ -104,6 +123,7 @@ int qore_python_interpreter_types_init(QorePythonInterpreterTypes& types) {
         return -1;
     }
     types.interp = interp;
+    types.interp_id = interp_id;
     // a thread can have cached that the interpreter has no types
     ++types_generation;
     return 0;
@@ -114,12 +134,13 @@ void qore_python_interpreter_types_clear(QorePythonInterpreterTypes& types) {
         {
             AutoLocker al(types_lock);
             types_map_t::iterator i = types_map.find(types.interp);
-            if (i != types_map.end() && i->second == &types) {
+            if (i != types_map.end() && i->second.second == &types) {
                 types_map.erase(i);
             }
         }
         ++types_generation;
         types.interp = nullptr;
+        types.interp_id = -1;
     }
     Py_CLEAR(types.java_loader_obj);
     Py_CLEAR(types.qore_loader_obj);
@@ -155,20 +176,23 @@ const QorePythonInterpreterTypes* qore_python_get_interpreter_types() {
         return nullptr;
     }
     PyInterpreterState* interp = qore_python_get_interpreter(tstate);
+    int64_t interp_id = PyInterpreterState_GetID(interp);
     unsigned long generation = types_generation.load();
     TypesCache& cache = types_cache;
-    if (cache.interp == interp && cache.generation == generation) {
+    if (cache.interp == interp && cache.interp_id == interp_id && cache.generation == generation) {
         return cache.types;
     }
     const QorePythonInterpreterTypes* types = nullptr;
     {
         AutoLocker al(types_lock);
         types_map_t::const_iterator i = types_map.find(interp);
-        if (i != types_map.end()) {
-            types = i->second;
+        // not the types of an interpreter that ended at the same address
+        if (i != types_map.end() && i->second.first == interp_id) {
+            types = i->second.second;
         }
     }
     cache.interp = interp;
+    cache.interp_id = interp_id;
     cache.generation = generation;
     cache.types = types;
     return types;

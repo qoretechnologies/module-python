@@ -17,8 +17,11 @@ assert c.getCount() == 0
 """
 
 
-def run_in_subinterpreter(code):
-    """runs the code in a new sub-interpreter, which is closed afterwards; returns None or the error's text"""
+def run_in_subinterpreter(code, threads=False):
+    """runs the code in a new sub-interpreter, which is closed afterwards; returns None or the error's text
+
+    threads: the code starts threads, which an isolated sub-interpreter of Python 3.11 does not allow
+    """
     try:
         from concurrent import interpreters
     except ImportError:
@@ -37,7 +40,7 @@ def run_in_subinterpreter(code):
     except ImportError:
         # Python 3.11 and 3.12
         import _xxsubinterpreters as low_level
-    interp = low_level.create()
+    interp = low_level.create(isolated=False) if threads and sys.version_info < (3, 12) else low_level.create()
     try:
         if hasattr(low_level, "exec"):
             rv = low_level.exec(interp, code)
@@ -83,10 +86,85 @@ def child_sub_first():
     for _ in range(3):
         error = run_in_subinterpreter(SUB_CODE)
         assert error is None, error
+    # a Python thread of a sub-interpreter calls Qore (methods and functions): the sub-interpreter can be closed (with
+    # Python 3.11 and 3.12, a second thread state of the thread was created, so that it could not end; with Python 3.11,
+    # the main thread then had no state for the GIL state API, and qoreloader's exit handler waited forever)
+    error = run_in_subinterpreter(SUB_THREAD_CODE, threads=True)
+    assert error is None, error
     # closing the sub-interpreters did not shut Qore down
     c.dec()
     assert c.getCount() == 0
     print("sub-first ok")
+
+
+SUB_THREAD_CODE = """
+import threading
+import qoreloader
+from qore.__root__.Qore.Thread import Counter
+from qore.__root__.Qore import get_module_hash
+out = []
+def run():
+    c = Counter(2)
+    c.dec()
+    out.append((c.getCount(), "python" in get_module_hash()))
+t = threading.Thread(target=run)
+t.start()
+t.join()
+assert out == [(1, True)], out
+"""
+
+
+def child_own_gil():
+    # with Python 3.12, a thread that waits for the GIL of an isolated sub-interpreter (its own GIL) does not make the
+    # thread that holds the shared GIL release it: the thread released it for a thread that never took it, and waited
+    import threading
+    import time
+    import _xxsubinterpreters as low_level
+    import qoreloader  # noqa: F401
+    with tempfile.TemporaryDirectory() as tmp:
+        flag = os.path.join(tmp, "flag")
+        sub = ("import os\nfrom qore.__root__.Qore import usleep\n"
+            "while not os.path.exists(%r):\n    usleep(0)\n" % flag)
+        started = threading.Event()
+
+        def runner():
+            interp = low_level.create(isolated=True)
+            try:
+                low_level.run_string(interp, "import qoreloader")
+                started.set()
+                low_level.run_string(interp, sub)
+            finally:
+                low_level.destroy(interp)
+        t = threading.Thread(target=runner)
+        t.start()
+        assert started.wait(60)
+        # the main thread runs Python code while the sub-interpreter calls Qore, then ends its loop
+        end = time.monotonic() + 0.5
+        n = 0
+        while time.monotonic() < end:
+            n += 1
+        Path(flag).write_text("")
+        t.join(60)
+        assert not t.is_alive()
+    print("own-gil ok")
+
+
+def child_reimport():
+    # the module cannot be initialized again in an interpreter while the module initialized before exists (the types
+    # of the Qore objects made by it were replaced, so that they were no longer recognized)
+    import qoreloader  # noqa: F401
+    from qore.__root__.Qore.Thread import Counter
+    c = Counter(1)
+    del sys.modules["qoreloader"]
+    try:
+        import qoreloader  # noqa: F401,F811
+        raise AssertionError("no ImportError")
+    except ImportError as error:
+        assert "already initialized" in str(error), str(error)
+    c.dec()
+    assert c.getCount() == 0
+    Counter(1).dec()
+    print("reimport ok")
 
 
 def child_paths():
@@ -147,12 +225,17 @@ def run_child(mode, cwd=None):
 def main():
     if len(sys.argv) > 1:
         {"child-sub-first": child_sub_first, "child-paths": child_paths,
-            "child-arguments": child_arguments, "child-module": child_module}[sys.argv[1]]()
+            "child-arguments": child_arguments, "child-module": child_module, "child-own-gil": child_own_gil,
+            "child-reimport": child_reimport}[sys.argv[1]]()
         return
     if subinterpreters_supported():
         run_child("child-sub-first")
     else:
         print("sub-interpreters: skipped (no interpreters module)")
+    # isolated sub-interpreters with their own GIL while the interpreters of the module share one: Python 3.12
+    if sys.version_info[:2] == (3, 12):
+        run_child("child-own-gil")
+    run_child("child-reimport")
     with tempfile.TemporaryDirectory() as tmp:
         # a module that would replace qore.Thread if the characters of the path 'Qore' were searched
         for d in ("Q", "o", "r", "e"):

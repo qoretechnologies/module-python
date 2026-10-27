@@ -56,6 +56,10 @@ struct qore_python_gil_waiter {
    3.11 and 3.12, the interpreters share the GIL, and a waiting thread asks only its own interpreter to release it, so
    that a thread of another interpreter that runs Python code would keep it. */
 void qore_python_request_gil_switch(const struct qore_python_gil_waiter* waiters, size_t count);
+
+/* Returns 1 if the interpreter of the given thread state (or the interpreters of the module, for NULL) uses the GIL
+   that the interpreters share, 0 if it has its own GIL (an isolated sub-interpreter, PEP 684, Python 3.12) */
+int qore_python_uses_shared_gil(PyThreadState* tstate);
 #endif
 
 #ifdef DEBUG

@@ -170,6 +170,23 @@
       sub-interpreter that imported \c qoreloader was destroyed no longer aborts the process: the thread returned to
       %Python without a thread state attached
       (<a href="https://github.com/qoretechnologies/qore/issues/5536">issue 5536</a>)
+    - fixes from the review of the release candidate (see
+      <a href="https://github.com/qoretechnologies/qore/issues/5487">issue 5487</a>):
+      - with %Python 3.11 and 3.12, a sub-interpreter whose %Python thread called %Qore can be closed (a second thread
+        state of the thread was created, and the process aborted or hung); with %Python 3.11, the main thread keeps
+        its thread state for the GIL state API when a sub-interpreter ends (\c qoreloader's exit handler then waited
+        forever)
+      - with %Python 3.12, a thread waiting for the GIL of an isolated sub-interpreter (its own GIL) no longer makes
+        a thread of another interpreter release the shared GIL, which it then waited for until another thread took it
+      - a child of \c fork() has its own pipe for the signals that interrupt %Qore calls: the parent read the signals
+        of the child and cancelled its own %Qore calls
+      - the deletion of a program cancels only the threads that still use it
+      - importing \c qoreloader again in an interpreter while the module imported before exists raises
+        \c ImportError (the %Qore objects of the module imported before were no longer recognized)
+      - a %Qore copy of a %Python object created by %Python keeps its %Qore object while %Python references it, and
+        copies get the slots of the objects
+      - the call stacks of %Qore exceptions have each frame once also through attribute access, generators and the
+        constructors of %Qore classes inheriting %Python classes
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static

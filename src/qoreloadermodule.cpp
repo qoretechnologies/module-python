@@ -36,7 +36,9 @@
 
 #include <dlfcn.h>
 #include <cstdlib>
+#include <exception>
 #include <memory>
+#include <new>
 #include <string>
 
 QorePythonProgram* qore_python_pgm = nullptr;
@@ -167,6 +169,12 @@ void qoreloader_free(void* obj) {
     if (st) {
         qore_python_interpreter_types_clear(st->types);
     }
+#if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030C0000
+    // the interpreter ends: the thread is bound to its own state of the main interpreter for the GIL state API
+    // instead of a state of this interpreter, whose binding CPython clears when it deletes the state; done last, as
+    // the release of the program above binds the states that it uses
+    _qore_rebind_thread_before_interpreter_end(PyInterpreterState_Get());
+#endif
 }
 
 static struct PyModuleDef_Slot qoreloader_slots[] = {
@@ -655,7 +663,16 @@ static int slot_qoreloader_exec(PyObject *m) {
                 "threads has been reached");
             return -1;
         }
-        qoreloader_get_state(m)->pypgm = new QorePythonProgram(qore_python_attached_thread_state());
+        // no C++ exception can reach Python's code
+        try {
+            qoreloader_get_state(m)->pypgm = new QorePythonProgram(qore_python_attached_thread_state());
+        } catch (const std::bad_alloc&) {
+            PyErr_NoMemory();
+            return -1;
+        } catch (const std::exception& e) {
+            PyErr_Format(PyExc_ImportError, "cannot create the Qore program of the interpreter: %s", e.what());
+            return -1;
+        }
     }
 
     if (QoreMetaPathFinder::setupModules()) {

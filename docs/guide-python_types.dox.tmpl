@@ -112,7 +112,9 @@
     \c copy.copy(): a copy of a %Python object is made with \c copy.copy(), and the copy of a %Qore object whose
     class is a %Python subclass of a %Qore class, or a %Qore class that inherits a %Python class, gets a new %Python
     object of the same class, whose \c __init__() is not called, with a shallow copy of its attributes (its
-    \c __dict__); %Qore copies the %Qore members and calls the \c copy() methods of the %Qore classes.
+    \c __dict__ and its slots), and with the ownership of the original (a copy of an object created by %Python keeps
+    its %Qore object as long as %Python references it); %Qore copies the %Qore members and calls the \c copy() methods
+    of the %Qore classes.
 
     The enum classes and the \c dict subclasses of hashdecls are described in @ref python_qore_declarations.
 

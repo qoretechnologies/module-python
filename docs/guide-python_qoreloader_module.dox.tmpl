@@ -30,6 +30,8 @@
     and objects used in one interpreter are separate from the ones of the other interpreters (the %Python objects of
     one interpreter cannot be used in another one), and the program of a sub-interpreter is deleted when the
     sub-interpreter is closed.
+    The module can be imported again in an interpreter (ex: after it was removed from \c sys.modules) only once the
+    module imported before has been freed; before, the import raises \c ImportError.
 
     @section python_qoreloader_import_qore Using the qoreloader Module to Import Qore APIs
 

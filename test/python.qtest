@@ -4471,6 +4471,39 @@ def go(c):
                     sprintf("max %d", max));
             }
         }
+
+        # the same through the other calls from Qore into Python code: a property read by a member gate, and the
+        # __init__() of a Python class inherited by a Qore class (they gave the Python frames of all the calls)
+        Program pgm(PO_NEW_STYLE);
+        pgm.issueModuleCmd("python", "parse nested-stack-other.py class P:
+    def __init__(self, cb):
+        self.cb = cb
+    @property
+    def prop(self):
+        return self.cb()
+class Base:
+    def __init__(self):
+        self.hook()
+    def hook(self):
+        pass
+def rec(cb):
+    return cb()
+");
+        pgm.issueModuleCmd("python", "export-class P");
+        pgm.issueModuleCmd("python", "export-class Base");
+        pgm.issueModuleCmd("python", "export-func rec");
+        pgm.parse("class Q inherits Base { hook() { throw \"DONE\"; } }
+auto sub prop() { return rec(sub () { P p(sub () { throw \"DONE\"; }); return p.prop; }); }
+auto sub init() { return rec(sub () { return new Q(); }); }", "nested-stack-other");
+        foreach string f in (("prop", "init")) {
+            try {
+                pgm.callFunction(f);
+                assertTrue(False, f + ": no exception");
+            } catch (hash<ExceptionInfo> ex) {
+                list<string> python = map $1.function, ex.callstack, $1.lang == "Python";
+                assertEq(f == "prop" ? ("P.prop", "rec") : ("Base.__init__", "rec"), python, f);
+            }
+        }
     }
 
     # naive datetimes are Python's local time (the local time of the process), with Python's semantics for ambiguous
@@ -4664,6 +4697,56 @@ object sub new_q() { return new Q(); }", "copy-sub");
             assertEq("Q", qc.className());
             assertEq("qore-hook", qc.call_hook(), "the copy calls the Qore override");
             assertEq(1, qc.get_n());
+        }
+
+        # a copy of an object created by Python keeps its Qore object while only Python references it (it held a weak
+        # reference, so that its Qore object was deleted), and the slots of the objects are copied
+        {
+            PythonProgram cp("
+from qore.__root__ import PythonCopyBase
+g = []
+class Sub(PythonCopyBase):
+    __slots__ = ('s', '__dict__')
+    def __init__(self):
+        super().__init__()
+        self.s = 'slot'
+        self.tag = 'tag'
+def make():
+    return Sub()
+def keep(o):
+    g.append(o)
+def use():
+    return (g[0].x, g[0].s, g[0].tag)
+def back():
+    return g[0]
+def drop():
+    g.clear()
+", "copy-owner.py");
+            {
+                object o = cp.callFunction("make");
+                o.x = 3;
+                cp.callFunction("keep", o.copy());
+            }
+            assertEq((3, "slot", "tag"), cp.callFunction("use"));
+            assertEq(3, cp.callFunction("back").x);
+            cp.callFunction("drop");
+        }
+
+        # the slots of an object of a Qore class inheriting a Python class are copied
+        {
+            Program spgm(PO_NEW_STYLE);
+            spgm.issueModuleCmd("python", "parse copy-slots.py class Base:
+    __slots__ = ('n', '__dict__')
+    def __init__(self):
+        self.n = 1
+    def get_n(self):
+        return self.n
+");
+            spgm.issueModuleCmd("python", "export-class Base");
+            spgm.parse("class Q inherits Base {}
+object sub new_q() { return new Q(); }", "copy-slots");
+            object q = spgm.callFunction("new_q");
+            assertEq(1, q.copy().get_n());
         }
 
         # named tuples

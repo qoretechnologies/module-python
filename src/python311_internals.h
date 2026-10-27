@@ -474,6 +474,34 @@ DLLLOCAL static inline PyThreadState* _qore_PyRuntimeGILState_GetThreadState() {
     return reinterpret_cast<PyThreadState*>(_Py_atomic_load_relaxed(&_PyRuntime.gilstate.tstate_current));
 }
 
+//! Binds the current thread to its own state of the main interpreter for the GIL state API if it is bound to a state
+//! of the given interpreter, which ends
+/** The module binds the states that it uses to the thread for the GIL state API (see
+    _qore_PyGILState_SetThisThreadState()), and CPython clears the binding of a state that it deletes: after a
+    sub-interpreter whose state was bound to the thread ended, the thread had no binding, and PyGILState_Ensure()
+    then created a new state and waited for the GIL that the thread held (ex: in qoreloader's atexit handler) (issue
+    5536).  Must be called with the GIL held before the states of the interpreter are deleted.
+*/
+DLLLOCAL static inline void _qore_rebind_thread_before_interpreter_end(PyInterpreterState* interp) {
+    PyThreadState* bound = PyGILState_GetThisThreadState();
+    if (!bound || bound->interp != interp || interp == _PyRuntime.interpreters.main) {
+        return;
+    }
+    unsigned long ident = PyThread_get_thread_ident();
+    PyThreadState* own = nullptr;
+    // the list of states cannot change while it is locked
+    PyThread_acquire_lock(_PyRuntime.interpreters.mutex, WAIT_LOCK);
+    for (PyThreadState* ts = PyInterpreterState_ThreadHead(_PyRuntime.interpreters.main); ts;
+            ts = PyThreadState_Next(ts)) {
+        if (ts->thread_id == ident) {
+            own = ts;
+            break;
+        }
+    }
+    PyThread_release_lock(_PyRuntime.interpreters.mutex);
+    PyThread_tss_set(&_PyRuntime.gilstate.autoTSSkey, (void*)own);
+}
+
 // Set this thread's state - update both our tracking and Python's TSS
 DLLLOCAL static inline void _qore_PyGILState_SetThisThreadState(PyThreadState* state) {
     _qore_tss_tstate = state;

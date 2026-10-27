@@ -49,9 +49,8 @@ struct SignalWakeupState {
     int prev_fd = -1;
     //! the thread that reads the pipe
     pthread_t reader;
-    //! true if the reader thread runs; guarded by lck (in a child of fork(), the reader thread does not exist, and
-    //! the pipe is shared with the parent, whose reader thread reads it, so signals are handled when the Qore calls
-    //! return)
+    //! true if the reader thread runs; guarded by lck (a child of fork() gets its own pipe and reader thread, see
+    //! fork_child())
     bool reader_running = false;
     //! true if the fork handlers locked lck (see install())
     bool fork_locked = false;
@@ -127,12 +126,34 @@ void fork_parent() {
     }
 }
 
+//! replaces the pipe inherited from the parent with a new one at the same descriptors; returns false on error
+bool replace_pipe(SignalWakeupState& state) {
+    int fds[2];
+    if (pipe(fds)) {
+        return false;
+    }
+    // the file status flag of the write end is kept by dup2(); the descriptor flags are set on the copies
+    bool ok = !fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) | O_NONBLOCK)
+        && dup2(fds[0], state.pipe_r) >= 0 && dup2(fds[1], state.pipe_w) >= 0
+        && !fcntl(state.pipe_r, F_SETFD, FD_CLOEXEC) && !fcntl(state.pipe_w, F_SETFD, FD_CLOEXEC);
+    close(fds[0]);
+    close(fds[1]);
+    return ok;
+}
+
 void fork_child() {
     SignalWakeupState& state = get_state();
     if (state.fork_locked) {
-        // the thread does not exist in the child: its handle is not used
+        // the reader thread does not exist in the child: its handle is not used
         state.reader_running = false;
         state.cancelled = false;
+        state.depth = 0;
+        // the child gets its own pipe at the descriptors of the inherited one, which Python writes the signal
+        // numbers to (its wakeup fd), and its own reader thread: the parent's reader thread read the bytes of the
+        // child's signals and cancelled the Qore calls of the parent's main thread
+        if (replace_pipe(state)) {
+            start_reader(state);
+        }
         state.fork_locked = false;
         state.lck.unlock();
     }

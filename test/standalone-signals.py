@@ -57,6 +57,8 @@ def main():
 
     # a signal interrupts a Qore call of the main thread that blocks (issue 5527): the exception raised by the
     # signal's Python handler replaces the Qore exception
+    # before a Program is created (see check_fork_child_signal())
+    check_fork_child_signal()
     check_blocking_qore_call(received, wakeup_r)
     print("Standalone signal handling PASS")
 
@@ -110,6 +112,56 @@ def check_blocking_qore_call(received, wakeup_r):
     # the wakeup fd set before qoreloader was imported got the signal numbers
     data = os.read(wakeup_r, 100)
     assert signal.SIGINT in data and signal.SIGUSR1 in data, data
+
+
+def check_fork_child_signal():
+    # a signal of a child of fork() interrupts the child's Qore call, not the parent's: the child has its own wakeup
+    # pipe (the parent's reader thread read the child's signals, and cancelled the parent's Qore call)
+    import qoreloader
+    import threading
+    import warnings
+    from qore.__root__.Qore import Program
+    from qore.__root__.Qore.Thread import Queue
+
+    go_r, go_w = os.pipe()
+    with warnings.catch_warnings():
+        # the process has threads (ex: the reader thread of the wakeup fd)
+        warnings.simplefilter("ignore", DeprecationWarning)
+        # forked before the parent creates a Program, which has a Python sub-interpreter that the child cannot delete
+        pid = os.fork()
+    if pid == 0:
+        # the child waits in Qore code, and sends itself a signal once the parent waits in Qore code
+        rc = 1
+        try:
+            os.close(go_w)
+            os.read(go_r, 1)
+            threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGUSR1)).start()
+            Queue().get(5000)
+        except qoreloader.QoreException as e:
+            rc = 0 if str(e).startswith("THREAD-CANCELLED") else 2
+        finally:
+            os._exit(rc)
+    os.close(go_r)
+    pgm = Program()
+    pgm.parse("%new-style\nsub wait_in_qore(Queue ready, timeout t) { ready.push(1); (new Queue()).get(t); }",
+        "fork-signals")
+    ready = Queue()
+
+    def start_child():
+        ready.get()
+        os.write(go_w, b"x")
+    thread = threading.Thread(target=start_child)
+    thread.start()
+    try:
+        pgm.callFunction("wait_in_qore", ready, 1500)
+        result = "returned"
+    except qoreloader.QoreException as e:
+        result = str(e).split(":")[0]
+    thread.join()
+    os.close(go_w)
+    _, status = os.waitpid(pid, 0)
+    assert result == "QUEUE-TIMEOUT", result
+    assert os.waitstatus_to_exitcode(status) == 0, status
 
 
 if __name__ == "__main__":

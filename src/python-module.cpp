@@ -1475,6 +1475,13 @@ QorePythonGilWait::QorePythonGilWait(PyThreadState* target) {
 #else
     PyThreadState* current = nullptr;
 #endif
+    // a thread that waits for the GIL of an isolated sub-interpreter (its own GIL; the interpreter of the state with
+    // which it takes the GIL, or of its current state if that is not known) is not waiting for the shared GIL: a
+    // request would make a thread of another interpreter release the shared GIL for a thread that never takes it
+    // (it then waited until another thread took the shared GIL)
+    if (!qore_python_uses_shared_gil(target ? target : current)) {
+        return;
+    }
     qore_python_gil_waiter w = {PyThread_get_thread_ident(), current, target};
     GilSwitchState& state = get_gil_switch_state();
     std::lock_guard<std::mutex> al(state.lck);

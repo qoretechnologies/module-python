@@ -23,6 +23,7 @@
 
 #include "QorePythonClass.h"
 #include "QorePythonProgram.h"
+#include "QorePythonStackLocationHelper.h"
 
 #include <structmember.h>
 
@@ -146,14 +147,24 @@ QoreValue QorePythonClass::memberWriteGate(QoreObject* self, AbstractPrivateData
         if (*xsink) {
             return QoreValue();
         }
-        if (PyObject_SetAttrString(pyobj, member, *pyval) < 0) {
+        int rc;
+        {
+            // attribute writes can run Python code (ex: properties), which can call Qore
+            QorePythonEntryFrame entry;
+            rc = PyObject_SetAttrString(pyobj, member, *pyval);
+        }
+        if (rc < 0) {
             pypgm->checkPythonException(xsink);
         }
         return QoreValue();
     }
 
     // removal and deletion return the previous value; a missing attribute has no value, as a missing member
-    QorePythonReferenceHolder old_value(PyObject_GetAttrString(pyobj, member));
+    QorePythonReferenceHolder old_value;
+    {
+        QorePythonEntryFrame entry;
+        old_value = PyObject_GetAttrString(pyobj, member);
+    }
     if (!old_value) {
         if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
             pypgm->checkPythonException(xsink);
@@ -166,7 +177,12 @@ QoreValue QorePythonClass::memberWriteGate(QoreObject* self, AbstractPrivateData
     if (*xsink) {
         return QoreValue();
     }
-    if (PyObject_DelAttrString(pyobj, member) < 0) {
+    int rc;
+    {
+        QorePythonEntryFrame entry;
+        rc = PyObject_DelAttrString(pyobj, member);
+    }
+    if (rc < 0) {
         pypgm->checkPythonException(xsink);
         return QoreValue();
     }
@@ -184,7 +200,12 @@ QoreValue QorePythonClass::callPythonMethod(ExceptionSink* xsink, QorePythonProg
     assert(pyobj);
     // the attribute of the object, as in Python: a method bound to the object, a class method bound to its class, a
     // static method, or a callable attribute of the object (ex: a lambda or a functools.partial object)
-    QorePythonReferenceHolder attr(PyObject_GetAttrString(pyobj, mname));
+    QorePythonReferenceHolder attr;
+    {
+        // attribute reads can run Python code (ex: __getattr__()), which can call Qore
+        QorePythonEntryFrame entry;
+        attr = PyObject_GetAttrString(pyobj, mname);
+    }
     if (!attr) {
         if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
             pypgm->checkPythonException(xsink);

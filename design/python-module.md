@@ -361,8 +361,20 @@ state of the sub-interpreter in `slot_qoreloader_exec()`, found by `QorePythonPr
 interpreter (the map of programs and their thread states), and released in the module's `m_free`, while the
 sub-interpreter exists.  Previously the code running in a sub-interpreter used the global program, whose caches of
 Python types belong to the main interpreter.  An interpreter that a `QorePythonProgram` creates has that program: its
-import of `qoreloader` is marked (`qore_python_program_interpreter_import`).  Test: the sub-interpreter scenario of
-`test/standalone-loader.py`, which creates and closes sub-interpreters after the main interpreter imported the module.
+import of `qoreloader` is marked (`qore_python_program_interpreter_import`).  The module can be initialized again in
+an interpreter only after the module initialized before is freed (an `ImportError` otherwise): the Python types of the
+Qore classes made by its program derive from its types.
+
+A Python thread of a sub-interpreter that calls Qore uses its own thread state in the program of the sub-interpreter:
+with Python 3.11 and 3.12, the state that the thread has attached is used when the thread is not recognized as a
+thread created by Python any more (its tracking is initialized by its first Qore call); a second state was created,
+which made `Py_EndInterpreter()` fail.  With Python 3.11, the module binds the states that it uses to the thread for
+the GIL state API, and CPython clears the binding of a state that it deletes: when the module is freed in a
+sub-interpreter, the thread is bound to its own state of the main interpreter
+(`_qore_rebind_thread_before_interpreter_end()`), as `PyGILState_Ensure()` otherwise created a state and waited for the
+GIL that the thread held.  An isolated sub-interpreter of Python 3.12 has its own GIL: a thread that waits for it is not
+a waiter of `QorePythonGilWait` (`qore_python_uses_shared_gil()`).  Tests: the sub-interpreter scenarios of
+`test/standalone-loader.py` (`child-sub-first`, `child-own-gil`, `child-reimport`).
 
 ## Qore Classes for Python Classes
 

@@ -727,24 +727,19 @@ void QorePythonProgram::checkPendingDelete() {
 }
 
 void QorePythonProgram::cancelThreads() {
-    std::vector<int> tids;
-    {
-        AutoLocker al(py_thr_lck);
-        checkForkIntern();
-        // from now on, other threads cannot use the program (see getAcquireThreadState())
-        int tid = q_gettid();
-        deleting_tid = tid;
-        for (auto& i : pgm_thr_uses) {
-            if (i.first != tid) {
-                tids.push_back(i.first);
-            }
-        }
-    }
-    for (int tid : tids) {
+    AutoLocker al(py_thr_lck);
+    checkForkIntern();
+    // from now on, other threads cannot use the program (see getAcquireThreadState())
+    int tid = q_gettid();
+    deleting_tid = tid;
+    // the threads are cancelled in the lock, so that a thread cannot leave the program between the check of its use
+    // and its cancellation, which would then apply to the code that it runs outside of the program (releaseContext()
+    // clears the cancellation in the lock when the thread leaves the program); qore_cancel_thread() does not wait
+    // for the lock of a condition that the thread waits on (it hands the wakeup to another thread if it is held)
+    for (auto& i : pgm_thr_uses) {
         // a thread whose cancellation was requested by other code keeps it
-        if (qore_cancel_thread(tid, "the Python program was deleted") == 0) {
-            AutoLocker al(py_thr_lck);
-            pgm_cancelled_tids.insert(tid);
+        if (i.first != tid && !qore_cancel_thread(i.first, "the Python program was deleted")) {
+            pgm_cancelled_tids.insert(i.first);
             pgm_threads_cancelled = true;
         }
     }
@@ -1661,6 +1656,17 @@ QorePythonThreadInfo QorePythonProgram::setContext(bool check_interrupt) const {
         PyThreadState* python_thread_state = PyThreadState_GetUnchecked();
 #else
         PyThreadState* python_thread_state = _qore_check_python_created_thread_gil();
+        if (!python_thread_state) {
+            // a thread that Python created and that called Qore before (its tracking is then initialized): the state
+            // that it has attached in the interpreter, with which Python called the module, is its own, as no state of
+            // the thread is known for this program; a second state was created, which made Py_EndInterpreter() fail
+            // for a sub-interpreter whose Python thread called Qore (issue 5536)
+            PyThreadState* attached = qore_python_attached_thread_state();
+            if (attached && attached->interp == interpreter && attached->thread_id == PyThread_get_thread_ident()
+                && _qore_PyCeval_GetGilLockedStatus()) {
+                python_thread_state = attached;
+            }
+        }
 #endif
         if (python_thread_state && python_thread_state->interp == interpreter) {
             // This is a Python-created thread - use the existing thread state
@@ -4083,7 +4089,12 @@ QoreValue QorePythonProgram::getQoreValue(ExceptionSink* xsink, PyObject* val, p
 }
 
 QoreValue QorePythonProgram::getQoreAttr(PyObject* obj, const char* attr, ExceptionSink* xsink) {
-    QorePythonReferenceHolder return_value(PyObject_GetAttrString(obj, attr));
+    QorePythonReferenceHolder return_value;
+    {
+        // attribute reads can run Python code (ex: properties), which can call Qore
+        QorePythonEntryFrame entry;
+        return_value = PyObject_GetAttrString(obj, attr);
+    }
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
         return QoreValue();
@@ -5725,9 +5736,16 @@ int QorePythonProgram::newQoreSubclassObject(ExceptionSink* xsink, PyTypeObject*
     PyObject* obj = *pyobj;
     // the private data owns the reference; if the initialization fails, it is released with the object
     self->setPrivate(cid, new QorePythonPrivateData(this, pyobj.release()));
-    if (type->tp_init && type->tp_init(obj, *py_args, nullptr) < 0) {
-        checkPythonException(xsink);
-        return -1;
+    if (type->tp_init) {
+        int rc;
+        {
+            QorePythonEntryFrame entry;
+            rc = type->tp_init(obj, *py_args, nullptr);
+        }
+        if (rc < 0) {
+            checkPythonException(xsink);
+            return -1;
+        }
     }
     return 0;
 }
@@ -5754,7 +5772,11 @@ PyObject* QorePythonProgram::copyPythonObject(ExceptionSink* xsink, PyObject* py
     if (!subclass_obj && !qore_obj) {
         // a Python object is copied with copy.copy()
         QorePythonReferenceHolder copy_mod(PyImport_ImportModule("copy"));
-        QorePythonReferenceHolder rv(copy_mod ? PyObject_CallMethod(*copy_mod, "copy", "O", pyobj) : nullptr);
+        QorePythonReferenceHolder rv;
+        if (copy_mod) {
+            QorePythonEntryFrame entry;
+            rv = PyObject_CallMethod(*copy_mod, "copy", "O", pyobj);
+        }
         if (!rv) {
             checkPythonException(xsink);
             return nullptr;
@@ -5776,12 +5798,21 @@ PyObject* QorePythonProgram::copyPythonObject(ExceptionSink* xsink, PyObject* py
         return nullptr;
     }
     if (qore_obj) {
-        // the Qore object of the copy was created by Qore, which manages its lifetime (as when Qore creates an object
-        // of a Qore class that inherits a Python class)
+        // the copy has the ownership of the original: an object created by Python (which holds a strong reference to
+        // its Qore object, referenced by the Qore object's private data, as in newQoreObject()), or the Python part of
+        // a Qore object created by Qore, which manages its lifetime (a weak reference)
         PyQoreObject* pyself = reinterpret_cast<PyQoreObject*>(*rv);
         assert(!pyself->qobj);
-        self->tRef();
-        pyself->qobj = self;
+        if (reinterpret_cast<PyQoreObject*>(pyobj)->strong) {
+            self->ref();
+            pyself->qobj = self;
+            pyself->strong = true;
+            // the private data of the copy references the Python object (see execPythonCopy())
+            pyself->qobj_refs_self = true;
+        } else {
+            self->tRef();
+            pyself->qobj = self;
+        }
     }
     if (subclass_obj && setQoreSubclassObject(xsink, *rv, self)) {
         return nullptr;
@@ -5797,6 +5828,39 @@ PyObject* QorePythonProgram::copyPythonObject(ExceptionSink* xsink, PyObject* py
     } else if (PyDict_Size(*dict)) {
         QorePythonReferenceHolder dict_copy(PyDict_Copy(*dict));
         if (!dict_copy || PyObject_GenericSetDict(*rv, *dict_copy, nullptr) < 0) {
+            checkPythonException(xsink);
+            return nullptr;
+        }
+    }
+    // the values of the slots of the classes of the object (as copy.copy() copies them, with copyreg._slotnames()),
+    // except the slot of the Qore object of a generated type, which is set above
+    QorePythonReferenceHolder copyreg(PyImport_ImportModule("copyreg"));
+    QorePythonReferenceHolder slot_names(copyreg
+        ? PyObject_CallMethod(*copyreg, "_slotnames", "O", reinterpret_cast<PyObject*>(type)) : nullptr);
+    if (!slot_names || !PyList_Check(*slot_names)) {
+        if (!checkPythonException(xsink)) {
+            xsink->raiseException("PYTHON-VALUE-ERROR", "cannot copy an object of Python type '%s': cannot get the "
+                "names of its slots", type->tp_name);
+        }
+        return nullptr;
+    }
+    for (Py_ssize_t i = 0, e = PyList_GET_SIZE(*slot_names); i < e; ++i) {
+        PyObject* name = PyList_GET_ITEM(*slot_names, i);
+        if (!PyUnicode_Check(name) || !PyUnicode_CompareWithASCIIString(name, QORE_PYTHON_QORE_OBJECT_SLOT)) {
+            continue;
+        }
+        // the generic access reads and writes the slot, bypassing the access to the members of Qore objects
+        QorePythonReferenceHolder value(PyObject_GenericGetAttr(pyobj, name));
+        if (!value) {
+            // an unset slot is not copied
+            if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+                checkPythonException(xsink);
+                return nullptr;
+            }
+            PyErr_Clear();
+            continue;
+        }
+        if (PyObject_GenericSetAttr(*rv, name, *value) < 0) {
             checkPythonException(xsink);
             return nullptr;
         }
@@ -6139,7 +6203,12 @@ QoreValue QorePythonProgram::execPythonIteratorNext(const QoreMethod& meth, cons
         if (*xsink || pypgm->checkValid(xsink)) {
             return QoreValue();
         }
-        QorePythonReferenceHolder py_item(PyIter_Next(pd->get()));
+        QorePythonReferenceHolder py_item;
+        {
+            // the iterator can run Python code (ex: a generator), which can call Qore
+            QorePythonEntryFrame entry;
+            py_item = PyIter_Next(pd->get());
+        }
         if (py_item) {
             item = pypgm->getQoreValue(xsink, *py_item);
             if (*xsink) {

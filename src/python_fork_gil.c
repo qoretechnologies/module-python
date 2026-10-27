@@ -94,6 +94,16 @@ int qore_python_fork_child_gil_lost(void) {
 }
 
 #if !defined(Py_GIL_DISABLED) && PY_VERSION_HEX < 0x030D0000
+int qore_python_uses_shared_gil(PyThreadState* tstate) {
+#if PY_VERSION_HEX >= 0x030C0000
+    /* an isolated sub-interpreter (PEP 684) has its own GIL */
+    return !tstate || tstate->interp->ceval.gil == qore_python_get_gil();
+#else
+    (void)tstate;
+    return 1;
+#endif
+}
+
 void qore_python_request_gil_switch(const struct qore_python_gil_waiter* waiters, size_t count) {
     struct _gil_runtime_state* gil = qore_python_get_gil();
     if (!gil || _Py_atomic_load_relaxed(&gil->locked) <= 0) {
