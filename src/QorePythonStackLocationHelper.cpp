@@ -34,6 +34,26 @@ std::string QorePythonStackLocationHelper::python_no_call_name = "<python_module
 QoreExternalProgramLocationWrapper QorePythonStackLocationHelper::python_loc_builtin("<python_module_unknown>", -1,
     -1);
 
+thread_local std::vector<QorePythonEntryFrame::Entry> QorePythonEntryFrame::entries;
+
+QorePythonEntryFrame::QorePythonEntryFrame() {
+    // returns a borrowed reference; nullptr if no Python code runs on the thread in the interpreter
+    PyObject* frame = reinterpret_cast<PyObject*>(PyEval_GetFrame());
+    // a memory error leaves the call unrecorded: the Python frames of the calls are then not separated
+    try {
+        entries.push_back({frame, PyInterpreterState_Get()});
+        recorded = true;
+    } catch (...) {
+    }
+}
+
+QorePythonEntryFrame::~QorePythonEntryFrame() {
+    if (recorded) {
+        assert(!entries.empty());
+        entries.pop_back();
+    }
+}
+
 QorePythonStackLocationHelper::QorePythonStackLocationHelper(QorePythonProgram* py_pgm) : py_pgm(py_pgm) {
 }
 
@@ -116,7 +136,29 @@ void QorePythonStackLocationHelper::readPythonStack() const {
     if (!getframe) {
         PyErr_Clear();
     }
-    // start with the innermost frame (depth 0): the Python frame that called Qore
+    // the frames of this call from Qore end at the frame that was current when the call started (exclusive), and begin
+    // at the frame that was current when the next call from Qore into this interpreter started, if any (inclusive):
+    // the frame that called Qore; the calls are the ones of this interpreter on this thread, whose Python stack is
+    // continuous across the calls
+    PyInterpreterState* interp = PyInterpreterState_Get();
+    const std::vector<QorePythonEntryFrame::Entry>& entries = QorePythonEntryFrame::getEntries();
+    PyObject* end_frame = nullptr;
+    PyObject* begin_frame = nullptr;
+    if (entry_count <= entries.size()) {
+        if (entry_count && entries[entry_count - 1].interp == interp) {
+            end_frame = entries[entry_count - 1].frame;
+        }
+        for (size_t i = entry_count; i < entries.size(); ++i) {
+            if (entries[i].interp == interp) {
+                begin_frame = entries[i].frame;
+                break;
+            }
+        }
+    }
+    // all frames are read if the frame where the call begins is not found
+    bool begin_found = !begin_frame;
+
+    // start with the innermost frame (depth 0)
     int depth = 0;
     while (getframe) {
         QorePythonReferenceHolder args(PyTuple_New(1));
@@ -126,6 +168,16 @@ void QorePythonStackLocationHelper::readPythonStack() const {
         if (PyErr_Occurred()) {
             PyErr_Clear();
             break;
+        }
+
+        if (end_frame && *frame_obj == end_frame) {
+            break;
+        }
+        if (!begin_found && *frame_obj == begin_frame) {
+            // the frames read so far are the frames of the calls from Qore that started later
+            stack_loc.clear();
+            stack_call.clear();
+            begin_found = true;
         }
 
         PyFrameObject* frame = reinterpret_cast<PyFrameObject*>(*frame_obj);

@@ -370,6 +370,7 @@ class PythonTest inherits Test {
         addTestCase("Python objects of deleted and uninitialized Qore objects", \deletedObjectTest());
         addTestCase("callables round-trip between Qore and Python; bound methods keep their object or class",
             \callableRoundTripTest());
+        addTestCase("call stacks of exceptions through nested Qore/Python calls", \nestedCallStackTest());
         addTestCase("a Qore class inheriting a Python subclass of a Qore class", \qorePythonQoreSubclassTest());
         addTestCase("Python objects of a Program are released while the Program is valid", \programCleanupTest());
         addTestCase("Python types of the declarations of a deleted Program", \declarationLifetimeTest());
@@ -4376,6 +4377,44 @@ def go(c):
         assertEq("QoreCallable", res[0]);
         assertEq(3, res[1]);
         assertRegex("keyword", res[2]);
+    }
+
+    # the call stack of a Qore exception through nested calls between Qore and Python has each frame once: each call
+    # from Qore into Python gives only its own Python frames (previously each one gave the Python frames of all the
+    # calls on the thread, so that the call stack was repeated and grew quadratically) (issue 5533)
+    nestedCallStackTest() {
+        PythonProgram p("def rec(cb, n):\n    return cb(n + 1)\n", "nested-stack.py");
+        foreach int max in ((1, 2, 10)) {
+            code cb;
+            cb = auto sub (int n) {
+                if (n >= max) {
+                    throw "DONE", sprintf("%d", n);
+                }
+                return p.callFunction("rec", cb, n);
+            };
+            try {
+                p.callFunction("rec", cb, 0);
+                assertTrue(False, sprintf("max %d: no exception", max));
+            } catch (hash<ExceptionInfo> ex) {
+                assertEq("DONE", ex.err);
+                # each level: the closure, the Python function and the call of the Python function
+                list<auto> expected = ();
+                for (int i = 0; i < max; ++i) {
+                    expected += (
+                        ("PythonTest::<anonymous closure>", "Qore"),
+                        ("rec", "Python"),
+                        ("PythonProgram::callFunction", "Qore"),
+                    );
+                }
+                list<auto> actual = map ($1.function, $1.lang), ex.callstack[0..(3 * max - 1)];
+                assertEq(expected, actual, sprintf("max %d", max));
+                # followed by the caller of the outermost call
+                assertEq("PythonTest::nestedCallStackTest", ex.callstack[3 * max].function, sprintf("max %d", max));
+                # the Python frames have their file and line
+                assertEq(("nested-stack.py", 2), (map ($1.file, $1.line), ex.callstack, $1.lang == "Python")[0],
+                    sprintf("max %d", max));
+            }
+        }
     }
 
     typedMemberWriteTest() {

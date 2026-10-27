@@ -35,8 +35,51 @@
 
 #include "python-module.h"
 
+#include <vector>
+
 // forward reference
 class QorePythonProgram;
+
+//! Marks a call from Qore into Python code on the current thread; must be created with the GIL held
+/** Records the Python frame that is current when Qore calls Python code: the Python frames of a
+    QorePythonStackLocationHelper (the Python code that called Qore) are the frames of its call from Qore, which end at
+    the frame that is current when the call from Qore starts, and begin at the frame that is current when the next
+    call from Qore starts; the
+    Python stack of a thread is continuous across nested calls between Qore and Python, so that without these limits
+    each call was given the Python frames of all the calls (issue 5533)
+*/
+class QorePythonEntryFrame {
+public:
+    DLLLOCAL QorePythonEntryFrame();
+    DLLLOCAL ~QorePythonEntryFrame();
+
+    QorePythonEntryFrame(const QorePythonEntryFrame&) = delete;
+    QorePythonEntryFrame& operator=(const QorePythonEntryFrame&) = delete;
+
+    //! a call from Qore into Python code
+    struct Entry {
+        //! the Python frame that is current when the call starts (borrowed: it exists while the call runs), if any
+        PyObject* frame;
+        //! the interpreter of the call
+        PyInterpreterState* interp;
+    };
+
+    //! returns the number of calls from Qore into Python code on the current thread
+    DLLLOCAL static size_t getCount() {
+        return entries.size();
+    }
+
+    //! returns the calls from Qore into Python code on the current thread
+    DLLLOCAL static const std::vector<Entry>& getEntries() {
+        return entries;
+    }
+
+private:
+    //! false if the call could not be recorded (memory error)
+    bool recorded = false;
+
+    DLLLOCAL static thread_local std::vector<Entry> entries;
+};
 
 class QorePythonStackLocationHelper : public QoreExternalRuntimeStackLocationHelper {
 public:
@@ -63,6 +106,9 @@ public:
 private:
     QorePythonProgram* py_pgm;
     int tid = q_gettid();
+    //! the number of calls from Qore into Python code when the Python code called Qore: the last one is the call of
+    //! this Python code
+    size_t entry_count = QorePythonEntryFrame::getCount();
     mutable unsigned current = 0;
 
     mutable std::vector<std::string> stack_call;

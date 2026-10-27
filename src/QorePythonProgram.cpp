@@ -1119,7 +1119,10 @@ QoreValue QorePythonProgram::eval(ExceptionSink* xsink, const QoreString& source
         main_dict = PyModule_GetDict(*module);
     }
 
-    return_value = PyEval_EvalCode(*python_code, main_dict, main_dict);
+    {
+        QorePythonEntryFrame entry;
+        return_value = PyEval_EvalCode(*python_code, main_dict, main_dict);
+    }
 
     // check for Python exceptions
     if (checkPythonException(xsink)) {
@@ -4572,7 +4575,11 @@ PyObject* QorePythonProgram::callPythonInternal(ExceptionSink* xsink, PyObject* 
 
     //printd(5, "QorePythonProgram::callPythonInternal(): this: %p valid: %d argcount: %d (first: %p)\n", this, valid,
     //    (args && args->size() > arg_offset) ? args->size() - arg_offset : 0, first);
-    QorePythonReferenceHolder return_value(PyObject_Call(callable, *py_args, kwargs));
+    QorePythonReferenceHolder return_value;
+    {
+        QorePythonEntryFrame entry;
+        return_value = PyObject_Call(callable, *py_args, kwargs);
+    }
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
         return nullptr;
@@ -5774,7 +5781,11 @@ QoreValue QorePythonProgram::callCFunctionMethod(ExceptionSink* xsink, PyObject*
 
     //printd(5, "QorePythonProgram::callCMethod(): argcount: %d\n",
     //    (args && args->size() > arg_offset) ? args->size() - arg_offset : 0);
-    QorePythonReferenceHolder return_value(PyObject_Call(func, *py_args, nullptr));
+    QorePythonReferenceHolder return_value;
+    {
+        QorePythonEntryFrame entry;
+        return_value = PyObject_Call(func, *py_args, nullptr);
+    }
     // check for Python exceptions
     if (!return_value && checkPythonException(xsink)) {
         return QoreValue();

@@ -141,6 +141,10 @@
       given to %Qore are called with their class (it was dropped, so that the arguments were shifted) (see
       @ref python_qore_to_python;
       <a href="https://github.com/qoretechnologies/qore/issues/5530">issue 5530</a>)
+    - the call stacks of %Qore exceptions through nested calls between %Qore and %Python have each frame once: each call
+      from %Qore into %Python gave the %Python frames of all the calls on the thread, so that the call stack was
+      repeated at each level and grew quadratically (deep mutual recursion did not finish)
+      (<a href="https://github.com/qoretechnologies/qore/issues/5533">issue 5533</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static
