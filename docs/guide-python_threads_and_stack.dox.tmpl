@@ -135,12 +135,16 @@ p.callFunction("join", t);
       \c os.register_at_fork() run, and in the child, %Python knows that only the calling thread exists in it, so its
       exit does not wait for the threads of the parent
     - this is not done while %Python interpreters of %Qore exist in such a process
-      (@ref Python::PythonProgram "PythonProgram" objects, or @ref Qore::Program "Program" objects using %Python): in
+      (@ref Python::PythonProgram "PythonProgram" objects, and every @ref Qore::Program "Program" object created in
+      the process, which has a %Python interpreter of the module): in
       the child of its fork protocol, %Python deletes all interpreters but its main one, which crashes the child
       (<a href="https://github.com/python/cpython/issues/139759">CPython issue 139759</a>).  The child of
       @ref Qore::fork() "fork()" can then use the interpreters, but it keeps the %Python state of the threads of the
       parent: %Python's own exit in the child waits forever for the threads of the parent that are not daemon threads.
-      For the same reason, \c os.fork() in such a process crashes the child while interpreters of %Qore exist.
+      For the same reason, \c os.fork() in such a process crashes the child while interpreters of %Qore exist
+      (<a href="https://github.com/qoretechnologies/qore/issues/5555">issue 5555</a>); %Qore's
+      @ref Qore::fork() "fork()" can be used instead, or the @ref Qore::Program "Program" and
+      @ref Python::PythonProgram "PythonProgram" objects can be deleted before \c os.fork() is called.
     - in a %Qore process, the module initializes %Python while it holds the lock of the process environment (see
       @ref python_environment), so code that %Python runs while it initializes (\c sitecustomize, \c .pth files) must
       not create a process with \c fork()

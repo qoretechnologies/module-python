@@ -187,6 +187,11 @@
         copies get the slots of the objects
       - the call stacks of %Qore exceptions have each frame once also through attribute access, generators and the
         constructors of %Qore classes inheriting %Python classes
+    - known issue: in a %Python process that uses %Qore through the \c qoreloader module, \c os.fork() crashes the
+      child while %Qore programs exist (each has a %Python sub-interpreter), as %Python does with any sub-interpreter
+      (<a href="https://github.com/python/cpython/issues/139759">CPython issue 139759</a>); %Qore's \c fork() can be
+      used instead (see @ref python_fork;
+      <a href="https://github.com/qoretechnologies/qore/issues/5555">issue 5555</a>)
     - documentation: \c PythonProgram::evalStatement() and \c PythonProgram::evalStatementKeep() document where they
       run (\c evalStatement() in the \c __main__ module of the interpreter, \c evalStatementKeep() in the globals of
       the program) and that they return no value, \c PythonProgram::run() that it runs the code again, the static
