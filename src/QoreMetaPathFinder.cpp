@@ -228,7 +228,7 @@ PyObject* QoreMetaPathFinder::getQoreRootModuleSpec(const QoreString& mname) {
     QoreNamespaceNamespaceIterator ni(*rns);
     while (ni.next()) {
         const QoreNamespace& ns = ni.get();
-        QoreStringMaker mod_name(ns.getName());
+        QoreString mod_name(ns.getName());
         //printd(5, "QoreMetaPathFinder::getQoreRootModuleSpec(): adding '%s'\n", mod_name.c_str());
         QorePythonReferenceHolder name(PyUnicode_FromStringAndSize(mod_name.c_str(), mod_name.size()));
         if (!name || PyList_Append(*search_locations, *name)) {
