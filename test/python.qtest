@@ -6447,8 +6447,12 @@ def loop(q):
             done.get());
     }
 
+    #! An interrupt that trusted code requests stops a call into Python, and only trusted code can clear it
+    /** Code whose functional domains are restricted may add a restriction to a SandboxManager that it did not create,
+        such as requestInterrupt(), but not lift one: its clearInterrupt() raises SANDBOX-ACCESS-ERROR (Qore #5659),
+        and the trusted host clears the interrupt.
+    */
     sandboxInterruptTest() {
-        # Create a sandboxed program that will attempt to call Python after interrupt is requested
         Program p(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
         p.loadModule("python");
 
@@ -6462,28 +6466,55 @@ def simple_func():
     # First call should succeed
     auto first = pp.callFunction('simple_func');
 
-    # Second call should fail because interrupt was requested
+    # the second call fails because an interrupt was requested; the code of this Program may add the restriction
+    sm.requestInterrupt();
+    hash<auto!> rv = {};
+    rv.step = 2;
+    rv.first = first;
     try {
-        sm.requestInterrupt();
-        auto second = pp.callFunction('simple_func');
-        sm.clearInterrupt();
-        return {'step': 2, 'first': first, 'error': 'second call did not throw', 'result': second};
+        rv.result = pp.callFunction('simple_func');
+        rv.error = 'second call did not throw';
     } catch (hash<ExceptionInfo> ex) {
-        sm.clearInterrupt();
-        return {'step': 2, 'first': first, 'exception': ex};
+        rv.exception = ex;
     }
+    # but it cannot lift it on a manager that it did not create
+    try {
+        sm.clearInterrupt();
+        rv.clear_error = 'clearInterrupt() was not refused';
+    } catch (hash<ExceptionInfo> ex) {
+        rv.clear_exception = ex;
+    }
+    return rv;
+}
+
+int sub call_after_clear() {
+    PythonProgram pp('
+def simple_func():
+    return 42
+', 'simple.py');
+    return pp.callFunction('simple_func');
 }
 ", "test");
 
         SandboxManager sm();
         p.setSandboxManager(sm);
 
-        auto result = p.callFunction("test_interrupted_python_call", sm);
+        hash<auto> result = p.callFunction("test_interrupted_python_call", sm);
+        # the trusted host clears the interrupt that the sandboxed code could not
+        sm.clearInterrupt();
+
         assertEq(2, result.step);
         assertEq(42, result.first);
+        assertFalse(result.hasKey("error"), result.error ?? "");
         assertTrue(result.hasKey("exception"));
         assertEq("PROGRAM-INTERRUPTED", result.exception.err);
         assertRegex("Python GIL", result.exception.desc);
+        assertFalse(result.hasKey("clear_error"), result.clear_error ?? "");
+        assertEq("SANDBOX-ACCESS-ERROR", result.clear_exception.err, "restricted code cannot clear the interrupt");
+        assertRegex("clearInterrupt", result.clear_exception.desc);
+
+        # the interrupt that the host cleared no longer stops a call
+        assertEq(42, p.callFunction("call_after_clear"));
     }
 
     importTest() {
