@@ -23,6 +23,8 @@ default:
     - k8s
     - amd64
   before_script:
+    # a test job of a develop push whose tree already passed every test job reports success and ends here
+    - . test/docker_test/tree-tested-skip.sh
     - !reference [.github-status, script]
     # the job runs and reports its result even if the pending state cannot be set
     - github_status pending "${REPO_NAME}/${CI_JOB_NAME}" "${CI_JOB_URL}" || echo "cannot set the GitHub status" >&2
@@ -30,6 +32,27 @@ default:
 
 variables:
   REPO_NAME: module-python
+
+# Reuse successful tests only for a push to develop with an identical Git tree (as in module-ncurses 73d328c and
+# module-pgsql 251bac2): tree-already-tested.py finds a successful pipeline in which every test job passed for the
+# commit or for a parent with the same tree (a merged pull request branch), and each test job then sources
+# tree-tested-skip.sh, which reports the job's success to GitHub with a link to that pipeline and ends the job.  The
+# github-status-* jobs still set the pipeline's GitHub status.  Missing/incomplete API evidence runs every test job in
+# full; QORE_CI_FORCE_FULL=1 forces it.  The REQUIRED_JOBS of tree-already-tested.py must list every test job
+# (test/test_tree_tested.py checks it).
+tree-already-tested:
+  stage: .pre
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
+  before_script: []
+  variables:
+    GIT_DEPTH: "3"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop" && $CI_PIPELINE_SOURCE == "push" && $QORE_CI_FORCE_FULL != "1"'
+  script:
+    - python3 test/docker_test/tree-already-tested.py
+  artifacts:
+    reports:
+      dotenv: tree-tested.env
 
 .github-pipeline-status:
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
@@ -60,10 +83,11 @@ github-status-failure:
 
 .test-ubuntu:
   stage: test
+  needs: [{job: tree-already-tested, optional: true}]
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
   script:
     - |
-        if test/docker_test/test-ubuntu.sh; then
+        if python3 test/test_tree_tested.py && test/docker_test/test-ubuntu.sh; then
           github_status success "${REPO_NAME}/${CI_JOB_NAME}" "${CI_JOB_URL}"
           exit 0
         else
@@ -104,10 +128,11 @@ test-ubuntu-python3.16:
 
 test-alpine:
   stage: test
+  needs: [{job: tree-already-tested, optional: true}]
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop-alpine
   script:
     - |
-        if test/docker_test/test-alpine.sh; then
+        if python3 test/test_tree_tested.py && test/docker_test/test-alpine.sh; then
           github_status success "${REPO_NAME}/${CI_JOB_NAME}" "${CI_JOB_URL}"
           exit 0
         else
