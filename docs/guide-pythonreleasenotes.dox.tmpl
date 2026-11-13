@@ -369,6 +369,15 @@
       previously the deletion waited forever for those threads, which do not exist in the child.  Such an interpreter
       is not finalized in the child if threads created by %Python in the parent had a state in it; it is left in
       memory.  New threads of the child that use an interpreter get their own %Python thread states.
+    - a child process created with \c fork() (@ref Qore::fork() "fork()" or \c os.fork()) on a system with the musl C
+      library (ex: Alpine Linux) can no longer hang in its first call from %Python to %Qore that releases the GIL, or
+      when it ends a use of a declaration of a %Qore @ref Qore::Program "Program" or deletes a %Python interpreter:
+      the condition variables of the module were copied to the child with the threads of the parent that waited on
+      them, which do not exist in the child, and musl waits for the threads that a condition wakes up
+    - a child process created with \c fork() while another thread used a class, hashdecl or enum of a %Qore
+      @ref Qore::Program "Program" from %Python (ex: while it ran the constructor of a %Qore class called from
+      %Python) can delete the %Program; previously the deletion waited forever for the use of that thread, which does
+      not exist in the child
     - @ref Qore::fork() "fork()" called from %Python code in a %Python process using %Qore through the \c qoreloader
       module runs %Python's fork protocol, as \c os.fork() does: the functions registered with
       \c os.register_at_fork() run, and the child no longer keeps the %Python state of the threads of the parent;

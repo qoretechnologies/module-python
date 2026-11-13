@@ -639,6 +639,7 @@ process-wide locks:
 |---|---|---|
 | `QorePythonProgram::py_thr_lck` | `QFR_MODULE_LEAF` (acquired) | holders only change containers and never wait for the GIL while holding it |
 | `qpy_lock`, `qpy_global_lock` | `QFR_MODULE_LEAF` (acquired) | holders only change the program sets |
+| `DeclHandleRegistry::lck` | `QFR_MODULE_LEAF` (acquired) | holders only change the handle registry and use counts; the child keeps only the forking thread's uses |
 | `QorePythonProgram::main_ts_lck` | `QFR_MODULE_RESET` | holders wait for the GIL (interpreter creation), which a thread in `os.fork()` holds while the handlers run; the child takes it again if the forking thread held it |
 
 The GIL interplay, measured on Linux with Python 3.14 (GIL build):
@@ -697,6 +698,20 @@ The GIL interplay, measured on Linux with Python 3.14 (GIL build):
   thread states other than the finalizing one when it is deleted in the child (states of the parent's Python
   threads) is left in memory instead of being ended: the threading module, which is not told of a fork() that Python
   does not make, would wait for those threads forever in `Py_EndInterpreter()`.
+- Every condition variable that a thread of the parent can wait on is constructed again in the child, in place and
+  without destroying the old object: the child's copy still lists the waiting threads, which do not exist in the
+  child, and musl's `pthread_cond_signal()` / `pthread_cond_broadcast()` (and `pthread_cond_destroy()`) wait for the
+  waiters that they wake up, so the child hung in its first signal (`QoreCondition::reinitAfterFork()` does the same
+  in libqore, but modules cannot call it).  This covers `GilSwitchState::cond` (`gil_switch_fork_child()`, a
+  `pthread_atfork()` child handler: the helper thread of `QorePythonGilWait` waits on it whenever the prepare handler
+  holds its lock, and is started again in the child), `pgm_thr_cond` of every interpreter (`forkChildThreadStates()`,
+  which also clears `pgm_thr_waiting`), and the condition of the declaration handles (see below).
+- The child handler of the lock of the declaration handles (`QorePythonDeclHandle::forkChild()`) clears the number
+  of threads waiting in `invalidate()`, and sets the number of uses of every handle to the uses of the forking thread
+  (`QorePythonDeclUse::countThreadUses()`, from the thread-local list of its uses): the uses of the parent's other
+  threads never end in the child, and deleting a Program would wait for them forever.  The handler reaches every
+  handle, including handles without an owner and handles already invalidated, through an intrusive list of all
+  handles (`DeclHandleRegistry::handles`), which needs no memory allocation in the child.
 - Qore's `fork()` called from Python code of the main interpreter (a Python process hosting Qore) runs Python's fork
   protocol, as `os.fork()` does: `callQoreFunction()` recognizes Qore's `fork()` and sets the thread-local
   `python_fork_protocol_tstate` to the thread state it releases for the call (`QorePythonForkProtocolHelper`), and

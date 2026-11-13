@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <new>
 #include <pthread.h>
 #endif
 #include <cstring>
@@ -1452,6 +1453,11 @@ void gil_switch_fork_child() {
     if (gil_switch_fork_locked) {
         GilSwitchState& state = get_gil_switch_state();
         state.running = false;
+        // the child gets a new condition variable: the parent's helper thread may have been waiting on it, and the
+        // child's copy would still list that thread, which does not exist in the child, as a waiter; musl's
+        // pthread_cond_signal() waits for the waiters that it signals to wake up, so the next notify_one() would never
+        // return.  The old object is not destroyed, as pthread_cond_destroy() can also wait for its waiters
+        new (&state.cond) std::condition_variable;
         // only the thread that called fork() exists in the child
         unsigned long self = PyThread_get_thread_ident();
         for (size_t i = state.waiting.size(); i > 0; --i) {

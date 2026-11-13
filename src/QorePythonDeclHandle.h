@@ -41,7 +41,7 @@
     A declaration without an owning Program (one in the static system namespace) is never invalidated.
 
     The registry of handles and the uses of all handles are guarded by one leaf lock, which has fork handlers (see
-    registerForkHandler())
+    registerForkHandler()), which keep only the uses of the thread that called fork() in the child
 */
 class QorePythonDeclHandle {
     friend class QorePythonDeclUse;
@@ -117,6 +117,9 @@ private:
 
     //! the number of current uses; guarded by the lock of the handles
     unsigned users = 0;
+    //! the previous and next handles in the list of all handles; guarded by the lock of the handles
+    QorePythonDeclHandle* prev_handle = nullptr;
+    QorePythonDeclHandle* next_handle = nullptr;
     //! false once the owning Program has deleted the declaration; written with the lock of the handles held
     std::atomic<bool> valid{true};
 
@@ -129,6 +132,12 @@ private:
 
     //! ends a use started with startUse()
     DLLLOCAL void endUse();
+
+    //! the child handler of the lock of the handles
+    /** Only the thread that called fork() exists in the child: the uses and waits of the parent's other threads never
+        end in it
+    */
+    DLLLOCAL static void forkChild(void* lock);
 };
 
 //! A use of a declaration: while it is held, the declaration is not freed

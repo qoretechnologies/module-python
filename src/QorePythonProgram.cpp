@@ -49,6 +49,7 @@
 #include <algorithm>
 #include <climits>
 #include <ctime>
+#include <new>
 #include <vector>
 #include <string>
 
@@ -135,6 +136,11 @@ void QorePythonProgram::forkChildThreadStates(void* arg) {
     for (auto& i : py_thr_map) {
         i.first->pgm_thr_cnt = 0;
         i.first->pgm_thr_waiting = 0;
+        // a new condition: the child's copy would still list the parent's threads waiting in waitForThreadsIntern()
+        // as waiters, and signaling it could wait for them to wake up (musl); the old object is not destroyed, as
+        // pthread_cond_destroy() can also wait for its waiters (see QoreCondition::reinitAfterFork() in libqore,
+        // which modules cannot call)
+        new (&i.first->pgm_thr_cond) QoreCondition;
         i.first->pgm_thr_uses.clear();
         i.first->pgm_cancelled_tids.clear();
     }
