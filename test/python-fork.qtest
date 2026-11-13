@@ -21,6 +21,8 @@ class PythonForkTest inherits QUnit::Test {
         addTestCase("fork() called from Python while another thread holds the GIL", \forkReturnToPythonTest());
         addTestCase("os.fork() in an interpreter of Qore", \osForkTest());
         addTestCase("the child deletes an interpreter that another thread used", \forkInterpreterInUseTest());
+        addTestCase("the child deletes a Program whose class another thread was constructing",
+            \forkDeclarationInUseTest());
         addTestCase("Qore's fork() called from Python in a Python process", \hostedForkProtocolTest());
         addTestCase("Qore's fork() called from Python in a Python process with an interpreter of Qore",
             \hostedForkInterpreterTest());
@@ -267,6 +269,86 @@ def add(x, y):
             child_result += data.toString();
         }
         assertEq("call: 3,thread: 5,deleted", child_result);
+    }
+
+    # a child process created with fork() while another thread used a class of a Qore Program (it ran the class's
+    # constructor called from Python, without the GIL) uses the class and deletes the Program.  Previously the child
+    # still counted the use of the parent's thread, which never ends in the child, and the deletion waited for it
+    # forever
+    forkDeclarationInUseTest() {
+        if (!Option::HAVE_FORK) {
+            testSkip("fork() is not available");
+        }
+        # the child writes its result to a pipe, which the parent reads until the child has exited
+        hash<PipeInfo> result = File::getPipe();
+        Program child(PO_NEW_STYLE);
+        child.parse("class Blocker {
+    public {
+        int value = 1;
+    }
+    # waits in the constructor if a queue is given
+    constructor(*Queue ready, *Queue release) {
+        if (ready) {
+            ready.push(True);
+            release.get();
+        }
+    }
+}
+Blocker sub get_object() {
+    return new Blocker();
+}
+", "fork-decl-in-use");
+        PythonProgram p("
+saved = {}
+
+def save_type(o):
+    saved['type'] = type(o)
+
+def construct(*args):
+    return saved['type'](*args).value
+", "fork-decl-in-use.py");
+        p.callFunction("save_type", child.callFunction("get_object"));
+        Queue ready();
+        Queue release();
+        # a thread constructs an object of the class from Python, and waits in the constructor
+        Counter constructing(1);
+        background sub () {
+            on_exit constructing.dec();
+            p.callFunction("construct", ready, release);
+        }();
+        ready.get();
+        int pid = fork();
+        if (!pid) {
+            list<string> r;
+            try {
+                # the child uses the class, and deletes its Program
+                r += sprintf("construct: %d", p.callFunction("construct"));
+                delete child;
+                r += "deleted";
+                try {
+                    p.callFunction("construct");
+                    r += "constructed after deletion";
+                } catch (hash<ExceptionInfo> ex) {
+                    r += ex.err;
+                }
+            } catch (hash<ExceptionInfo> ex) {
+                r += ex.err;
+            }
+            result.write.write(r.join(","));
+            Qore::exit(0);
+        }
+        assertGt(0, pid);
+        result.write.close();
+        release.push(True);
+        constructing.waitForZero();
+        string child_result;
+        while (*binary data = result.read.readBinary(4096)) {
+            child_result += data.toString();
+        }
+        assertEq("construct: 1,deleted,builtins.RuntimeError", child_result);
+        # the parent's thread has ended its use: the Program is deleted in the parent too
+        delete child;
+        assertThrows("builtins.RuntimeError", "Qore class 'Blocker' cannot be used", \p.callFunction(), "construct");
     }
 
     # Qore's fork() called from Python code in a Python process hosting Qore (the main interpreter) while a

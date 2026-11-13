@@ -25,6 +25,7 @@
 #include <qore/QoreForkHandler.h>
 
 #include <map>
+#include <new>
 #include <optional>
 
 namespace {
@@ -40,6 +41,8 @@ struct DeclHandleRegistry {
     //! the number of threads waiting on cond
     unsigned waiting = 0;
     program_handle_map_t map;
+    //! the first handle in the list of all handles, which the child handler of the lock needs
+    QorePythonDeclHandle* handles = nullptr;
 };
 
 // not destroyed, so that handles of capsules freed while the process exits can still deregister
@@ -64,9 +67,24 @@ thread_local QorePythonDeclUse* QorePythonDeclUse::current = nullptr;
 int QorePythonDeclHandle::registerForkHandler() {
     assert(!decl_handle_fork_reg);
     decl_handle_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_qore_declaration_handles",
-        qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock,
-        &get_registry().lck);
+        qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, forkChild, &get_registry().lck);
     return decl_handle_fork_reg ? 0 : -1;
+}
+
+void QorePythonDeclHandle::forkChild(void* lock) {
+    qore_fork_child_thread_lock(lock);
+    DeclHandleRegistry& registry = get_registry();
+    // the threads waiting in invalidate() do not exist in the child, and the child gets a new condition: its copy
+    // would still list them as waiters, and signaling it could wait for them to wake up (musl).  The old object is
+    // not destroyed, as pthread_cond_destroy() can also wait for its waiters (see QoreCondition::reinitAfterFork() in
+    // libqore, which modules cannot call)
+    registry.waiting = 0;
+    new (&registry.cond) QoreCondition;
+    // the uses of the other threads never end in the child: invalidate() would wait for them forever.  The memory
+    // of a handle whose destructor was waiting for the lock in another thread is not freed in the child
+    for (QorePythonDeclHandle* handle = registry.handles; handle; handle = handle->next_handle) {
+        handle->users = QorePythonDeclUse::countThreadUses(handle);
+    }
 }
 
 void QorePythonDeclHandle::unregisterForkHandler() {
@@ -77,19 +95,34 @@ void QorePythonDeclHandle::unregisterForkHandler() {
 std::shared_ptr<QorePythonDeclHandle> QorePythonDeclHandle::create(const void* decl, QoreProgram* owner, Kind kind,
         const char* name) {
     std::shared_ptr<QorePythonDeclHandle> rv(new QorePythonDeclHandle(decl, owner, kind, name));
+    DeclHandleRegistry& registry = get_registry();
+    AutoLocker al(registry.lck);
+    // linked first: if the map cannot be updated, the destructor unlinks the handle after the lock is released
+    rv->next_handle = registry.handles;
+    if (registry.handles) {
+        registry.handles->prev_handle = rv.get();
+    }
+    registry.handles = rv.get();
     if (owner) {
-        DeclHandleRegistry& registry = get_registry();
-        AutoLocker al(registry.lck);
         registry.map[owner].insert(handle_map_t::value_type(rv.get(), rv));
     }
     return rv;
 }
 
 QorePythonDeclHandle::~QorePythonDeclHandle() {
+    DeclHandleRegistry& registry = get_registry();
+    AutoLocker al(registry.lck);
     assert(!users);
+    if (prev_handle) {
+        prev_handle->next_handle = next_handle;
+    } else {
+        assert(registry.handles == this);
+        registry.handles = next_handle;
+    }
+    if (next_handle) {
+        next_handle->prev_handle = prev_handle;
+    }
     if (owner) {
-        DeclHandleRegistry& registry = get_registry();
-        AutoLocker al(registry.lck);
         // the entry has been removed if the Program has invalidated its handles
         program_handle_map_t::iterator i = registry.map.find(owner);
         if (i != registry.map.end()) {

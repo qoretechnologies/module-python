@@ -3,11 +3,31 @@
 # SPDX-License-Identifier: MIT
 """Check that importing qoreloader leaves the signal handling of a Python process hosting Qore to Python."""
 import os
+import select
 import signal
 import subprocess
 import sys
 
 MASK = "import signal; print(sorted(int(s) for s in signal.pthread_sigmask(signal.SIG_BLOCK, [])))"
+
+
+# the time that a child of fork() is given to exit
+CHILD_TIMEOUT = 60
+
+
+def wait_child(pid):
+    """Waits for the child to exit and returns its wait status; kills it and fails if it does not exit in time."""
+    pidfd = os.pidfd_open(pid)
+    try:
+        readable, _, _ = select.select([pidfd], [], [], CHILD_TIMEOUT)
+        if not readable:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            raise AssertionError("the child %d did not exit in %d seconds" % (pid, CHILD_TIMEOUT))
+    finally:
+        os.close(pidfd)
+    _, status = os.waitpid(pid, 0)
+    return status
 
 
 def child_mask():
@@ -159,7 +179,7 @@ def check_fork_child_signal():
         result = str(e).split(":")[0]
     thread.join()
     os.close(go_w)
-    _, status = os.waitpid(pid, 0)
+    status = wait_child(pid)
     assert result == "QUEUE-TIMEOUT", result
     assert os.waitstatus_to_exitcode(status) == 0, status
 
