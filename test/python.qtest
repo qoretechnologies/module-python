@@ -722,7 +722,10 @@ int sub get_count() { return count; }
             }
         }
 
-        # every module command, issued at parse time and at runtime
+        # a module API 2.3 Qore library gives the handler the restrictions of the code that ISSUES a command; the module
+        # then judges the issuer.  Before 2.3, the handler can only judge the Program that the command applies to
+        bool issuer_model = (get_module_hash().python.filename =~ /-api-2\.([3-9]|[1-9][0-9])\.qmod$/);
+
         list<string> cmds = (
             "parse restricted.py " + py_code,
             "import os",
@@ -732,38 +735,92 @@ int sub get_count() { return count; }
             "export-func print",
             "add-module-path " + tmp.path,
         );
+        # the refusal of the module (before module API 2.3) or of the module command context
+        string refused = "forbid it|restricted with PO_NO_";
+
+        # (a) every module command from code with a restriction that blocks uncontrolled APIs is refused, whether the
+        # command is a %module-cmd directive that the restricted code parses or a call of Program::issueModuleCmd()
+        # that restricted code makes on a Program that is not restricted
         foreach hash<auto> r in (uncontrolled.pairIterator()) {
             foreach string cmd in (cmds) {
                 {
                     Program pgm(r.value | PO_NEW_STYLE);
-                    assertThrows("PYTHON-PARSE-COMMAND-ERROR", "PO_NO_UNCONTROLLED_APIS", \pgm.parse(),
+                    assertThrows("PYTHON-PARSE-COMMAND-ERROR", refused, \pgm.parse(),
                         ("%module-cmd(python) " + cmd + "\n", "restricted"), sprintf("%s: parse: %s", r.key, cmd));
                 }
-                {
-                    Program pgm(r.value | PO_NEW_STYLE);
-                    assertThrows("PYTHON-PARSE-COMMAND-ERROR", "PO_NO_UNCONTROLLED_APIS", \pgm.issueModuleCmd(),
-                        ("python", cmd), sprintf("%s: issueModuleCmd(): %s", r.key, cmd));
+                # PO_NO_EXTERNAL_ACCESS and PO_LOCKDOWN also forbid Program::issueModuleCmd() (PO_NO_MODULES), so only
+                # the directive reaches the module from code with them
+                if (issuer_model && r.key == "PO_NO_UNCONTROLLED_APIS") {
+                    Program issuer(r.value | PO_NEW_STYLE);
+                    issuer.parse("sub issue(Program target, string cmd) { target.issueModuleCmd('python', cmd); }",
+                        "restricted-issuer");
+                    # Qore itself refuses a command to a Program that lacks the restrictions of the issuer
+                    Program target(r.value | PO_NEW_STYLE);
+                    assertThrows("PYTHON-PARSE-COMMAND-ERROR", refused, \issuer.callFunction(),
+                        ("issue", target, cmd), sprintf("%s: restricted issuer: %s", r.key, cmd));
                 }
                 assertFalse(is_file(marker), sprintf("%s: %s: the Python code did not run", r.key, cmd));
             }
         }
 
-        # PO_NO_EMBEDDED_LOGIC blocks parsing Python code; the other commands do not parse code
+        # PO_NO_EMBEDDED_LOGIC blocks parsing Python code in the issuing code; the other commands do not parse code
         {
             Program pgm(PO_NO_EMBEDDED_LOGIC | PO_NEW_STYLE);
-            assertThrows("PYTHON-PARSE-COMMAND-ERROR", "PO_NO_EMBEDDED_LOGIC", \pgm.issueModuleCmd(),
-                ("python", "parse restricted.py " + py_code));
+            assertThrows("PYTHON-PARSE-COMMAND-ERROR", refused, \pgm.parse(),
+                ("%module-cmd(python) parse restricted.py " + py_code + "\n", "restricted"),
+                "PO_NO_EMBEDDED_LOGIC: parse directive");
             assertFalse(is_file(marker), "PO_NO_EMBEDDED_LOGIC: parse: the Python code did not run");
-            pgm.issueModuleCmd("python", "import os");
-            pgm.parse("string sub sep() { return os::sep; }", "restricted");
-            assertEq(DirSep, pgm.callFunction("sep"), "PO_NO_EMBEDDED_LOGIC: import is allowed");
+            # the other commands are allowed in the code that has only PO_NO_EMBEDDED_LOGIC
+            pgm = new Program(PO_NO_EMBEDDED_LOGIC | PO_NEW_STYLE);
+            pgm.parse("%module-cmd(python) import os\nstring sub sep() { return os::sep; }", "restricted");
+            assertEq(DirSep, pgm.callFunction("sep"), "PO_NO_EMBEDDED_LOGIC: the import directive is allowed");
+            if (issuer_model) {
+                Program issuer(PO_NO_EMBEDDED_LOGIC | PO_NEW_STYLE);
+                issuer.parse("sub issue(Program target, string cmd) { target.issueModuleCmd('python', cmd); }",
+                    "restricted-issuer");
+                Program target(PO_NO_EMBEDDED_LOGIC | PO_NEW_STYLE);
+                assertThrows("PYTHON-PARSE-COMMAND-ERROR", refused, \issuer.callFunction(),
+                    ("issue", target, "parse restricted.py " + py_code), "PO_NO_EMBEDDED_LOGIC: issuer: parse");
+                assertFalse(is_file(marker), "PO_NO_EMBEDDED_LOGIC: issuer: parse: the Python code did not run");
+                issuer.callFunction("issue", target, "import os");
+                target.parse("string sub sep() { return os::sep; }", "restricted");
+                assertEq(DirSep, target.callFunction("sep"), "PO_NO_EMBEDDED_LOGIC: issuer: import is allowed");
+            }
         }
 
-        # Python code is not subject to the other restrictions (ex: PO_NO_FILESYSTEM): the same command runs it
+        # (b) unrestricted code (here the host) may issue a command to a restricted target Program: the restrictions
+        # of the issuer apply, not those of the target (module API 2.3)
+        if (issuer_model) {
+            foreach hash<auto> r in ((uncontrolled + {"PO_NO_EMBEDDED_LOGIC": PO_NO_EMBEDDED_LOGIC}).pairIterator()) {
+                unlink(marker);
+                Program pgm(r.value | PO_NEW_STYLE);
+                pgm.issueModuleCmd("python", "parse restricted.py " + py_code);
+                assertTrue(is_file(marker), sprintf("%s: an unrestricted issuer's command ran the Python code", r.key));
+                pgm.issueModuleCmd("python", "import os");
+                unlink(marker);
+            }
+        }
+
+        # Python code is not subject to the other restrictions (ex: PO_NO_FILESYSTEM): the same command runs it,
+        # whether the host issues it or the code with the restriction does
         {
             Program pgm(PO_NO_FILESYSTEM | PO_NEW_STYLE);
             pgm.issueModuleCmd("python", "parse restricted.py " + py_code);
             assertTrue(is_file(marker), "an unrestricted module command runs the Python code");
+            unlink(marker);
+            Program issuer(PO_NO_FILESYSTEM | PO_NEW_STYLE);
+            issuer.parse("%module-cmd(python) parse restricted.py " + py_code + "\n", "restricted");
+            assertTrue(is_file(marker), "PO_NO_FILESYSTEM: the issuer's directive runs the Python code");
+            unlink(marker);
+            if (issuer_model) {
+                issuer = new Program(PO_NO_FILESYSTEM | PO_NEW_STYLE);
+                issuer.parse("sub issue(Program target, string cmd) { target.issueModuleCmd('python', cmd); }",
+                    "restricted-issuer");
+                Program target(PO_NO_FILESYSTEM | PO_NEW_STYLE);
+                issuer.callFunction("issue", target, "parse restricted.py " + py_code);
+                assertTrue(is_file(marker), "PO_NO_FILESYSTEM: the issuer's runtime command runs the Python code");
+                unlink(marker);
+            }
         }
 
         # Python values that a restricted Program gets from other code are capabilities, as in Qore: they run in the
