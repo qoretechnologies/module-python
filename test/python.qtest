@@ -851,6 +851,9 @@ auto sub get_bound() { return Python::restricted_caps::bound; }
         SandboxManager sm();
         sm.setFilesystemDefaultPolicy(True);
         sm.addFilesystemDeniedPath(dir);
+        # the sandboxed Program runs Python code, an uncontrolled API; this test is about the filesystem policy that
+        # governs the Python threads, so the sandbox must allow the Python code to run at all
+        sm.setUncontrolledApiPolicy(True);
         Program pgm(PO_NO_CHILD_PO_RESTRICTIONS);
         pgm.setSandboxManager(sm);
         # a class of this unrestricted Program, which is governed by the sandbox of the code that calls it
@@ -6321,6 +6324,9 @@ int sub simple() {
         # creates the PythonProgram
         p.run();
         SandboxManager sm();
+        # the sandboxed code calls a PythonProgram (run_loop()), which is an uncontrolled API: without the policy the
+        # call is refused and the Python loop never starts
+        sm.setUncontrolledApiPolicy(True);
         p.setSandboxManager(sm);
 
         foreach string func in (("loop", "qore_loop")) {
@@ -6405,6 +6411,9 @@ hash<auto> sub stop() { return pp.callFunction('stop'); }
 ", "interrupt_thread");
         pgm.run();
         SandboxManager sm();
+        # start() and stop() of the sandboxed Program call a PythonProgram (an uncontrolled API); this test is about
+        # the interrupts, not about the uncontrolled-API policy
+        sm.setUncontrolledApiPolicy(True);
         pgm.setSandboxManager(sm);
         Queue started();
         pgm.callFunction("start", started);
@@ -6497,6 +6506,9 @@ def simple_func():
 ", "test");
 
         SandboxManager sm();
+        # the sandboxed code creates and calls a PythonProgram, which is an uncontrolled API: this test is about the
+        # interrupt, not about the uncontrolled-API policy (callback-provenance.qtest tests that the policy refuses it)
+        sm.setUncontrolledApiPolicy(True);
         p.setSandboxManager(sm);
 
         hash<auto> result = p.callFunction("test_interrupted_python_call", sm);

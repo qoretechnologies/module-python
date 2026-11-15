@@ -12,6 +12,7 @@ class ProvenanceTest inherits QUnit::Test {
     constructor() : QUnit::Test("python callback provenance", "1.0", \ARGV) {
         addTestCase("a returned foreign callback retains its creation policy", \testProvenance());
         addTestCase("foreign callback cleanup retains provenance", \testRelease());
+        addTestCase("a sandbox refuses PythonProgram calls unless it allows uncontrolled APIs", \testUncontrolledApiRefused());
         set_return_value(main());
     }
 
@@ -26,6 +27,9 @@ class ProvenanceTest inherits QUnit::Test {
         sandbox.parse("code sub make(object runtime, code reader) { return runtime.callFunction(\"make\", reader); }", "foreign-callback-factory");
         SandboxManager sm();
         sm.setFilesystemDefaultPolicy(False);
+        # this test is about the provenance of the callback, not about the uncontrolled-API policy: the sandboxed code
+        # must be allowed to call the Python runtime (an uncontrolled API) to obtain a callback at all
+        sm.setUncontrolledApiPolicy(True);
         sandbox.setSandboxManager(sm);
         code trusted = runtime.callFunction("make", reader);
         code restricted = sandbox.callFunction("make", runtime, reader);
@@ -38,6 +42,33 @@ class ProvenanceTest inherits QUnit::Test {
         assertEq("FILESYSTEM-ACCESS-DENIED", results.get(10s));
         pool.submit(sub () { results.push(trusted()); });
         assertEq("allowed", results.get(10s), "worker reuse restores the previous context");
+    }
+
+    # PythonProgram is an uncontrolled API: code that a sandbox governs is refused it unless the sandbox allows
+    # uncontrolled APIs (the default is to refuse them)
+    testUncontrolledApiRefused() {
+        PythonProgram runtime("def answer():\n    return 42\n", "uncontrolled.py");
+        # the trusted host can call the runtime
+        assertEq(42, runtime.callFunction("answer"));
+
+        Program sandbox(PO_NEW_STYLE);
+        sandbox.parse("int sub call(object runtime) { return runtime.callFunction(\"answer\"); }", "uncontrolled-refused");
+        SandboxManager sm();
+        sandbox.setSandboxManager(sm);
+        bool refused;
+        try {
+            sandbox.callFunction("call", runtime);
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("INVALID-FUNCTION-ACCESS", ex.err);
+            assertRegex("PythonProgram::callFunction", ex.desc);
+            assertRegex("uncontrolled", ex.desc);
+            refused = True;
+        }
+        assertTrue(refused, "the sandbox called PythonProgram::callFunction() without the uncontrolled-API policy");
+
+        # the same sandbox with the policy set may call it
+        sm.setUncontrolledApiPolicy(True);
+        assertEq(42, sandbox.callFunction("call", runtime));
     }
 
     testRelease() {
@@ -72,6 +103,9 @@ def clear():
         sandbox.parse("code sub take(object runtime) { return runtime.callFunction(\"take\"); }", "callback-release");
         SandboxManager sm();
         sm.setFilesystemDefaultPolicy(False);
+        # this test is about the provenance of the callback, not about the uncontrolled-API policy: the sandboxed code
+        # must be allowed to call the Python runtime (an uncontrolled API) to obtain a callback at all
+        sm.setUncontrolledApiPolicy(True);
         sandbox.setSandboxManager(sm);
         code restricted = sandbox.callFunction("take", runtime);
         runtime.callFunction("clear");
