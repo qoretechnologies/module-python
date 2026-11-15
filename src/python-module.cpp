@@ -63,6 +63,14 @@ void python_qore_module_desc(QoreModuleInfo& mod_info) {
     mod_info.ns_init = python_module_ns_init;
     mod_info.del = python_module_delete;
     mod_info.parse_cmd = python_module_parse_cmd;
+#if QORE_MODULE_API_MINOR >= 3
+    // every command is classified in python_module_parse_cmd() by the restrictions of the code that issues it; the
+    // field exists only in a library that implements module API 2.3 (a library that implements an earlier API creates
+    // the struct without it)
+    if (is_module_api_supported(2, 3)) {
+        mod_info.cmd_caller_aware = true;
+    }
+#endif
     mod_info.license = QL_LGPL;
     mod_info.license_str = "LGPL-2.1-or-later";
 
@@ -1215,8 +1223,28 @@ static void python_module_parse_cmd(const QoreString& cmd, ExceptionSink* xsink)
     QoreProgram* pgm = getProgram();
     // Python code is not subject to Qore's restrictions, so every command, which gives access to Python, is an
     // uncontrolled API, like the Python classes and functions that the module imports, and "parse" also parses code at
-    // runtime; the restrictions of the Program are checked here, as a Program that inherits the module from its parent
-    // can issue commands without loading the module
+    // runtime
+#if QORE_MODULE_API_MINOR >= 3
+    // the restrictions are those of the code that issues the command, never those of the Program that it applies to
+    // (getProgram()): restricted code could otherwise issue a command to a Program that is more permissive, and
+    // unrestricted code is allowed to issue commands to a restricted Program
+    const QoreModuleCommandContext* ctx = QoreModuleCommandContext::get();
+    // every entry point sets the context; fail closed if a command reaches the handler without one
+    assert(ctx);
+    if (!ctx) {
+        xsink->raiseException("PYTHON-PARSE-COMMAND-ERROR", "cannot execute python module command '%s': the command "
+            "has no context that says which code issued it", str.c_str());
+        return;
+    }
+    if (ctx->check(PO_NO_UNCONTROLLED_APIS, true, "PYTHON-PARSE-COMMAND-ERROR", str.c_str(), xsink)) {
+        return;
+    }
+    if (str == "parse" && ctx->check(PO_NO_EMBEDDED_LOGIC, true, "PYTHON-PARSE-COMMAND-ERROR", str.c_str(), xsink)) {
+        return;
+    }
+#else
+    // before module API 2.3 the issuer is not known: the restrictions of the Program are checked here, as a Program
+    // that inherits the module from its parent can issue commands without loading the module
     if (pgm->getParseOptions() & PO_NO_UNCONTROLLED_APIS) {
         xsink->raiseException("PYTHON-PARSE-COMMAND-ERROR", "python module command '%s' is not allowed in a Program "
             "restricted with PO_NO_UNCONTROLLED_APIS", str.c_str());
@@ -1227,6 +1255,7 @@ static void python_module_parse_cmd(const QoreString& cmd, ExceptionSink* xsink)
             "Program restricted with PO_NO_EMBEDDED_LOGIC");
         return;
     }
+#endif
 
     if (i->second.requires_arg) {
         if (arg.empty()) {
