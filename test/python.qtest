@@ -466,6 +466,7 @@ class PythonTest inherits Test {
         addTestCase("Python call references evaluate their arguments in every exec mode", \callRefArgumentTest());
         addTestCase("Python threads run under the sandbox of the interpreter's Program", \sandboxPythonThreadTest());
         addTestCase("restricted Programs cannot run Python code", \restrictedProgramTest());
+        addTestCase("sandboxed code cannot issue python module commands", \sandboxedIssuerTest());
         addTestCase("os.environ changes are serialized with Qore", \environmentTest());
         addTestCase("an interpreter copies the environment under Qore's lock", \interpreterEnvironmentCopyTest());
         addTestCase("fork() while another thread holds a lock of the module", \forkHandlersTest());
@@ -691,6 +692,67 @@ int sub get_count() { return count; }
     # python module commands, and a Program restricted with PO_NO_EMBEDDED_LOGIC can neither create interpreters nor
     # parse Python code with a module command.  Previously the PythonProgram class was only in the EMBEDDED_LOGIC
     # domain and the module commands did not check the parse options, so restricted Programs could run any Python code.
+    # a module command is judged by the code that issues it (qore#5699): code that a sandbox governs cannot issue a
+    # python module command, by a %module-cmd directive or by Program::issueModuleCmd(), into its own Program or into a
+    # Program that is not sandboxed, as Python code is an uncontrolled API; code that a trusting sandbox governs (one
+    # that allows uncontrolled APIs) can
+    sandboxedIssuerTest() {
+        if (get_module_hash().python.filename !~ /-api-2\.([3-9]|[1-9][0-9])\.qmod$/) {
+            testSkip("the module command context requires module API 2.3");
+        }
+        TmpDir tmp("python-sandboxed-issuer-");
+        string marker = tmp.path + DirSep + "marker";
+        string py_code = sprintf("open(%y, 'w').close()", marker);
+        list<string> cmds = (
+            "parse sandboxed.py " + py_code,
+            "import os",
+            "import-ns Qore qore_ns",
+            "export-func print",
+            "add-module-path " + tmp.path,
+        );
+        string issue_code = "sub issue(*Program target, string cmd) { "
+            "if (target) { target.issueModuleCmd('python', cmd); } else { Program::issueModuleCmd('python', cmd); } }";
+        foreach string cmd in (cmds) {
+            # a %module-cmd directive that the sandboxed code parses
+            {
+                Program pgm(PO_NEW_STYLE);
+                pgm.setSandboxManager(new SandboxManager());
+                assertThrows("PYTHON-PARSE-COMMAND-ERROR", \pgm.parse(), ("%module-cmd(python) " + cmd + "\n",
+                    "sandboxed"), "directive: " + cmd);
+            }
+            # Program::issueModuleCmd() on the sandboxed code's own Program
+            {
+                Program issuer(PO_NEW_STYLE);
+                issuer.parse(issue_code, "sandboxed-issuer");
+                issuer.setSandboxManager(new SandboxManager());
+                assertThrows("PYTHON-PARSE-COMMAND-ERROR", \issuer.callFunction(), ("issue", NOTHING, cmd),
+                    "own Program: " + cmd);
+                # into a Program that no sandbox governs: Qore refuses it before the module sees it (qore#5659)
+                Program target(PO_NEW_STYLE);
+                assertThrows("RUNTIME-COMMAND-ERROR", \issuer.callFunction(), ("issue", target, cmd),
+                    "trusted target: " + cmd);
+            }
+            assertFalse(is_file(marker), "the Python code did not run: " + cmd);
+        }
+
+        # a trusting sandbox does not restrict the module commands of its code
+        {
+            SandboxManager sm();
+            sm.setUncontrolledApiPolicy(True);
+            Program pgm(PO_NEW_STYLE);
+            pgm.setSandboxManager(sm);
+            pgm.parse("%module-cmd(python) parse sandboxed.py " + py_code + "\n", "trusting");
+            assertTrue(is_file(marker), "a trusting sandbox's directive runs the Python code");
+            unlink(marker);
+            Program issuer(PO_NEW_STYLE);
+            issuer.parse(issue_code, "trusting-issuer");
+            issuer.setSandboxManager(sm);
+            issuer.callFunction("issue", NOTHING, "parse sandboxed.py " + py_code);
+            assertTrue(is_file(marker), "a trusting sandbox's runtime command runs the Python code");
+            unlink(marker);
+        }
+    }
+
     restrictedProgramTest() {
         TmpDir tmp("python-restricted-");
         string marker = tmp.path + DirSep + "marker";
