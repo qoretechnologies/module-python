@@ -67,3 +67,11 @@ The Debian copyright file identifies these components and their notices.
 The canonical `qore-python-module.spec` builds the Qore module and the `qoreloader`
 Python extension alias for Fedora, Enterprise Linux and openSUSE. See
 [rpm/README.rst](rpm/README.rst) for source preparation and installed-package tests.
+
+Develop CI
+----------
+
+After a squash merge into develop, CI checks the merged pull request head
+as well as the merge commit and its parents. It reuses an earlier result
+only when the Git trees match and the existing pipeline checks pass.
+A missing PR, changed tree, or unavailable evidence runs the full suite.

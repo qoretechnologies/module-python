@@ -18,6 +18,7 @@ import tempfile
 import threading
 import unittest
 from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +30,9 @@ CI_CONFIG = ROOT / ".gitlab-ci.yml"
 def load_check_module():
     spec = importlib.util.spec_from_file_location("tree_already_tested", CHECK)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Import sibling helpers just as Python does when CI executes the script.
+    with patch.object(sys, "path", [str(CHECK.parent), *sys.path]):
+        spec.loader.exec_module(module)
     return module
 
 
