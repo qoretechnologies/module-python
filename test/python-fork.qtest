@@ -143,7 +143,10 @@ def add(x, y):
         while (*binary data = result.read.readBinary(4096)) {
             child_result += data.toString();
         }
-        assertEq("PYTHON-FORK-ERROR,PYTHON-FORK-ERROR,PYTHON-FORK-ERROR", child_result);
+        # the module reports the error of the child Program only when built with a Qore library that provides
+        # AbstractQoreProgramExternalDataEx (Python::PythonProgramCopyErrors)
+        assertEq("PYTHON-FORK-ERROR,PYTHON-FORK-ERROR," + (PythonProgramCopyErrors ? "PYTHON-FORK-ERROR" : "no error"),
+            child_result);
     }
 
     # Python calls a Qore closure that calls fork() while another Python thread holds the GIL: in the child, the

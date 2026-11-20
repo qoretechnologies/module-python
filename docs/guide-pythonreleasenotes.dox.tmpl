@@ -431,7 +431,8 @@
     - with %Qore 3.0 and later, an error creating the %Python program of a child %Program (ex: in a child process
       created with \c fork() that cannot use %Python) fails the creation of the child with the module's exception
       instead of being printed and leaving the child with an invalid %Python program, and errors releasing it are
-      reported to the code that deletes the %Program
+      reported to the code that deletes the %Program; @ref Python::PythonProgramCopyErrors "PythonProgramCopyErrors"
+      tells whether the module was built with this support
       (<a href="https://github.com/qoretechnologies/qore/issues/6918">issue 6918</a>)
 
     <b>Build System Changes:</b>
