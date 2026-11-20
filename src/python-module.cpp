@@ -1173,7 +1173,13 @@ static void python_module_delete() {
     qore_deregister_program_cleanup_callback(python_program_cleanup);
     qore_python_stop_gil_switch();
     if (qore_python_pgm) {
+#ifdef _QORE_HAS_PROGRAM_EXTERNAL_DATA_EX
+        // the module's deletion has no ExceptionSink: the sink reports errors as unhandled exceptions
+        ExceptionSink xsink;
+        qore_python_pgm->doDeref(&xsink);
+#else
         qore_python_pgm->doDeref();
+#endif
         qore_python_pgm = nullptr;
     }
     if (PNS) {

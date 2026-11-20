@@ -147,7 +147,13 @@ void qoreloader_free(void* obj) {
         if (!q_libqore_shutdown()) {
             QoreThreadAttachHelper attach_helper;
             if (!attach_helper.attach()) {
+#ifdef _QORE_HAS_PROGRAM_EXTERNAL_DATA_EX
+                // there is no caller to report errors to: the sink reports them as unhandled exceptions
+                ExceptionSink xsink;
+                pypgm->doDeref(&xsink);
+#else
                 pypgm->doDeref();
+#endif
             }
         }
     }
@@ -156,7 +162,13 @@ void qoreloader_free(void* obj) {
         QorePythonSignalWakeup::uninstall();
 
         if (qore_python_pgm) {
+#ifdef _QORE_HAS_PROGRAM_EXTERNAL_DATA_EX
+            // there is no caller to report errors to: the sink reports them as unhandled exceptions
+            ExceptionSink xsink;
+            qore_python_pgm->doDeref(&xsink);
+#else
             qore_python_pgm->doDeref();
+#endif
             qore_python_pgm = nullptr;
         }
 

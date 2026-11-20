@@ -66,7 +66,13 @@ struct QorePythonThreadStateInfo {
     bool owns_state;
 };
 
+#ifdef _QORE_HAS_PROGRAM_EXTERNAL_DATA_EX
+// the external data of a Program reports the errors of its copy and of its release in an ExceptionSink
+// (qoretechnologies/qore#6918)
+class QorePythonProgram : public AbstractQoreProgramExternalDataEx {
+#else
 class QorePythonProgram : public AbstractQoreProgramExternalData {
+#endif
     friend class PythonModuleContextHelper;
 public:
     typedef std::set<std::string> strset_t;
@@ -85,8 +91,10 @@ public:
     DLLLOCAL QorePythonProgram(QoreProgram* qpgm, QoreNamespace* pyns, ExceptionSink* xsink);
 
     //! New Qore Python context; does not own the QoreProgram reference
-    DLLLOCAL QorePythonProgram(const QorePythonProgram& old, QoreProgram* qpgm)
-            : QorePythonProgram(qpgm, qpgm->findNamespace(QORE_PYTHON_NS_NAME), nullptr) {
+    /** @param xsink errors are raised here, and the program is then invalid; if nullptr, they are printed
+    */
+    DLLLOCAL QorePythonProgram(const QorePythonProgram& old, QoreProgram* qpgm, ExceptionSink* xsink = nullptr)
+            : QorePythonProgram(qpgm, qpgm->findNamespace(QORE_PYTHON_NS_NAME), xsink) {
         if (!pyns) {
             pyns = PNS->copy();
             qpgm->getRootNS()->addNamespace(pyns);
@@ -96,6 +104,37 @@ public:
     DLLLOCAL QorePythonProgram(const QoreString& source_code, const QoreString& source_label, int start,
         ExceptionSink* xsink);
 
+#ifdef _QORE_HAS_PROGRAM_EXTERNAL_DATA_EX
+    using AbstractQoreProgramExternalDataEx::copy;
+    using AbstractQoreProgramExternalDataEx::doDeref;
+
+    //! Returns the Python program of a child Program; an error creating it fails the creation of the child
+    DLLLOCAL AbstractQoreProgramExternalData* copy(QoreProgram* pgm, ExceptionSink* xsink) const override {
+        QorePythonProgram* rv;
+        try {
+            rv = new QorePythonProgram(*this, pgm, xsink);
+        } catch (AbstractException& e) {
+            // a C++ exception must not leave the copy
+            e.convert(xsink);
+            return nullptr;
+        }
+        if (*xsink) {
+            // the invalid program is released at once; its interpreter, if any, is deleted
+            rv->doDeref(xsink);
+            return nullptr;
+        }
+        return rv;
+    }
+
+    //! Releases the program; errors are raised in \a xsink, and the program is released anyway
+    /** Also called for a copy whose creation failed, or for which init() was never called
+    */
+    DLLLOCAL void doDeref(ExceptionSink* xsink) override {
+        printd(5, "QorePythonProgram::doDeref() this: %p\n", this);
+        deleteIntern(xsink);
+        weakDeref();
+    }
+#else
     DLLLOCAL virtual AbstractQoreProgramExternalData* copy(QoreProgram* pgm) const {
         return new QorePythonProgram(*this, pgm);
     }
@@ -109,6 +148,7 @@ public:
             throw QoreXSinkException(xsink);
         }
     }
+#endif
 
     DLLLOCAL void destructor(ExceptionSink* xsink) {
         deleteIntern(xsink);
