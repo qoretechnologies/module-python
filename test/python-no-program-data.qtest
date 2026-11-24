@@ -1,0 +1,48 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# The static evaluation methods of PythonProgram called in a Program without a Python program of its own (qore#7519)
+
+%modern
+%no-child-restrictions
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+
+%requires python
+%requires QUnit
+
+%exec-class PythonNoProgramDataTest
+
+class PythonNoProgramDataTest inherits QUnit::Test {
+    public {
+        const Source = "auto sub expr(string s) { return Python::PythonProgram::evalExpression(s); }\n"
+            "sub stmt_keep(string s) { Python::PythonProgram::evalStatementKeep(s); }\n"
+            "sub stmt(string s) { Python::PythonProgram::evalStatement(s); }\n";
+    }
+
+    constructor() : QUnit::Test("python static evaluation without a Python program", "1.0", \ARGV) {
+        addTestCase("a Program without a Python program of its own", \testNoProgramData());
+        addTestCase("a Program with a Python program of its own", \testProgramData());
+        set_return_value(main());
+    }
+
+    testNoProgramData() {
+        # a Program that does not inherit the Program data of its parent has no Python program of its own
+        Program pgm(PO_NEW_STYLE | PO_NO_INHERIT_PROGRAM_DATA);
+        pgm.parse(Source, "no-program-data");
+        assertThrows("PYTHON-ERROR", "no globals", \pgm.callFunction(), ("expr", "1 + 1"));
+        assertThrows("PYTHON-ERROR", "no globals", \pgm.callFunction(), ("stmt_keep", "x = 1"));
+        # statements that do not keep their globals run in the __main__ module of the interpreter
+        pgm.callFunction("stmt", "import __main__\n__main__.cpc_no_program_data = 1\n");
+        pgm.callFunction("stmt", "import __main__\nassert __main__.cpc_no_program_data == 1\n");
+        # the Program can still be used after the errors
+        assertThrows("PYTHON-ERROR", "no globals", \pgm.callFunction(), ("expr", "2"));
+    }
+
+    testProgramData() {
+        Program pgm(PO_NEW_STYLE);
+        pgm.parse(Source, "program-data");
+        pgm.callFunction("stmt_keep", "cpc_x = 21");
+        assertEq(42, pgm.callFunction("expr", "cpc_x * 2"));
+    }
+}

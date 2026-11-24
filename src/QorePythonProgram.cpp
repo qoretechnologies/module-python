@@ -1195,7 +1195,14 @@ QoreValue QorePythonProgram::eval(ExceptionSink* xsink, const QoreString& source
         // returns a borrowed reference
         main_dict = PyModule_GetDict(main);
     } else {
-        assert(module);
+        // the program of the main interpreter, which a Program without a Python program of its own uses, has no
+        // module, so it has no globals for code that keeps them
+        if (!module) {
+            xsink->raiseException("PYTHON-ERROR", "the Python program of the current context has no globals for "
+                "code that keeps them: it is the program of the main interpreter, as the current Program has no "
+                "Python program of its own");
+            return QoreValue();
+        }
         // returns a borrowed reference
         main_dict = PyModule_GetDict(*module);
     }
