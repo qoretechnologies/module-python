@@ -47,6 +47,7 @@
 #include <datetime.h>
 
 #include <algorithm>
+#include <unordered_map>
 #include <climits>
 #include <ctime>
 #include <new>
@@ -124,7 +125,6 @@ private:
 };
 
 unsigned QorePythonProgram::fork_generation = 0;
-std::atomic<QorePythonProgram::FunctionHandle*> QorePythonProgram::function_handles{nullptr};
 int QorePythonProgram::fork_tid = 0;
 bool QorePythonProgram::fork_purge_pending = false;
 
@@ -202,7 +202,7 @@ int QorePythonProgram::registerForkHandlers() {
         qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, forkChildThreadStates, &py_thr_lck);
     main_ts_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_RESET, "python_main_thread_state", nullptr,
         nullptr, main_ts_lck_fork_child, &main_ts_lck);
-    if (!py_thr_lck_fork_reg || !main_ts_lck_fork_reg) {
+    if (!py_thr_lck_fork_reg || !main_ts_lck_fork_reg || registerFunctionTableForkHandler()) {
         unregisterForkHandlers();
         return -1;
     }
@@ -210,6 +210,7 @@ int QorePythonProgram::registerForkHandlers() {
 }
 
 void QorePythonProgram::unregisterForkHandlers() {
+    unregisterFunctionTableForkHandler();
     qore_unregister_fork_handler(main_ts_lck_fork_reg);
     main_ts_lck_fork_reg = nullptr;
     qore_unregister_fork_handler(py_thr_lck_fork_reg);
@@ -773,6 +774,8 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
     destroyed = true;
     // Deregister from global validity tracking FIRST, before anything else
     qpy_global_deregister(this);
+    // the functions of the program cannot be called from now on (calls in progress hold a weak reference)
+    removeFunctions();
     if (needs_deregistration) {
         qpy_deregister(this);
     }
@@ -6067,27 +6070,117 @@ QoreValue QorePythonProgram::execPythonStaticCFunctionMethod(const QoreMethod& m
     return pypgm->callCFunctionMethod(xsink, func, args);
 }
 
+//! The table of the Python functions of Qore function variants: ID -> owning program and function
+class QorePythonProgram::FunctionTable {
+public:
+    struct Entry {
+        //! the Python program that owns the function
+        QorePythonProgram* owner;
+        //! the function, referenced by its owner
+        PyObject* func;
+    };
+
+    //! the lock of the table, a leaf lock with fork handlers
+    static QoreThreadLock lck;
+    //! the functions of the live Python programs
+    static std::unordered_map<uint64_t, Entry> map;
+    //! the last ID given
+    static uint64_t last_id;
+    //! the fork handlers of the lock
+    static QoreForkHandlerRegistration* fork_reg;
+
+    //! The function of a call and a weak reference to its owner, held during the call
+    class CallHelper {
+    public:
+        //! looks up the function; raises PYTHON-INTERPRETER-DELETED if its owner has been deleted
+        DLLLOCAL CallHelper(const void* id, ExceptionSink* xsink) {
+            AutoLocker al(lck);
+            auto i = map.find(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(id)));
+            if (i == map.end()) {
+                xsink->raiseException("PYTHON-INTERPRETER-DELETED", "cannot execute Python function: the Python "
+                    "program that imported it has been deleted");
+                return;
+            }
+            owner = i->second.owner;
+            func = i->second.func;
+            owner->weakRef();
+        }
+
+        DLLLOCAL ~CallHelper() {
+            if (owner) {
+                owner->weakDeref();
+            }
+        }
+
+        CallHelper(const CallHelper&) = delete;
+        CallHelper& operator=(const CallHelper&) = delete;
+
+        QorePythonProgram* owner = nullptr;
+        PyObject* func = nullptr;
+    };
+};
+
+QoreThreadLock QorePythonProgram::FunctionTable::lck;
+std::unordered_map<uint64_t, QorePythonProgram::FunctionTable::Entry> QorePythonProgram::FunctionTable::map;
+uint64_t QorePythonProgram::FunctionTable::last_id = 0;
+QoreForkHandlerRegistration* QorePythonProgram::FunctionTable::fork_reg = nullptr;
+
+int QorePythonProgram::registerFunctionTableForkHandler() {
+    assert(!FunctionTable::fork_reg);
+    FunctionTable::fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_function_table",
+        qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock,
+        &FunctionTable::lck);
+    return FunctionTable::fork_reg ? 0 : -1;
+}
+
+void QorePythonProgram::unregisterFunctionTableForkHandler() {
+    qore_unregister_fork_handler(FunctionTable::fork_reg);
+    FunctionTable::fork_reg = nullptr;
+}
+
+uint64_t QorePythonProgram::addFunction(PyObject* func) {
+    AutoLocker al(FunctionTable::lck);
+    // reserve first, so that the program's list and the table stay consistent if an allocation fails
+    function_ids.reserve(function_ids.size() + 1);
+    uint64_t id = ++FunctionTable::last_id;
+    FunctionTable::map.emplace(id, FunctionTable::Entry{this, func});
+    function_ids.push_back(id);
+    return id;
+}
+
+void QorePythonProgram::removeFunctions() {
+    // only this program adds to its list, while it is valid
+    if (function_ids.empty()) {
+        return;
+    }
+    AutoLocker al(FunctionTable::lck);
+    for (uint64_t id : function_ids) {
+        FunctionTable::map.erase(id);
+    }
+    function_ids.clear();
+    function_ids.shrink_to_fit();
+}
+
 // the function is called in the interpreter of the Python program that owns it, which checks that it is valid before
 // the function is used (PYTHON-INTERPRETER-DELETED)
-QoreValue QorePythonProgram::execPythonCFunction(const FunctionHandle* handle, const QoreListNode* args,
-        q_rt_flags_t rtflags, ExceptionSink* xsink) {
+QoreValue QorePythonProgram::execPythonCFunction(const void* id, const QoreListNode* args, q_rt_flags_t rtflags,
+        ExceptionSink* xsink) {
     //printd(5, "QorePythonProgram::execPythonCFunction() argcount: %d\n", args ? (int)args->size() : 0);
-    return handle->owner->callCFunctionMethod(xsink, handle->func, args);
-}
-
-QoreValue QorePythonProgram::execPythonFunction(const FunctionHandle* handle, const QoreListNode* args,
-        q_rt_flags_t rtflags, ExceptionSink* xsink) {
-    //printd(5, "QorePythonProgram::execPythonFunction() argcount: %d\n", args ? (int)args->size() : 0);
-    return handle->owner->callFunctionObject(xsink, handle->func, args);
-}
-
-void QorePythonProgram::deleteFunctionHandles() {
-    FunctionHandle* h = function_handles.exchange(nullptr);
-    while (h) {
-        FunctionHandle* next = h->next;
-        delete h;
-        h = next;
+    FunctionTable::CallHelper fch(id, xsink);
+    if (!fch.owner) {
+        return QoreValue();
     }
+    return fch.owner->callCFunctionMethod(xsink, fch.func, args);
+}
+
+QoreValue QorePythonProgram::execPythonFunction(const void* id, const QoreListNode* args, q_rt_flags_t rtflags,
+        ExceptionSink* xsink) {
+    //printd(5, "QorePythonProgram::execPythonFunction() argcount: %d\n", args ? (int)args->size() : 0);
+    FunctionTable::CallHelper fch(id, xsink);
+    if (!fch.owner) {
+        return QoreValue();
+    }
+    return fch.owner->callFunctionObject(xsink, fch.func, args);
 }
 
 QoreValue QorePythonProgram::callCFunctionMethod(ExceptionSink* xsink, PyObject* func, const QoreListNode* args,
@@ -6599,14 +6692,10 @@ int QorePythonProgram::findCreateQoreFunction(PyObject* value, const char* symbo
         // function that the __getattr__() of a module returned)
         Py_INCREF(value);
         addObj(value);
-        // the variant holds a handle of the function bound to this program (see FunctionHandle)
-        FunctionHandle* handle = new FunctionHandle(this, value);
-        handle->next = function_handles.load(std::memory_order_relaxed);
-        while (!function_handles.compare_exchange_weak(handle->next, handle, std::memory_order_release,
-                std::memory_order_relaxed)) {
-        }
-        ns->addBuiltinVariant((void*)handle, symbol, func, QCF_USES_EXTRA_ARGS, QDOM_UNCONTROLLED_API,
-            autoTypeInfo);
+        // the variant holds the ID of the function in the function table (see FunctionTable)
+        uint64_t id = addFunction(value);
+        ns->addBuiltinVariant(reinterpret_cast<void*>(static_cast<uintptr_t>(id)), symbol, func, QCF_USES_EXTRA_ARGS,
+            QDOM_UNCONTROLLED_API, autoTypeInfo);
         printd(5, "QorePythonProgram::findCreateQoreFunction() added function %s::%s() (%s)\n", ns->getName(),
             symbol, Py_TYPE(value)->tp_name);
         return 0;

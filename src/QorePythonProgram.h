@@ -44,6 +44,7 @@
 #include <set>
 #include <map>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 
 // forward reference
@@ -887,47 +888,37 @@ protected:
     DLLLOCAL static QoreValue execPythonStaticCFunctionMethod(const QoreMethod& meth, PyObject* func,
             const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink);
 
-    //! the Python function of a Qore function variant
+    //! The Python functions of Qore function variants
     /** A Qore function variant can outlive the Python program that created it (a child Program that does not inherit
-        the Program data of its parent inherits its functions), so the variant holds this handle: a weak reference to
-        the Python program that owns the function, which references the function while it is valid.  The function is
-        only used through its owner, after checking that the owner is valid.  The handles are deleted when the module
-        is deleted, as Qore function variants have no destructor for their data.
+        the Program data of its parent inherits its functions), and Qore function variants have no destructor for
+        their data, so a variant holds only the ID of its function (never reused) in the table of the functions of
+        the live Python programs (FunctionTable).  A call looks the ID up and holds a weak reference to the owning
+        Python program while it calls the function in that program; the owner removes its functions from the table
+        when it is deleted, after which a call raises PYTHON-INTERPRETER-DELETED.
     */
-    struct FunctionHandle {
-        //! the Python program that owns the function; weakly referenced
-        QorePythonProgram* owner;
-        //! the function, referenced by its owner while the owner is valid
-        PyObject* func;
-        //! the next handle in the list of all handles
-        FunctionHandle* next = nullptr;
+    class FunctionTable;
 
-        DLLLOCAL FunctionHandle(QorePythonProgram* owner, PyObject* func) : owner(owner), func(func) {
-            owner->weakRef();
-        }
+    //! adds a function owned by this program to the table and returns its ID; the program references the function
+    DLLLOCAL uint64_t addFunction(PyObject* func);
 
-        DLLLOCAL ~FunctionHandle() {
-            owner->weakDeref();
-        }
+    //! removes the functions of this program from the table; called when the program is deleted
+    DLLLOCAL void removeFunctions();
 
-        FunctionHandle(const FunctionHandle&) = delete;
-        FunctionHandle& operator=(const FunctionHandle&) = delete;
-    };
-
-private:
-    //! the list of the handles of the Python functions of Qore function variants (pushed without a lock)
-    DLLLOCAL static std::atomic<FunctionHandle*> function_handles;
+    //! the IDs of the functions that this program owns in the table; guarded by the lock of the table
+    std::vector<uint64_t> function_ids;
 
 public:
-    //! deletes the handles of the Python functions of Qore function variants; called when the module is deleted
-    DLLLOCAL static void deleteFunctionHandles();
+    //! registers the fork handlers of the lock of the function table; returns -1 on error
+    DLLLOCAL static int registerFunctionTableForkHandler();
+
+    //! removes the fork handlers registered with registerFunctionTableForkHandler()
+    DLLLOCAL static void unregisterFunctionTableForkHandler();
 
 protected:
-
-    DLLLOCAL static QoreValue execPythonCFunction(const FunctionHandle* handle, const QoreListNode* args,
-            q_rt_flags_t rtflags, ExceptionSink* xsink);
-    DLLLOCAL static QoreValue execPythonFunction(const FunctionHandle* handle, const QoreListNode* args,
-            q_rt_flags_t rtflags, ExceptionSink* xsink);
+    DLLLOCAL static QoreValue execPythonCFunction(const void* id, const QoreListNode* args, q_rt_flags_t rtflags,
+            ExceptionSink* xsink);
+    DLLLOCAL static QoreValue execPythonFunction(const void* id, const QoreListNode* args, q_rt_flags_t rtflags,
+            ExceptionSink* xsink);
 
     //! Python integration
     DLLLOCAL static PyObject* callQoreFunction(PyObject* self, PyObject* args);
@@ -935,6 +926,9 @@ protected:
     DLLLOCAL virtual ~QorePythonProgram() {
         //printd(5, "QorePythonProgram::~QorePythonProgram() this: %p\n", this);
         assert(!qpgm);
+        // the functions are normally removed when the program is deleted (deleteIntern()); never left in the table
+        // after the program is freed
+        removeFunctions();
     }
 
     // Protected by py_thr_lck; Python reference operations also require the owning context.

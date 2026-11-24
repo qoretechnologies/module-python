@@ -447,6 +447,25 @@ Python 3.12 has similar TSS issues but different internal structures:
 - Our tracking variables (`_qore_tss_tstate`, etc.) are authoritative
 - `PyGILState_Check()` results should not be trusted after GIL transitions
 
+## Imported Python functions
+
+A Python function that a Program imports (`findCreateQoreFunction()`: the `import` command, `export-func`) becomes a
+Qore function variant in the Program's namespace.  Qore function variants have no destructor for their data, and a
+variant can outlive the Python program that created it: a child Program inherits the functions of its parent, also
+one created with `PO_NO_INHERIT_PROGRAM_DATA`, which has no Python program of its own.  The variant therefore holds
+only the ID of the function (never reused) in the function table of the live Python programs
+(`QorePythonProgram::FunctionTable`: ID -> owning program and function, guarded by a leaf lock with fork handlers):
+
+- a call (`execPythonFunction()`, `execPythonCFunction()`) looks the ID up and holds a weak reference to the owning
+  program while it calls the function in that program's interpreter (never in the caller's), which checks that the
+  program is valid before the function is used;
+- the owning program removes its functions from the table when it is deleted (`deleteIntern()`, and its destructor),
+  after which a call raises `PYTHON-INTERPRETER-DELETED`; a call in progress keeps the program object (not its
+  interpreter) until it returns.
+
+The table holds only the functions of live programs, so a process that creates and deletes Programs that import
+Python functions does not keep memory for them.
+
 ## Ownership during interpreter finalization
 
 A `PythonProgram` owns its Python subinterpreter even when it shares the parent
