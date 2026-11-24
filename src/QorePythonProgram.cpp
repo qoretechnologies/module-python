@@ -6140,6 +6140,11 @@ void QorePythonProgram::unregisterFunctionTableForkHandler() {
 
 uint64_t QorePythonProgram::addFunction(PyObject* func) {
     AutoLocker al(FunctionTable::lck);
+    // a thread that still runs in the program while it is deleted cannot add a function once the program has removed
+    // its functions; the ID is the data of a Qore function variant, which is a pointer
+    if (functions_removed || FunctionTable::last_id >= static_cast<uint64_t>(UINTPTR_MAX)) {
+        return 0;
+    }
     // reserve first, so that the program's list and the table stay consistent if an allocation fails
     function_ids.reserve(function_ids.size() + 1);
     uint64_t id = ++FunctionTable::last_id;
@@ -6149,11 +6154,8 @@ uint64_t QorePythonProgram::addFunction(PyObject* func) {
 }
 
 void QorePythonProgram::removeFunctions() {
-    // only this program adds to its list, while it is valid
-    if (function_ids.empty()) {
-        return;
-    }
     AutoLocker al(FunctionTable::lck);
+    functions_removed = true;
     for (uint64_t id : function_ids) {
         FunctionTable::map.erase(id);
     }
@@ -6692,8 +6694,12 @@ int QorePythonProgram::findCreateQoreFunction(PyObject* value, const char* symbo
         // function that the __getattr__() of a module returned)
         Py_INCREF(value);
         addObj(value);
-        // the variant holds the ID of the function in the function table (see FunctionTable)
+        // the variant holds the ID of the function in the function table (see FunctionTable); the function is not
+        // added to a program that is being deleted (it stays referenced by the program until it is released)
         uint64_t id = addFunction(value);
+        if (!id) {
+            return -1;
+        }
         ns->addBuiltinVariant(reinterpret_cast<void*>(static_cast<uintptr_t>(id)), symbol, func, QCF_USES_EXTRA_ARGS,
             QDOM_UNCONTROLLED_API, autoTypeInfo);
         printd(5, "QorePythonProgram::findCreateQoreFunction() added function %s::%s() (%s)\n", ns->getName(),

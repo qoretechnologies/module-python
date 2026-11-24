@@ -43,7 +43,6 @@
 
 #include <set>
 #include <map>
-#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -899,6 +898,9 @@ protected:
     class FunctionTable;
 
     //! adds a function owned by this program to the table and returns its ID; the program references the function
+    /** @return the ID of the function, or 0 if it cannot be added: the program is being deleted and has removed its
+        functions (removeFunctions()), or no more IDs can be stored in the data of a Qore function variant
+    */
     DLLLOCAL uint64_t addFunction(PyObject* func);
 
     //! removes the functions of this program from the table; called when the program is deleted
@@ -906,6 +908,9 @@ protected:
 
     //! the IDs of the functions that this program owns in the table; guarded by the lock of the table
     std::vector<uint64_t> function_ids;
+    //! set when the program has removed its functions from the table; no function is added afterwards; guarded by
+    //! the lock of the table
+    bool functions_removed = false;
 
 public:
     //! registers the fork handlers of the lock of the function table; returns -1 on error
@@ -926,9 +931,8 @@ protected:
     DLLLOCAL virtual ~QorePythonProgram() {
         //printd(5, "QorePythonProgram::~QorePythonProgram() this: %p\n", this);
         assert(!qpgm);
-        // the functions are normally removed when the program is deleted (deleteIntern()); never left in the table
-        // after the program is freed
-        removeFunctions();
+        // the functions are removed when the program is deleted (deleteIntern()), and none is added afterwards
+        assert(function_ids.empty());
     }
 
     // Protected by py_thr_lck; Python reference operations also require the owning context.
