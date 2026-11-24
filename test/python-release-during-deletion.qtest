@@ -30,6 +30,7 @@ class PythonReleaseDuringDeletionTest inherits QUnit::Test {
         main_python.parse("sub run(string s) { Python::PythonProgram::evalStatement(s); }", "main-python");
         addTestCase("an object released at a fixed point of the deletion", \testPausedDeletion());
         addTestCase("objects released while the program is deleted", \testStress());
+        addTestCase("an object that a finalizer gives to Qore code during the deletion", \testFinalizer());
         set_return_value(main());
     }
 
@@ -116,5 +117,35 @@ class PythonReleaseDuringDeletionTest inherits QUnit::Test {
         delete pp;
         done.waitForZero();
         assertEq(nthr * 200, foldl $1 + $2, counts.values());
+    }
+
+    # a Python finalizer that runs while the deletion releases the program's own objects gives a new Python object to
+    # Qore code, which keeps it after the program has been deleted and then releases it
+    testFinalizer() {
+        string src = "class H:\n"
+            "    def __del__(self):\n"
+            "        try:\n"
+            "            cb(object())\n"
+            "        except BaseException:\n"
+            "            pass\n"
+            "cb = None\n"
+            "def setcb(c):\n"
+            "    global cb\n"
+            "    cb = c\n"
+            "h = H()\n";
+        auto saved;
+        Counter called(1);
+        {
+            PythonProgram pp(src, "pp-finalizer");
+            pp.callFunction("setcb", sub (auto x) {
+                saved = x;
+                called.dec();
+            });
+            delete pp;
+        }
+        assertEq(0, called.getCount(), "the finalizer gave an object to Qore code");
+        # the object was released with its interpreter: releasing the Qore value afterwards releases nothing
+        remove saved;
+        assertNothing(saved);
     }
 }

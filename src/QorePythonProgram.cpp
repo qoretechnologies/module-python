@@ -706,6 +706,8 @@ void QorePythonProgram::registerPersistentReference(QorePythonManualReferenceHol
     AutoLocker al(py_thr_lck);
     checkForkIntern();
     assert(valid);
+    // no reference is registered after the final release of the deletion (the program is invalidated right after it)
+    assert(!persistent_references_cleared);
     assert(persistent_references.find(reference) == persistent_references.end());
     persistent_references.insert(reference);
 }
@@ -747,7 +749,7 @@ void QorePythonProgram::releasePersistentReference(QorePythonManualReferenceHold
     Py_XDECREF(object);
 }
 
-void QorePythonProgram::releaseOrphanedReferences() {
+void QorePythonProgram::releaseOrphanedReferences(bool final) {
     while (true) {
         clearPersistentReferences();
         std::vector<PyObject*> objects;
@@ -756,8 +758,10 @@ void QorePythonProgram::releaseOrphanedReferences() {
             checkForkIntern();
             if (orphaned_references.empty()) {
                 if (persistent_references.empty()) {
-                    // nothing can be orphaned from now on (see persistent_references_cleared)
-                    persistent_references_cleared = true;
+                    if (final) {
+                        // nothing can be registered or orphaned from now on (see persistent_references_cleared)
+                        persistent_references_cleared = true;
+                    }
                     return;
                 }
                 continue;
@@ -968,7 +972,7 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
             QorePythonHelper qph(this);
             // the persistent references, and the objects of those that other threads released meanwhile, are released
             // in the interpreter, after the threads have left it and before it is ended
-            releaseOrphanedReferences();
+            releaseOrphanedReferences(false);
 
             for (auto& i : obj_sink) {
                 Py_DECREF(i);
@@ -1025,6 +1029,11 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
             for (auto& i : stale_py_cls_vec) {
                 i->release();
             }
+
+            // the releases above can run Python finalizers that create and release persistent references: they are
+            // released here, with any object orphaned meanwhile, after which none can be registered or orphaned (no
+            // other Python code runs in the interpreter before it is invalidated)
+            releaseOrphanedReferences(true);
 
             valid = false;
         }

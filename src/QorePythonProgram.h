@@ -907,17 +907,22 @@ protected:
         interpreter (releaseOrphanedReferences()).  Protected by py_thr_lck
     */
     std::vector<PyObject*> orphaned_references;
-    //! set by the deleting thread once it has released every persistent reference; protected by py_thr_lck
-    /** From then on, no object can be orphaned: the registry is empty, and a reference can only be registered while
-        the program is valid, so a holder that is released later has no object
+    //! set by the deleting thread when it has released every persistent reference for the last time, right before it
+    //! invalidates the program; protected by py_thr_lck
+    /** From then on, no object can be orphaned or registered: the registry is empty, no other Python code runs in the
+        interpreter, and a reference can only be registered while the program is valid, so a holder that is released
+        later has no object
     */
     bool persistent_references_cleared = false;
     DLLLOCAL void clearPersistentReferences();
     //! releases the persistent references and the orphaned objects in the interpreter, until none is left
     /** Called by the deleting thread in the interpreter, after the threads have left it and before the interpreter is
-        ended
+        ended: once before the program's own objects are released, and a final time after them (the releases can run
+        Python finalizers), right before the program is invalidated
+
+        @param final true for the final call, which sets persistent_references_cleared
     */
-    DLLLOCAL void releaseOrphanedReferences();
+    DLLLOCAL void releaseOrphanedReferences(bool final);
 
     DLLLOCAL void deleteIntern(ExceptionSink* xsink);
 
