@@ -892,4 +892,12 @@ DLLLOCAL extern bool qore_needs_shutdown;
 DLLLOCAL int q_reset_python(ExceptionSink* xsink);
 #endif
 
+#ifdef DEBUG
+//! test hooks of debug builds (see qoreloader._test_pause_next_deletion())
+DLLLOCAL void qore_python_test_pause_next_deletion();
+DLLLOCAL int qore_python_test_wait_deletion_paused();
+DLLLOCAL void qore_python_test_resume_deletion();
+DLLLOCAL void qore_python_test_deletion_pause_point();
+#endif
+
 #endif

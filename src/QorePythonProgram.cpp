@@ -195,6 +195,51 @@ static void main_ts_lck_fork_child(void* arg) {
     }
 }
 
+#ifdef DEBUG
+// test hooks of debug builds: the next deletion of a Python program stops before its persistent references are
+// released until the test resumes it (see qoreloader._test_pause_next_deletion())
+namespace {
+QoreThreadLock test_deletion_lck;
+QoreCondition test_deletion_cond;
+//! 0: no pause requested, 1: the next deletion stops, 2: a deletion is stopped, 3: the stopped deletion continues
+int test_deletion_state = 0;
+}
+
+void qore_python_test_pause_next_deletion() {
+    AutoLocker al(test_deletion_lck);
+    test_deletion_state = 1;
+}
+
+int qore_python_test_wait_deletion_paused() {
+    AutoLocker al(test_deletion_lck);
+    while (test_deletion_state == 1) {
+        test_deletion_cond.wait(test_deletion_lck);
+    }
+    return test_deletion_state == 2 ? 0 : -1;
+}
+
+void qore_python_test_resume_deletion() {
+    AutoLocker al(test_deletion_lck);
+    if (test_deletion_state == 2) {
+        test_deletion_state = 3;
+        test_deletion_cond.broadcast();
+    }
+}
+
+void qore_python_test_deletion_pause_point() {
+    AutoLocker al(test_deletion_lck);
+    if (test_deletion_state != 1) {
+        return;
+    }
+    test_deletion_state = 2;
+    test_deletion_cond.broadcast();
+    while (test_deletion_state == 2) {
+        test_deletion_cond.wait(test_deletion_lck);
+    }
+    test_deletion_state = 0;
+}
+#endif
+
 int QorePythonProgram::registerForkHandlers() {
     assert(!py_thr_lck_fork_reg && !main_ts_lck_fork_reg);
     py_thr_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_thread_states",
@@ -673,6 +718,25 @@ void QorePythonProgram::releasePersistentReference(QorePythonManualReferenceHold
         checkForkIntern();
         persistent_references.erase(reference);
         object = reference->release();
+        // the object is only ever released with a thread state of its own interpreter: if this thread cannot enter
+        // the interpreter, another thread is deleting the program (cancelThreads() keeps other threads out), and it
+        // releases the object in the interpreter (releaseOrphanedReferences()); once the deleting thread has
+        // released every reference, a holder has no object left (the registry is empty, and a reference can only be
+        // registered while the program is valid)
+        if (object && !qph.isValid()) {
+            assert(!persistent_references_cleared);
+            if (python_fork_lost) {
+                // in a child of fork() that cannot use Python, the reference is left: the GIL cannot be acquired
+                return;
+            }
+            try {
+                orphaned_references.push_back(object);
+            } catch (const std::bad_alloc&) {
+                // the object is left rather than released without its interpreter
+            }
+            return;
+        }
+        assert(!object || !persistent_references_cleared);
     }
     // in a child of fork() that cannot use Python, the reference is left: the GIL cannot be acquired
     if (python_fork_lost) {
@@ -681,6 +745,31 @@ void QorePythonProgram::releasePersistentReference(QorePythonManualReferenceHold
     // Finalization clears every registered reference before invalidating this context.
     assert(!object || (valid && qph.isValid()));
     Py_XDECREF(object);
+}
+
+void QorePythonProgram::releaseOrphanedReferences() {
+    while (true) {
+        clearPersistentReferences();
+        std::vector<PyObject*> objects;
+        {
+            AutoLocker al(py_thr_lck);
+            checkForkIntern();
+            if (orphaned_references.empty()) {
+                if (persistent_references.empty()) {
+                    // nothing can be orphaned from now on (see persistent_references_cleared)
+                    persistent_references_cleared = true;
+                    return;
+                }
+                continue;
+            }
+            objects.swap(orphaned_references);
+        }
+        // releasing an object can run Python finalizers that release other references, which are handled in the
+        // next iteration
+        for (PyObject* object : objects) {
+            Py_DECREF(object);
+        }
+    }
 }
 
 void QorePythonProgram::clearPersistentReferences() {
@@ -870,9 +959,16 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
             checkForkIntern();
             waitForThreadsIntern();
         }
+#ifdef DEBUG
+        // test hook of debug builds: the deletion stops here, before the persistent references are released, while a
+        // test releases a reference in another thread
+        qore_python_test_deletion_pause_point();
+#endif
         {
             QorePythonHelper qph(this);
-            clearPersistentReferences();
+            // the persistent references, and the objects of those that other threads released meanwhile, are released
+            // in the interpreter, after the threads have left it and before it is ended
+            releaseOrphanedReferences();
 
             for (auto& i : obj_sink) {
                 Py_DECREF(i);

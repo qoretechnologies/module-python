@@ -901,7 +901,23 @@ protected:
 
     // Protected by py_thr_lck; Python reference operations also require the owning context.
     std::set<QorePythonManualReferenceHolder*> persistent_references;
+    //! the objects of persistent references released by other threads while the program is deleted
+    /** A thread that releases a persistent reference while another thread deletes the program cannot enter the
+        interpreter (see cancelThreads()); it moves the object here, and the deleting thread releases it in the
+        interpreter (releaseOrphanedReferences()).  Protected by py_thr_lck
+    */
+    std::vector<PyObject*> orphaned_references;
+    //! set by the deleting thread once it has released every persistent reference; protected by py_thr_lck
+    /** From then on, no object can be orphaned: the registry is empty, and a reference can only be registered while
+        the program is valid, so a holder that is released later has no object
+    */
+    bool persistent_references_cleared = false;
     DLLLOCAL void clearPersistentReferences();
+    //! releases the persistent references and the orphaned objects in the interpreter, until none is left
+    /** Called by the deleting thread in the interpreter, after the threads have left it and before the interpreter is
+        ended
+    */
+    DLLLOCAL void releaseOrphanedReferences();
 
     DLLLOCAL void deleteIntern(ExceptionSink* xsink);
 

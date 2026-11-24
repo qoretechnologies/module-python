@@ -1,0 +1,120 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# Python objects that Qore code holds in one thread released while another thread deletes their Python program
+# (qore#7538)
+
+%modern
+%no-child-restrictions
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+
+%requires python
+%requires QUnit
+
+%exec-class PythonReleaseDuringDeletionTest
+
+class PythonReleaseDuringDeletionTest inherits QUnit::Test {
+    public {
+        const Src = "def boom():\n    raise ValueError('BOOM')\n"
+            "def ok():\n    s = 0\n    for i in range(2000):\n        s += i\n    return s\n";
+    }
+
+    private {
+        # a Program without a Python program of its own, whose statements run in the main interpreter
+        Program main_python;
+    }
+
+    constructor() : QUnit::Test("python release during deletion", "1.0", \ARGV) {
+        main_python = new Program(PO_NEW_STYLE | PO_NO_INHERIT_PROGRAM_DATA);
+        main_python.parse("sub run(string s) { Python::PythonProgram::evalStatement(s); }", "main-python");
+        addTestCase("an object released at a fixed point of the deletion", \testPausedDeletion());
+        addTestCase("objects released while the program is deleted", \testStress());
+        set_return_value(main());
+    }
+
+    private runMain(string stmt) {
+        main_python.callFunction("run", "import qoreloader\n" + stmt);
+    }
+
+    # with the test hooks of debug builds, a Python exception that a Qore exception holds is released by another
+    # thread exactly while the deletion of its Python program waits, before the program releases its references
+    testPausedDeletion() {
+        try {
+            runMain("if not hasattr(qoreloader, '_test_pause_next_deletion'):\n    raise RuntimeError('no hooks')\n");
+        } catch (hash<ExceptionInfo> ex) {
+            testSkip("the test hooks are only in debug builds");
+        }
+
+        PythonProgram pp(Src, "pp");
+        Queue held();
+        Queue release();
+        Queue released();
+        background sub () {
+            *hash<ExceptionInfo> ex;
+            try {
+                pp.callFunction("boom");
+            } catch (hash<ExceptionInfo> e) {
+                ex = e;
+            }
+            held.push(ex.err);
+            release.get();
+            # the Python exception is released here
+            remove ex;
+            released.push(True);
+        }();
+        assertRegex("ValueError", held.get());
+
+        runMain("qoreloader._test_pause_next_deletion()");
+        Counter deleted(1);
+        background sub () {
+            on_exit deleted.dec();
+            delete pp;
+        }();
+        runMain("qoreloader._test_wait_deletion_paused()");
+        release.push(True);
+        assertTrue(released.get());
+        runMain("qoreloader._test_resume_deletion()");
+        deleted.waitForZero();
+
+    }
+
+    # the same steps without a fixed order: threads keep calling the program and releasing the Python exceptions
+    # that they get while the program is deleted
+    testStress() {
+        PythonProgram pp(Src, "pp-stress");
+        int nthr = 6;
+        Queue started();
+        Counter done();
+        hash<string, int> counts;
+        Mutex m();
+        for (int i = 0; i < nthr; ++i) {
+            done.inc();
+            background sub () {
+                on_exit done.dec();
+                bool first = True;
+                for (int j = 0; j < 200; ++j) {
+                    string k;
+                    try {
+                        k = (j % 3) ? pp.callFunction("ok").type() : pp.callFunction("boom");
+                    } catch (hash<ExceptionInfo> ex) {
+                        k = ex.err;
+                    }
+                    m.lock();
+                    counts{k}++;
+                    m.unlock();
+                    if (first) {
+                        first = False;
+                        started.push(True);
+                    }
+                }
+            }();
+        }
+        for (int i = 0; i < nthr; ++i) {
+            started.get();
+        }
+        delete pp;
+        done.waitForZero();
+        assertEq(nthr * 200, foldl $1 + $2, counts.values());
+    }
+}
