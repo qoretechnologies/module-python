@@ -1,0 +1,73 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# The Python functions that a Program imports as Qore functions are called in the Python program that imported them,
+# also from a child Program that inherits them, and raise an exception once that Python program has been deleted
+
+%modern
+%no-child-restrictions
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+
+%requires python
+%requires QUnit
+
+%exec-class PythonFunctionOwnerTest
+
+class PythonFunctionOwnerTest inherits QUnit::Test {
+    public {
+        # the code of the Program that imports the functions; it creates the children that inherit them
+        const HostSource = "%requires python\n"
+            "Program sub child(bool own_data) {\n"
+            "    Program c(PO_NEW_STYLE | (own_data ? 0 : PO_NO_INHERIT_PROGRAM_DATA));\n"
+            "    c.parse(\"float sub root(float f) { return Python::math::sqrt(f); }\\n\"\n"
+            "        \"auto sub get_owner() { return Python::pfo_mod::get_owner(); }\\n\", \"child\");\n"
+            "    return c;\n"
+            "}\n";
+    }
+
+    constructor() : QUnit::Test("python function owner", "1.0", \ARGV) {
+        addTestCase("inherited functions run in the Python program that imported them", \testInherited());
+        addTestCase("inherited functions after the importing Program is deleted", \testOwnerDeleted());
+        set_return_value(main());
+    }
+
+    private Program host() {
+        Program h(PO_NEW_STYLE | PO_NO_CHILD_PO_RESTRICTIONS);
+        h.loadModule("python");
+        h.issueModuleCmd("python", "add-module-path " + get_script_dir() + "python-function-owner");
+        h.issueModuleCmd("python", "import math");
+        h.issueModuleCmd("python", "import pfo_mod");
+        h.parse(HostSource, "pfo-host");
+        return h;
+    }
+
+    testInherited() {
+        Program h = host();
+        foreach bool own_data in ((True, False)) {
+            Program c = h.callFunction("child", own_data);
+            assertEq(3.0, c.callFunction("root", 9.0), sprintf("own data: %y", own_data));
+            assertEq("host", c.callFunction("get_owner"), sprintf("own data: %y", own_data));
+        }
+    }
+
+    testOwnerDeleted() {
+        foreach bool own_data in ((True, False)) {
+            Program c;
+            {
+                Program h = host();
+                c = h.callFunction("child", own_data);
+                assertEq(3.0, c.callFunction("root", 9.0));
+                assertEq("host", c.callFunction("get_owner"));
+                delete h;
+            }
+            # allocations that would reuse the memory of the deleted Python program's objects
+            list<string> l = map "pfo-" + $1, xrange(100000);
+            assertEq(100000, l.size());
+            assertThrows("PYTHON-INTERPRETER-DELETED", \c.callFunction(), ("root", 9.0),
+                sprintf("own data: %y", own_data));
+            assertThrows("PYTHON-INTERPRETER-DELETED", \c.callFunction(), ("get_owner",),
+                sprintf("own data: %y", own_data));
+        }
+    }
+}
