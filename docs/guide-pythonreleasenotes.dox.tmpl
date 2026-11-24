@@ -63,6 +63,9 @@
     - imported %Python functions are called in the %Python program that imported them, also from a child %Program
       that inherits them, and raise \c PYTHON-INTERPRETER-DELETED once that %Python program has been deleted
       (<a href="https://github.com/qoretechnologies/qore/issues/7527">issue 7527</a>)
+    - a %Python object that %Qore code holds is no longer released without its interpreter when another thread
+      deletes its %Python program meanwhile (<a href="https://github.com/qoretechnologies/qore/issues/7538">issue
+      7538</a>)
     - automatically imported %Python classes and their bases use the namespace of their defining module
       (\c __module__), independent of import order: importing \c os creates
       \c Python::collections::abc::Iterable, rather than \c Python::os::Iterable. This also changes the paths

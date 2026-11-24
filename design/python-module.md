@@ -497,6 +497,19 @@ only the ID of the function (never reused) in the function table of the live Pyt
 
 The table holds only the functions of live programs, so a process that creates and deletes Programs that import
 Python functions does not keep memory for them.
+## Persistent references released during the deletion of a program
+
+A Python object that Qore code holds (`QorePythonPersistentReferenceHolder`, ex: the Python exception kept in a Qore
+exception) is registered with its program (`persistent_references`) and is only ever released with a thread state of
+its own interpreter.  A thread that releases such a holder while another thread deletes the program cannot enter the
+interpreter (`cancelThreads()` keeps other threads out); it moves the object to `orphaned_references` under
+`py_thr_lck` instead of releasing it.  The deleting thread releases the registered and the orphaned objects in the
+interpreter (`releaseOrphanedReferences()`): once after the threads have left it, and a final time after the
+program's own objects (`obj_sink`, the module, the classes) are released, since their finalizers can create and
+release references; the final call sets `persistent_references_cleared`, after which nothing can be registered or
+orphaned, and the program is invalidated.  A holder released after that has no object (asserted in debug builds).
+Debug builds have test hooks (`qoreloader._test_pause_next_deletion()` and the functions after it, main interpreter
+only) that stop the next deletion before it releases the references.
 
 ## Ownership during interpreter finalization
 
