@@ -99,7 +99,8 @@ def add(x, y):
         }
         int pid = fork();
         if (!pid) {
-            # the child reports the errors of a call in an existing interpreter and of the creation of a new one
+            # the child reports the errors of a call in an existing interpreter, of the creation of a new one and of
+            # the creation of a child Program, which copies the Python program of this Program
             list<string> errors;
             try {
                 p.callFunction("add", 1, 2);
@@ -109,6 +110,15 @@ def add(x, y):
             }
             try {
                 PythonProgram child("x = 1", "fork-gil-child.py");
+                errors += "no error";
+            } catch (hash<ExceptionInfo> ex) {
+                errors += ex.err;
+            }
+            # a child Program inherits the Python program of this Program, whose interpreter cannot be created:
+            # the creation of the child fails with the module's exception (qoretechnologies/qore#6918); previously
+            # the error was only printed, and the child was created with an invalid Python program
+            try {
+                Program child_pgm();
                 errors += "no error";
             } catch (hash<ExceptionInfo> ex) {
                 errors += ex.err;
@@ -133,7 +143,10 @@ def add(x, y):
         while (*binary data = result.read.readBinary(4096)) {
             child_result += data.toString();
         }
-        assertEq("PYTHON-FORK-ERROR,PYTHON-FORK-ERROR", child_result);
+        # the module reports the error of the child Program only when built with a Qore library that provides
+        # AbstractQoreProgramExternalDataEx (Python::PythonProgramCopyErrors)
+        assertEq("PYTHON-FORK-ERROR,PYTHON-FORK-ERROR," + (PythonProgramCopyErrors ? "PYTHON-FORK-ERROR" : "no error"),
+            child_result);
     }
 
     # Python calls a Qore closure that calls fork() while another Python thread holds the GIL: in the child, the

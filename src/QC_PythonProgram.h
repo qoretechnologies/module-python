@@ -41,4 +41,13 @@ DLLLOCAL extern QoreClass* QC_PYTHONPROGRAM;
 
 DLLLOCAL QoreClass* initPythonProgramClass(QoreNamespace& ns);
 
+
+// true if the module reports the errors of copying the Python program of a Program to a child Program (see
+// Python::PythonProgramCopyErrors)
+#ifdef _QORE_HAS_PROGRAM_EXTERNAL_DATA_EX
+#define QORE_PYTHON_PROGRAM_COPY_ERRORS true
+#else
+#define QORE_PYTHON_PROGRAM_COPY_ERRORS false
+#endif
+
 #endif
