@@ -1133,12 +1133,23 @@ static QoreStringNode* python_module_init_intern(bool repeat) {
     return nullptr;
 }
 
+// returns the Python namespace of the Program, which is added to it only if it does not have it: a Program without a
+// Python program of its own can have it (a Program created with PO_NO_INHERIT_PROGRAM_DATA inherits the namespace
+// but not the Python program of its parent), and adding another copy would declare its functions and classes again
+static QoreNamespace* python_get_program_namespace(QoreProgram* pgm) {
+    QoreNamespace* pyns = pgm->findNamespace(QORE_PYTHON_NS_NAME);
+    if (!pyns) {
+        pyns = PNS->copy();
+        pgm->getRootNS()->addNamespace(pyns);
+    }
+    return pyns;
+}
+
 static void python_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, ExceptionSink& xsink) {
     QoreProgram* pgm = getProgram();
     assert(pgm->getRootNS() == rns);
     if (!pgm->getExternalData(QORE_PYTHON_MODULE_NAME)) {
-        QoreNamespace* pyns = PNS->copy();
-        rns->addNamespace(pyns);
+        QoreNamespace* pyns = python_get_program_namespace(pgm);
         // NOTE: Use QoreProgramContextHelper instead of QoreExternalProgramContextHelper
         // because QoreExternalProgramContextHelper uses runtime=true which triggers
         // doTopLevelInstantiation(), setting tlpd->inst = true. This happens before the
@@ -1272,8 +1283,7 @@ static void python_module_parse_cmd(const QoreString& cmd, ExceptionSink* xsink)
     QorePythonProgram* pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
     //printd(5, "parse-cmd '%s' pypgm: %p pythonns: %p\n", arg.c_str(), pypgm, pypgm->getPythonNamespace());
     if (!pypgm) {
-        QoreNamespace* pyns = PNS->copy();
-        pgm->getRootNS()->addNamespace(pyns);
+        QoreNamespace* pyns = python_get_program_namespace(pgm);
         pypgm = new QorePythonProgram(pgm, pyns, xsink);
         pgm->setExternalData(QORE_PYTHON_MODULE_NAME, pypgm);
         pgm->addFeature(QORE_PYTHON_MODULE_NAME);
@@ -1402,8 +1412,7 @@ static void py_mc_reset_python(ExceptionSink* xsink, QoreString& arg, QorePython
 extern "C" int python_module_import(ExceptionSink* xsink, QoreProgram* pgm, const char* module, const char* symbol) {
     QorePythonProgram* pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
     if (!pypgm) {
-        QoreNamespace* pyns = PNS->copy();
-        pgm->getRootNS()->addNamespace(pyns);
+        QoreNamespace* pyns = python_get_program_namespace(pgm);
         pypgm = new QorePythonProgram(pgm, pyns, xsink);
         pgm->setExternalData(QORE_PYTHON_MODULE_NAME, pypgm);
         pgm->addFeature(QORE_PYTHON_MODULE_NAME);

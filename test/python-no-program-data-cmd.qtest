@@ -1,0 +1,65 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# python module commands in a Program without a Python program of its own (qore#7524)
+
+%modern
+%no-child-restrictions
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+
+%requires python
+%requires QUnit
+
+%exec-class PythonNoProgramDataCmdTest
+
+class PythonNoProgramDataCmdTest inherits QUnit::Test {
+    public {
+        # sets and reads a global variable of the Program's own Python program
+        const Source = "sub set_var(string v) { Python::PythonProgram::evalStatementKeep(\"cpc_var = \" + v); }\n"
+            "auto sub get_var() { return Python::PythonProgram::evalExpression(\"globals().get('cpc_var')\"); }\n";
+    }
+
+    constructor() : QUnit::Test("python module commands without a Python program", "1.0", \ARGV) {
+        addTestCase("a parse command in a Program without a Python program", \testParseCommand());
+        addTestCase("a runtime command in a Program without a Python program", \testRuntimeCommand());
+        addTestCase("a sandboxed Program without a Python program", \testSandboxed());
+        set_return_value(main());
+    }
+
+    # a Program that does not inherit the Program data of its parent has no Python program of its own
+    private Program noData() {
+        return new Program(PO_NEW_STYLE | PO_NO_INHERIT_PROGRAM_DATA);
+    }
+
+    private checkOwnPythonProgram(Program p) {
+        p.callFunction("set_var", "'own'");
+        assertEq("own", p.callFunction("get_var"));
+        # the variable is not in the host's Python program
+        assertNothing(Python::PythonProgram::evalExpression("globals().get('cpc_var')"));
+    }
+
+    testParseCommand() {
+        Program p = noData();
+        p.parse("%module-cmd(python) import math\n" + Source
+            + "float sub root(float f) { return Python::math::sqrt(f); }\n", "no-program-data-parse-cmd");
+        assertEq(3.0, p.callFunction("root", 9.0));
+        checkOwnPythonProgram(p);
+    }
+
+    testRuntimeCommand() {
+        Program p = noData();
+        p.parse(Source, "no-program-data-runtime-cmd");
+        p.issueModuleCmd("python", "import math");
+        checkOwnPythonProgram(p);
+    }
+
+    testSandboxed() {
+        SandboxManager sm();
+        sm.setUncontrolledApiPolicy(True);
+        Program p = noData();
+        p.setSandboxManager(sm);
+        p.parse("%module-cmd(python) import math\n" + Source, "no-program-data-sandboxed-cmd");
+        checkOwnPythonProgram(p);
+    }
+}
