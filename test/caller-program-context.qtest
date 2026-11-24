@@ -77,6 +77,23 @@ class CallerProgramContextTest inherits QUnit::Test {
             "    Python::PythonProgram::evalStatementKeep(\"def cpc_callit(f):\\n    return f()\\n\");\n"
             "    return Python::PythonProgram::evalExpression(\"cpc_callit\");\n"
             "}\n"
+            "# returns a Python function of the Program's own Python program that calls the code that it is given in a\n"
+            "# thread that Python creates\n"
+            "code sub get_inthread() {\n"
+            "    Python::PythonProgram::evalStatementKeep(\"import threading\\n\"\n"
+            "        \"def cpc_inthread(f):\\n\"\n"
+            "        \"    r = []\\n\"\n"
+            "        \"    def run():\\n\"\n"
+            "        \"        try:\\n\"\n"
+            "        \"            r.append(f())\\n\"\n"
+            "        \"        except Exception as e:\\n\"\n"
+            "        \"            r.append('EXC: ' + str(e))\\n\"\n"
+            "        \"    t = threading.Thread(target=run)\\n\"\n"
+            "        \"    t.start()\\n\"\n"
+            "        \"    t.join()\\n\"\n"
+            "        \"    return r[0]\\n\");\n"
+            "    return Python::PythonProgram::evalExpression(\"cpc_inthread\");\n"
+            "}\n"
             "# returns a closure that writes to and reads from the __main__ module of the Python program that it uses\n"
             "code sub get_reader(string name) {\n"
             "    return auto sub () {\n"
@@ -107,6 +124,10 @@ class CallerProgramContextTest inherits QUnit::Test {
             \testCalledFromAnotherSandbox());
         addTestCase("sandboxed code called from the host's Python code uses its own Python program",
             \testCalledFromHost());
+        addTestCase("sandboxed code called from another sandbox's Python thread uses its own Python program",
+            \testCalledFromPythonThread());
+        addTestCase("host code called from a sandbox's Python code uses the host's Python program",
+            \testHostCalledFromSandbox());
         set_return_value(main());
     }
 
@@ -270,5 +291,43 @@ class CallerProgramContextTest inherits QUnit::Test {
         assertThrows("PYTHON-ERROR", "no Python program context", callit, (nreader,));
         assertNothing(Python::PythonProgram::evalExpression("getattr(__import__('__main__'), 'cpc_reader_was_here', "
             "None)"), "a sandbox without a Python program wrote the host's Python state");
+    }
+
+    # sandboxed code that another sandbox's Python code calls in a thread that Python creates uses its own Python
+    # program, or is refused if it has none
+    testCalledFromPythonThread() {
+        Program a = sandboxed("cpc-thread-a");
+        a.callFunction("main_stmt", "import __main__\n__main__.cpc_thread_secret = 'A'\n");
+        code inthread = a.callFunction("get_inthread");
+
+        Program b = sandboxed("cpc-thread-b");
+        code reader = b.callFunction("get_reader", "cpc_thread_secret");
+        assertNothing(inthread(reader), "B read A's Python state");
+        assertEq(1, b.callFunction("expr", "getattr(__import__('__main__'), 'cpc_reader_was_here', None)"),
+            "B's own Python program");
+        assertNothing(a.callFunction("expr", "getattr(__import__('__main__'), 'cpc_reader_was_here', None)"),
+            "B wrote A's Python state");
+
+        Program n = sandboxed("cpc-thread-nodata", PO_NEW_STYLE | PO_NO_INHERIT_PROGRAM_DATA);
+        code nreader = n.callFunction("get_reader", "cpc_thread_secret");
+        assertRegex("^EXC: PYTHON-ERROR: .*no Python program context", inthread(nreader));
+        assertNothing(a.callFunction("expr", "getattr(__import__('__main__'), 'cpc_reader_was_here', None)"),
+            "a sandbox without a Python program wrote A's Python state");
+    }
+
+    # host code that a sandbox's Python code calls uses the host's own Python program, not the sandbox's
+    testHostCalledFromSandbox() {
+        Python::PythonProgram::evalStatementKeep("cpc_host_kept = 'HOST'\n");
+        code host_code = auto sub () {
+            Python::PythonProgram::evalStatementKeep("cpc_host_token = 'HOST-TOKEN'\n");
+            return Python::PythonProgram::evalExpression("str(globals().get('cpc_host_kept')) + '/' + "
+                "str(globals().get('cpc_b_planted'))");
+        };
+        Program b = sandboxed("cpc-host-called-b");
+        b.callFunction("set_direct", "cpc_b_planted", "B");
+        code callit = b.callFunction("get_callit");
+        assertEq("HOST/None", callit(host_code));
+        assertNothing(b.callFunction("get", "cpc_host_token"), "the host wrote the sandbox's Python state");
+        assertEq("HOST-TOKEN", Python::PythonProgram::evalExpression("globals().get('cpc_host_token')"));
     }
 }
