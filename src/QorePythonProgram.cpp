@@ -124,6 +124,7 @@ private:
 };
 
 unsigned QorePythonProgram::fork_generation = 0;
+std::atomic<QorePythonProgram::FunctionHandle*> QorePythonProgram::function_handles{nullptr};
 int QorePythonProgram::fork_tid = 0;
 bool QorePythonProgram::fork_purge_pending = false;
 
@@ -6066,18 +6067,27 @@ QoreValue QorePythonProgram::execPythonStaticCFunctionMethod(const QoreMethod& m
     return pypgm->callCFunctionMethod(xsink, func, args);
 }
 
-QoreValue QorePythonProgram::execPythonCFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
-        ExceptionSink* xsink) {
+// the function is called in the interpreter of the Python program that owns it, which checks that it is valid before
+// the function is used (PYTHON-INTERPRETER-DELETED)
+QoreValue QorePythonProgram::execPythonCFunction(const FunctionHandle* handle, const QoreListNode* args,
+        q_rt_flags_t rtflags, ExceptionSink* xsink) {
     //printd(5, "QorePythonProgram::execPythonCFunction() argcount: %d\n", args ? (int)args->size() : 0);
-    QorePythonProgram* pypgm = QorePythonProgram::getContext();
-    return pypgm->callCFunctionMethod(xsink, func, args);
+    return handle->owner->callCFunctionMethod(xsink, handle->func, args);
 }
 
-QoreValue QorePythonProgram::execPythonFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
-        ExceptionSink* xsink) {
+QoreValue QorePythonProgram::execPythonFunction(const FunctionHandle* handle, const QoreListNode* args,
+        q_rt_flags_t rtflags, ExceptionSink* xsink) {
     //printd(5, "QorePythonProgram::execPythonFunction() argcount: %d\n", args ? (int)args->size() : 0);
-    QorePythonProgram* pypgm = QorePythonProgram::getContext();
-    return pypgm->callFunctionObject(xsink, func, args);
+    return handle->owner->callFunctionObject(xsink, handle->func, args);
+}
+
+void QorePythonProgram::deleteFunctionHandles() {
+    FunctionHandle* h = function_handles.exchange(nullptr);
+    while (h) {
+        FunctionHandle* next = h->next;
+        delete h;
+        h = next;
+    }
 }
 
 QoreValue QorePythonProgram::callCFunctionMethod(ExceptionSink* xsink, PyObject* func, const QoreListNode* args,
@@ -6589,7 +6599,14 @@ int QorePythonProgram::findCreateQoreFunction(PyObject* value, const char* symbo
         // function that the __getattr__() of a module returned)
         Py_INCREF(value);
         addObj(value);
-        ns->addBuiltinVariant((void*)value, symbol, func, QCF_USES_EXTRA_ARGS, QDOM_UNCONTROLLED_API, autoTypeInfo);
+        // the variant holds a handle of the function bound to this program (see FunctionHandle)
+        FunctionHandle* handle = new FunctionHandle(this, value);
+        handle->next = function_handles.load(std::memory_order_relaxed);
+        while (!function_handles.compare_exchange_weak(handle->next, handle, std::memory_order_release,
+                std::memory_order_relaxed)) {
+        }
+        ns->addBuiltinVariant((void*)handle, symbol, func, QCF_USES_EXTRA_ARGS, QDOM_UNCONTROLLED_API,
+            autoTypeInfo);
         printd(5, "QorePythonProgram::findCreateQoreFunction() added function %s::%s() (%s)\n", ns->getName(),
             symbol, Py_TYPE(value)->tp_name);
         return 0;

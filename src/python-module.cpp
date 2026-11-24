@@ -1176,6 +1176,7 @@ static void python_module_delete() {
         qore_python_pgm->doDeref();
         qore_python_pgm = nullptr;
     }
+    QorePythonProgram::deleteFunctionHandles();
     if (PNS) {
         delete PNS;
         PNS = nullptr;

@@ -43,6 +43,7 @@
 
 #include <set>
 #include <map>
+#include <atomic>
 #include <memory>
 
 // forward reference
@@ -886,10 +887,47 @@ protected:
     DLLLOCAL static QoreValue execPythonStaticCFunctionMethod(const QoreMethod& meth, PyObject* func,
             const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink);
 
-    DLLLOCAL static QoreValue execPythonCFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
-            ExceptionSink* xsink);
-    DLLLOCAL static QoreValue execPythonFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
-            ExceptionSink* xsink);
+    //! the Python function of a Qore function variant
+    /** A Qore function variant can outlive the Python program that created it (a child Program that does not inherit
+        the Program data of its parent inherits its functions), so the variant holds this handle: a weak reference to
+        the Python program that owns the function, which references the function while it is valid.  The function is
+        only used through its owner, after checking that the owner is valid.  The handles are deleted when the module
+        is deleted, as Qore function variants have no destructor for their data.
+    */
+    struct FunctionHandle {
+        //! the Python program that owns the function; weakly referenced
+        QorePythonProgram* owner;
+        //! the function, referenced by its owner while the owner is valid
+        PyObject* func;
+        //! the next handle in the list of all handles
+        FunctionHandle* next = nullptr;
+
+        DLLLOCAL FunctionHandle(QorePythonProgram* owner, PyObject* func) : owner(owner), func(func) {
+            owner->weakRef();
+        }
+
+        DLLLOCAL ~FunctionHandle() {
+            owner->weakDeref();
+        }
+
+        FunctionHandle(const FunctionHandle&) = delete;
+        FunctionHandle& operator=(const FunctionHandle&) = delete;
+    };
+
+private:
+    //! the list of the handles of the Python functions of Qore function variants (pushed without a lock)
+    DLLLOCAL static std::atomic<FunctionHandle*> function_handles;
+
+public:
+    //! deletes the handles of the Python functions of Qore function variants; called when the module is deleted
+    DLLLOCAL static void deleteFunctionHandles();
+
+protected:
+
+    DLLLOCAL static QoreValue execPythonCFunction(const FunctionHandle* handle, const QoreListNode* args,
+            q_rt_flags_t rtflags, ExceptionSink* xsink);
+    DLLLOCAL static QoreValue execPythonFunction(const FunctionHandle* handle, const QoreListNode* args,
+            q_rt_flags_t rtflags, ExceptionSink* xsink);
 
     //! Python integration
     DLLLOCAL static PyObject* callQoreFunction(PyObject* self, PyObject* args);
