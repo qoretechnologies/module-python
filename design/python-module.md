@@ -447,6 +447,30 @@ Python 3.12 has similar TSS issues but different internal structures:
 - Our tracking variables (`_qore_tss_tstate`, etc.) are authoritative
 - `PyGILState_Check()` results should not be trusted after GIL transitions
 
+## The Python program of the current context
+
+`QorePythonProgram::getContext()` returns the Python program that code which names no `PythonProgram` object uses
+(the static methods of `PythonProgram`, the Python functions imported into Qore, the loaders, the Python types of
+Qore declarations), in this order:
+
+1. the program of the interpreter that runs on the thread (`python_u_tld_key`, set by `QorePythonHelper`), when the
+   thread's attached Python state is in that interpreter;
+2. the owner of the attached interpreter, for threads that Python created;
+3. the Python program of the current Program (`getProgram()`): library code that loaded python runs in the library's
+   own Python program, which holds library state shared by every caller, as the library's Qore state is;
+4. the Python program of the caller Program (`qore_get_caller_program()`): the first Program outward on the call chain
+   that is not a module's, unknown where the code that the running code serves cannot be identified.  It is not the
+   call Program context (`qore_get_call_program_context()`), which in a library function or closure is the library's
+   own Program (qore#7394);
+5. the main interpreter's program (`qore_python_pgm`), which the whole process shares.  Code that a sandbox governs
+   (`QoreSandboxCapture`), whether its caller is unknown or has no Python program, never gets it: `getContext()`
+   returns `nullptr`, and every caller fails closed with a Qore exception (`getContextOrRaise()`) or a Python
+   `RuntimeError` (`getContextOrRaisePython()`).
+
+Steps 4 and 5 apply only to a Program without a Python program, i.e. one created with `PO_NO_INHERIT_PROGRAM_DATA`
+(a Program that loads or inherits the module gets one in `python_module_ns_init()` or from
+`QorePythonProgram::copy()`).
+
 ## Ownership during interpreter finalization
 
 A `PythonProgram` owns its Python subinterpreter even when it shares the parent

@@ -362,7 +362,12 @@ PythonProgram::aliasDefinition(string python_source_path, string python_target_p
     @return no value
 
     @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
-    @throw PYTHON-ERROR there is no Python program context in the current Program
+    @throw PYTHON-ERROR there is no Python program context in the current Program (code that a sandbox governs and
+    that has no Python program of its own)
+
+    @note in the code of a library (a module) that loads the module itself, the Python program of the current
+    Program is the library's own, which is library state shared by every caller of the library: a library must not
+    keep per-caller data there, the same rule as for its global variables; see @ref python_program_context
 
     @see evalStatementKeep()
  */
@@ -385,7 +390,12 @@ static auto PythonProgram::evalStatement(string source_code, string source_label
     @return no value
 
     @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
-    @throw PYTHON-ERROR there is no Python program context in the current Program
+    @throw PYTHON-ERROR there is no Python program context in the current Program (code that a sandbox governs and
+    that has no Python program of its own)
+
+    @note in the code of a library (a module) that loads the module itself, the Python program of the current
+    Program is the library's own, which is library state shared by every caller of the library: a library must not
+    keep per-caller data there, the same rule as for its global variables; see @ref python_program_context
 
     @see evalStatement()
  */
@@ -405,7 +415,12 @@ static auto PythonProgram::evalStatementKeep(string source_code, string source_l
     @return the value of the expression, converted to Qore as per @ref python_python_to_qore
 
     @throw PYTHON-COMPILE-ERROR error parsing or compiling the given source
-    @throw PYTHON-ERROR there is no Python program context in the current Program
+    @throw PYTHON-ERROR there is no Python program context in the current Program (code that a sandbox governs and
+    that has no Python program of its own)
+
+    @note in the code of a library (a module) that loads the module itself, the Python program of the current
+    Program is the library's own, which is library state shared by every caller of the library: a library must not
+    keep per-caller data there, the same rule as for its global variables; see @ref python_program_context
 
     @note The expression is evaluated in the globals of the %Python program of the current %Qore Program (the one
     that the \c python module commands and imports use)

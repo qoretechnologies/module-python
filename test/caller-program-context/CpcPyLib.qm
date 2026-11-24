@@ -1,0 +1,40 @@
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# library code that loads python itself: its Program has a Python program of its own, which its code uses
+%modern
+%requires python
+
+module CpcPyLib {
+    version = "1.0";
+    desc = "test library with a Python program of its own";
+    author = "Qore Technologies, s.r.o.";
+    url = "https://qore.org";
+    license = "MIT";
+}
+
+public namespace CpcPyLib {
+#! runs the statement in the Python program of the current context
+public sub lib_stmt(string stmt) {
+    Python::PythonProgram::evalStatementKeep(stmt);
+}
+
+#! evaluates the expression in the Python program of the current context
+public auto sub lib_expr(string expr) {
+    return Python::PythonProgram::evalExpression(expr);
+}
+
+#! returns a closure of the library that runs a statement in the Python program of the current context
+public code sub lib_closure() {
+    return sub (string stmt) {
+        Python::PythonProgram::evalStatementKeep(stmt);
+    };
+}
+
+public class Lib {
+    #! runs the statement in the Python program of the current context
+    static stmt(string stmt) {
+        Python::PythonProgram::evalStatementKeep(stmt);
+    }
+}
+}

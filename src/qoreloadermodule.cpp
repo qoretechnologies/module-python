@@ -828,7 +828,10 @@ PyObject* qoreloader_load_java(PyObject* self, PyObject* args) {
     if (!qeh.check()) {
         return nullptr;
     }
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     if (do_jni_module_import(qore_python_pgm, name_str)) {
         return nullptr;
     }
@@ -873,7 +876,10 @@ PyObject* qoreloader_issue_module_cmd(PyObject* self, PyObject* args) {
         return nullptr;
     }
     ExceptionSink xsink;
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     QoreProgram* qpgm = qore_python_pgm->getQoreProgram();
     if (qpgm->issueModuleCmd(module_str, cmd_str, &xsink)) {
         assert(xsink);

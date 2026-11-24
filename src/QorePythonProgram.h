@@ -546,7 +546,21 @@ public:
     */
     DLLLOCAL static QoreObject* getQoreSubclassObject(PyObject* pyobj);
 
+    //! Returns the Python program of the code that runs on the thread, or nullptr if it has none
+    /** The interpreter running on the thread, else the Python program of the current Program, else that of the
+        Program of the code that called the running code through the call chain (qore_get_caller_program()), else the
+        main interpreter's program, which is shared by the whole process and so never returned for code that a sandbox
+        governs: nullptr is returned for such code (fail closed)
+    */
     DLLLOCAL static QorePythonProgram* getContext();
+
+    //! Returns getContext(), or raises a Python \c RuntimeError and returns nullptr if there is no Python program
+    /** For the functions and slots through which Python calls into Qore
+    */
+    DLLLOCAL static QorePythonProgram* getContextOrRaisePython();
+
+    //! Returns getContext(), or raises a Qore \c PYTHON-ERROR exception and returns nullptr if there is none
+    DLLLOCAL static QorePythonProgram* getContextOrRaise(ExceptionSink* xsink);
 
     //! returns the number of fork() calls that made this process from the process that loaded the module
     DLLLOCAL static unsigned getForkGeneration() {

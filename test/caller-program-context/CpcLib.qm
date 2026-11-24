@@ -1,0 +1,47 @@
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# library code without python: it runs code that its caller gives it
+%modern
+
+module CpcLib {
+    version = "1.0";
+    desc = "test library that runs the code of its caller";
+    author = "Qore Technologies, s.r.o.";
+    url = "https://qore.org";
+    license = "MIT";
+}
+
+public namespace CpcLib {
+#! calls the code with the argument in a plain function of the library
+public auto sub lib_call(code c, string arg) {
+    return c(arg);
+}
+
+#! returns a closure of the library that calls the code with its argument
+public code sub lib_closure(code c) {
+    return auto sub (string arg) {
+        return c(arg);
+    };
+}
+
+#! calls the code with the argument in a thread that the library starts, and returns its result or its exception
+public auto sub lib_thread(code c, string arg) {
+    Queue q();
+    background sub () {
+        try {
+            q.push(c(arg));
+        } catch (hash<ExceptionInfo> ex) {
+            q.push(ex);
+        }
+    }();
+    return q.get();
+}
+
+public class Lib {
+    #! calls the code with the argument in a static method of the library
+    static auto call(code c, string arg) {
+        return c(arg);
+    }
+}
+}

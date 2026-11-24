@@ -223,7 +223,10 @@ PyObject* QoreMetaPathFinder::getQoreRootModuleSpec(const QoreString& mname) {
         return nullptr;
     }
     // add namespaces as submodule search locations (NOTE: not functionally necessary it seems)
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     const RootQoreNamespace* rns = qore_python_pgm->getQoreProgram()->getRootNS();
     QoreNamespaceNamespaceIterator ni(*rns);
     while (ni.next()) {
@@ -255,7 +258,10 @@ PyObject* QoreMetaPathFinder::tryLoadModule(const QoreString& full_name, const c
         return nullptr;
     }
 
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     ExceptionSink xsink;
     if (ModuleManager::runTimeLoadModule(mod_name, qore_python_pgm->getQoreProgram(), &xsink)) {
         // a module that does not exist is not found (ModuleNotFoundError); Qore raises LOAD-MODULE-ERROR with this

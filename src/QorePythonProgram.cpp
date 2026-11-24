@@ -500,16 +500,42 @@ QorePythonProgram* QorePythonProgram::getContext() {
             return pypgm;
         }
     }
-    pgm = qore_get_call_program_context();
+    // then the Program of the code that called the running code through the call chain, which library code (the code
+    // of a module's Program) does not hide: the call Program context of library code is the library's own Program
+    // (qore#7394), whose Python program is library state shared by every caller, so it is never used here; the caller
+    // is unknown where the code that the running code serves cannot be identified
+    pgm = qore_get_caller_program();
     if (pgm) {
         pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
         if (pypgm) {
-            //printd(5, "QorePythonProgram::getContext() got local call context pgm: %p pypgm: %p\n", pgm, pypgm);
+            //printd(5, "QorePythonProgram::getContext() got caller program context pgm: %p pypgm: %p\n", pgm, pypgm);
             return pypgm;
         }
     }
+    // the main interpreter's program is shared by the whole process: code that a sandbox governs never gets it (fail
+    // closed), also when the caller is unknown or has no Python program of its own
+    if (QoreSandboxCapture().isSandboxed()) {
+        return nullptr;
+    }
     //printd(5, "QorePythonProgram::getContext() got global program context pypgm: %p\n", pypgm);
     return qore_python_pgm;
+}
+
+QorePythonProgram* QorePythonProgram::getContextOrRaisePython() {
+    QorePythonProgram* pypgm = getContext();
+    if (!pypgm) {
+        PyErr_SetString(PyExc_RuntimeError, "there is no Python program context for the code that runs on this "
+            "thread");
+    }
+    return pypgm;
+}
+
+QorePythonProgram* QorePythonProgram::getContextOrRaise(ExceptionSink* xsink) {
+    QorePythonProgram* pypgm = getContext();
+    if (!pypgm) {
+        xsink->raiseException("PYTHON-ERROR", "there is no Python program context in the current Program");
+    }
+    return pypgm;
 }
 
 int QorePythonProgram::staticInit() {
@@ -2721,7 +2747,10 @@ PyObject* QorePythonProgram::hashDeclInit(PyObject* capsule, PyObject* args, PyO
     if (!qeh.check()) {
         return nullptr;
     }
-    QorePythonProgram* pypgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* pypgm = QorePythonProgram::getContextOrRaisePython();
+    if (!pypgm) {
+        return nullptr;
+    }
     ExceptionSink xsink;
     QoreExternalProgramContextHelper pch(&xsink, pypgm->getQoreProgram());
     if (!xsink) {
@@ -5895,7 +5924,10 @@ PyObject* QorePythonProgram::callQoreOverride(PyObject* name, PyObject* args) {
     // the thread state that Python called us with; it must be current again before returning
     PyThreadState* entry_tstate = qore_python_attached_thread_state();
 
-    QorePythonProgram* pypgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* pypgm = QorePythonProgram::getContextOrRaisePython();
+    if (!pypgm) {
+        return nullptr;
+    }
     // the object is kept while its method runs, also if its slot is changed meanwhile; a deleted object raises
     // OBJECT-ALREADY-DELETED, as with Qore's weak references
     struct WeakObjectHolder {
@@ -6069,14 +6101,20 @@ QoreValue QorePythonProgram::execPythonStaticCFunctionMethod(const QoreMethod& m
 QoreValue QorePythonProgram::execPythonCFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
         ExceptionSink* xsink) {
     //printd(5, "QorePythonProgram::execPythonCFunction() argcount: %d\n", args ? (int)args->size() : 0);
-    QorePythonProgram* pypgm = QorePythonProgram::getContext();
+    QorePythonProgram* pypgm = QorePythonProgram::getContextOrRaise(xsink);
+    if (!pypgm) {
+        return QoreValue();
+    }
     return pypgm->callCFunctionMethod(xsink, func, args);
 }
 
 QoreValue QorePythonProgram::execPythonFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
         ExceptionSink* xsink) {
     //printd(5, "QorePythonProgram::execPythonFunction() argcount: %d\n", args ? (int)args->size() : 0);
-    QorePythonProgram* pypgm = QorePythonProgram::getContext();
+    QorePythonProgram* pypgm = QorePythonProgram::getContextOrRaise(xsink);
+    if (!pypgm) {
+        return QoreValue();
+    }
     return pypgm->callFunctionObject(xsink, func, args);
 }
 

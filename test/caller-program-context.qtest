@@ -1,0 +1,194 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# The Python program that Python code runs in when sandboxed Programs reach Python through library code: the Python
+# state that a caller creates belongs to the caller's own Python program, or to the library's when library code that
+# loaded python runs it, never to another caller's or to the host's; code that a sandbox governs and that has no
+# Python program of its own is refused the main interpreter's program, which the whole process shares
+
+%modern
+%no-child-restrictions
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%append-module-path "${SCRIPT_DIR}/caller-program-context"
+
+%requires python
+%requires QUnit
+# the libraries are loaded by the host: library code that every Program shares
+%requires CpcLib
+%requires CpcPyLib
+
+%exec-class CallerProgramContextTest
+
+class CallerProgramContextTest inherits QUnit::Test {
+    public {
+        # the code of each sandboxed Program
+        const Source = "%requires CpcLib\n"
+            "%requires CpcPyLib\n"
+            "string sub stmt(string name, string val) { return sprintf(\"%s = %y\", name, val); }\n"
+            "sub set_direct(string name, string val) {\n"
+            "    Python::PythonProgram::evalStatementKeep(stmt(name, val));\n"
+            "}\n"
+            "auto sub get(string name) {\n"
+            "    return Python::PythonProgram::evalExpression(sprintf(\"globals().get(%y)\", name));\n"
+            "}\n"
+            "# runs the code with the statement in library code without python, in the given way\n"
+            "sub run_via(string how, code c, string s) {\n"
+            "    switch (how) {\n"
+            "        case \"function\": CpcLib::lib_call(c, s); break;\n"
+            "        case \"closure\": { code f = CpcLib::lib_closure(c); f(s); break; }\n"
+            "        case \"static method\": CpcLib::Lib::call(c, s); break;\n"
+            "        case \"thread\": {\n"
+            "            auto rv = CpcLib::lib_thread(c, s);\n"
+            "            if (rv) {\n"
+            "                throw rv.err, rv.desc;\n"
+            "            }\n"
+            "            break;\n"
+            "        }\n"
+            "        default: throw \"TEST-ERROR\", how;\n"
+            "    }\n"
+            "}\n"
+            "sub via_lib(string how, string name, string val) {\n"
+            "    run_via(how, \\Python::PythonProgram::evalStatementKeep(), stmt(name, val));\n"
+            "}\n"
+            "sub via_pylib(string how, string name, string val) {\n"
+            "    string s = stmt(name, val);\n"
+            "    switch (how) {\n"
+            "        case \"function\": CpcPyLib::lib_stmt(s); break;\n"
+            "        case \"closure\": { code f = CpcPyLib::lib_closure(); f(s); break; }\n"
+            "        case \"static method\": CpcPyLib::Lib::stmt(s); break;\n"
+            "        default: throw \"TEST-ERROR\", how;\n"
+            "    }\n"
+            "}\n"
+            "auto sub pylib_get(string name) {\n"
+            "    return CpcPyLib::lib_expr(sprintf(\"globals().get(%y)\", name));\n"
+            "}\n"
+            "sub main_stmt(string s) {\n"
+            "    Python::PythonProgram::evalStatement(s);\n"
+            "}\n"
+            "sub main_stmt_via_lib(string how, string s) {\n"
+            "    run_via(how, \\Python::PythonProgram::evalStatement(), s);\n"
+            "}\n"
+            "auto sub expr(string s) {\n"
+            "    return Python::PythonProgram::evalExpression(s);\n"
+            "}\n";
+
+        const Ways = ("function", "closure", "static method");
+    }
+
+    constructor() : QUnit::Test("python caller program context", "1.0", \ARGV) {
+        addTestCase("direct calls use each Program's own Python program", \testDirect());
+        addTestCase("caller code run by library code uses the caller's Python program", \testThroughLibrary());
+        addTestCase("library code that loaded python uses the library's Python program", \testLibraryPython());
+        addTestCase("sandboxed code without a Python program is refused the main interpreter's",
+            \testSandboxedWithoutPythonProgram());
+        set_return_value(main());
+    }
+
+    # returns a sandboxed Program that may use Python, an uncontrolled API
+    private Program sandboxed(string label, int opts = PO_NEW_STYLE) {
+        SandboxManager sm();
+        sm.setUncontrolledApiPolicy(True);
+        Program pgm(opts);
+        pgm.setSandboxManager(sm);
+        pgm.parse(Source, label);
+        return pgm;
+    }
+
+    private auto hostGet(string name) {
+        return Python::PythonProgram::evalExpression(sprintf("globals().get(%y)", name));
+    }
+
+    # checks that the variable has the value of exactly the Program that set it
+    private checkOwn(string name, Program a, Program b, string what) {
+        assertEq("A", a.callFunction("get", name), what + ": A's own Python program");
+        assertEq("B", b.callFunction("get", name), what + ": B's own Python program");
+        assertNothing(hostGet(name), what + ": the host's Python program");
+        assertNothing(a.callFunction("pylib_get", name), what + ": the library's Python program");
+    }
+
+    testDirect() {
+        Program a = sandboxed("cpc-a");
+        Program b = sandboxed("cpc-b");
+        a.callFunction("set_direct", "cpc_direct", "A");
+        b.callFunction("set_direct", "cpc_direct", "B");
+        checkOwn("cpc_direct", a, b, "direct");
+    }
+
+    testThroughLibrary() {
+        Program a = sandboxed("cpc-a");
+        Program b = sandboxed("cpc-b");
+        foreach string how in (Ways + ("thread",)) {
+            string name = "cpc_lib_" + replace(how, " ", "_");
+            a.callFunction("via_lib", how, name, "A");
+            b.callFunction("via_lib", how, name, "B");
+            checkOwn(name, a, b, "library " + how);
+        }
+    }
+
+    # the Python program of library code that loaded python holds the library's state, which every caller of the
+    # library shares, as the library's Qore state is; it is never a caller's or the host's
+    testLibraryPython() {
+        Program a = sandboxed("cpc-a");
+        Program b = sandboxed("cpc-b");
+        foreach string how in (Ways) {
+            string name = "cpc_pylib_" + replace(how, " ", "_");
+            a.callFunction("via_pylib", how, name, "A");
+            assertEq("A", a.callFunction("pylib_get", name), how);
+            b.callFunction("via_pylib", how, name, "B");
+            assertEq("B", a.callFunction("pylib_get", name), how);
+            assertNothing(a.callFunction("get", name), how + ": A's own Python program");
+            assertNothing(b.callFunction("get", name), how + ": B's own Python program");
+            assertNothing(hostGet(name), how + ": the host's Python program");
+        }
+    }
+
+    # returns the error code of the exception that the call raises, or nothing if it raises none
+    private *string callErr(Program p, string func, softlist<auto> args) {
+        try {
+            p.callFunctionArgs(func, args);
+        } catch (hash<ExceptionInfo> ex) {
+            return ex.err;
+        }
+    }
+
+    # a Program that does not inherit the Program data of its parent has no Python program of its own; code that a
+    # sandbox governs there must not run in the main interpreter's program, which the whole process shares
+    testSandboxedWithoutPythonProgram() {
+        Program a = sandboxed("cpc-nodata-a", PO_NEW_STYLE | PO_NO_INHERIT_PROGRAM_DATA);
+        Program b = sandboxed("cpc-nodata-b", PO_NEW_STYLE | PO_NO_INHERIT_PROGRAM_DATA);
+        # each sandbox sets a variable in the __main__ module of the interpreter that it runs in, which must be its
+        # own: the second one raises an exception if it finds the variable that the first one set
+        string probe = "import __main__\nif hasattr(__main__, 'cpc_shared'):\n    raise RuntimeError('shared')\n"
+            "__main__.cpc_shared = 1\n";
+        *string a_err = callErr(a, "main_stmt", probe);
+        *string b_err = callErr(b, "main_stmt", probe);
+        # a Program that a sandbox does not govern uses the main interpreter's program
+        Program u(PO_NEW_STYLE | PO_NO_INHERIT_PROGRAM_DATA);
+        u.parse(Source, "cpc-nodata-u");
+        *string u_err = callErr(u, "main_stmt", "import __main__\nif hasattr(__main__, 'cpc_shared'):\n"
+            "    raise RuntimeError('shared')\n");
+        assertNothing(u_err, "the state of a sandbox reached the main interpreter, which the whole process shares");
+        assertEq("PYTHON-ERROR", a_err, "the first sandbox ran Python code in the main interpreter");
+        assertEq("PYTHON-ERROR", b_err, "the second sandbox ran Python code in the main interpreter");
+
+        foreach Program p in ((a, b)) {
+            assertThrows("PYTHON-ERROR", "no Python program context", \p.callFunction(), ("main_stmt", "pass"));
+            foreach string how in (Ways + ("thread",)) {
+                assertThrows("PYTHON-ERROR", "no Python program context", \p.callFunction(),
+                    ("main_stmt_via_lib", how, "import __main__\n__main__.cpc_shared_lib = 1\n"));
+                assertThrows("PYTHON-ERROR", "no Python program context", \p.callFunction(), ("via_lib", how,
+                    "cpc_shared_" + replace(how, " ", "_"), "A"));
+            }
+            assertThrows("PYTHON-ERROR", "no Python program context", \p.callFunction(), ("set_direct",
+                "cpc_shared_keep", "A"));
+            assertThrows("PYTHON-ERROR", "no Python program context", \p.callFunction(), ("expr", "1 + 1"));
+        }
+        assertNothing(callErr(u, "main_stmt", "import __main__\nif hasattr(__main__, 'cpc_shared_lib'):\n"
+            "    raise RuntimeError('shared')\n"));
+
+        # the sandboxes keep using the Python programs of the libraries, which they do not own
+        a.callFunction("via_pylib", "function", "cpc_nodata_pylib", "A");
+        assertEq("A", a.callFunction("pylib_get", "cpc_nodata_pylib"));
+    }
+}

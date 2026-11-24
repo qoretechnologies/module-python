@@ -142,7 +142,10 @@ PyObject* qore_callable_call(PyQoreCallable* self, PyObject* args, PyObject* kwa
     // the thread state that Python called us with; it must be current again before returning
     PyThreadState* entry_tstate = qore_python_attached_thread_state();
 
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
 
     ExceptionSink xsink;
     {

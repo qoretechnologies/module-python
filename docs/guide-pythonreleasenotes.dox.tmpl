@@ -20,6 +20,12 @@
       were created, as in %Qore, and that @ref Qore::PO_NO_INHERIT_SYSTEM_CONSTANTS "PO_NO_INHERIT_SYSTEM_CONSTANTS"
       withholds the inherited constants
       (<a href="https://github.com/qoretechnologies/qore/issues/5521">issue 5521</a>)
+    - code that a sandbox governs in a %Program without a %Python program of its own no longer runs %Python code in
+      the program of the main interpreter, which the whole process shares: a \c PYTHON-ERROR exception is raised; the
+      %Python program that code without one of its own uses is that of the code that called it through the call chain,
+      which library code does not hide, and a library's own %Python program is documented as library state shared by
+      all of its callers; see @ref python_program_context
+      (<a href="https://github.com/qoretechnologies/qore/issues/7394">issue 7394</a>)
 
     <b>New Features and Enhancements:</b>
     - Added support for Python 3.12, 3.13, 3.14, 3.15, and 3.16 (tested with the first alpha release of 3.16)
