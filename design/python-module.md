@@ -450,7 +450,9 @@ Python 3.12 has similar TSS issues but different internal structures:
 ## The Python program of the current context
 
 `QorePythonProgram::getContext()` returns the Python program that Qore code which names no `PythonProgram` object
-uses (the static methods of `PythonProgram`, the Python functions imported into Qore), in this order:
+uses (the static methods of `PythonProgram`, the module commands), in this order (the Python functions and classes
+imported into Qore run in the Python program that imported them, also when an inheriting child Program uses them;
+their use by sandboxed code is qore#7529):
 
 1. the program of the interpreter that runs on the thread (`getThreadContext()`): the program set by
    `QorePythonHelper` (`python_u_tld_key`) when the thread's attached Python state is in its interpreter, else the

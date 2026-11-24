@@ -20,9 +20,10 @@
       were created, as in %Qore, and that @ref Qore::PO_NO_INHERIT_SYSTEM_CONSTANTS "PO_NO_INHERIT_SYSTEM_CONSTANTS"
       withholds the inherited constants
       (<a href="https://github.com/qoretechnologies/qore/issues/5521">issue 5521</a>)
-    - code that a sandbox governs no longer uses the %Python state of another %Program or of the main interpreter,
-      also when %Python code of another %Program calls it, and a library's own %Python program is documented as state
-      shared by all of its callers; see @ref python_program_context
+    - code that a sandbox governs no longer runs %Python code without a @ref Python::PythonProgram "PythonProgram"
+      object in the %Python program of another %Program or of the main interpreter, also when %Python code of another
+      %Program calls it (inherited %Python functions and classes excepted), and a library's own %Python program is
+      documented as state shared by all of its callers; see @ref python_program_context
       (<a href="https://github.com/qoretechnologies/qore/issues/7394">issue 7394</a>)
 
     <b>New Features and Enhancements:</b>
