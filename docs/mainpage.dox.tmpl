@@ -68,7 +68,9 @@ Program child(PO_NEW_STYLE | PO_NO_UNCONTROLLED_APIS | PO_NO_INHERIT_SYSTEM_CONS
     @ref Python::PythonProgram "PythonProgram" object (the static methods such as
     @ref Python::PythonProgram::evalStatement() "PythonProgram::evalStatement()", the %Python functions that the
     module imports into %Qore, and the \c python module commands) uses the %Python program of the current context:
-    - in %Qore code called from %Python, the %Python program of that %Python code
+    - in %Qore code called from %Python, the %Python program of that %Python code, if it belongs to the %Program whose
+      code runs or if no sandbox governs the code: code that a sandbox governs never uses the %Python state of another
+      %Program (another sandbox's, the host's, or the main interpreter's), and continues as below instead
     - otherwise, the %Python program of the %Program whose code runs: the code of a library (a module) that loads the
       module itself runs in the library's own %Python program, which is library state that every caller of the library
       shares, as the library's global variables are: a library must not keep per-caller data there, the same rule as

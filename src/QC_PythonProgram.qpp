@@ -479,7 +479,9 @@ PythonProgram::setSaveObjectCallback(callback);
     @see @ref python_qore_object_lifecycle_managementguide for more information
 */
 static PythonProgram::setSaveObjectCallback(*code save_object_callback) [dom=PROCESS;flags=NAMED_ARGS] {
-    QorePythonProgram* pypgm = QorePythonProgram::getContext();
-    assert(pypgm);
+    QorePythonProgram* pypgm = QorePythonProgram::getContextOrRaise(xsink);
+    if (!pypgm) {
+        return QoreValue();
+    }
     pypgm->setSaveObjectCallback(save_object_callback);
 }

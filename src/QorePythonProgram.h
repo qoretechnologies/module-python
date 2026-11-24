@@ -492,7 +492,7 @@ public:
     DLLLOCAL static int getQoreOffsetZone(ExceptionSink* xsink, PyObject* offset, const AbstractQoreZoneInfo*& zone);
 
     //! Returns a Python string for the given Qore string
-    DLLLOCAL static PyObject* getPythonString(ExceptionSink* xsink, const QoreString* str);
+    DLLLOCAL PyObject* getPythonString(ExceptionSink* xsink, const QoreString* str);
 
     //! Returns a Python string for the given Qore string
     DLLLOCAL static PyObject* getPythonByteArray(ExceptionSink* xsink, const BinaryNode* b);
@@ -538,6 +538,10 @@ public:
         return static_cast<const QorePythonClass*>(cls)->getPythonProgram();
     }
 
+    //! Returns the Python program for the functions and slots through which Python calls into Qore
+    /** The program of the interpreter that runs on the thread, which converts their values, else as
+        getProgramContext(); nullptr only where getProgramContext() returns it
+    */
     DLLLOCAL static QorePythonProgram* getExecutionContext();
 
     //! Returns the Qore object of the Python object of a Qore object whose class inherits a Python class
@@ -546,15 +550,26 @@ public:
     */
     DLLLOCAL static QoreObject* getQoreSubclassObject(PyObject* pyobj);
 
-    //! Returns the Python program of the code that runs on the thread, or nullptr if it has none
-    /** The interpreter running on the thread, else the Python program of the current Program, else that of the
-        Program of the code that called the running code through the call chain (qore_get_caller_program()), else the
-        main interpreter's program, which is shared by the whole process and so never returned for code that a sandbox
-        governs: nullptr is returned for such code (fail closed)
+    //! Returns the Python program of the Qore code that runs on the thread, or nullptr if it has none
+    /** The program of the interpreter running on the thread (Qore code called from Python) if it belongs to the
+        current Program or if no sandbox governs the running code, else as getProgramContext(), so that code that a
+        sandbox governs never uses the Python state of another Program (fail closed)
     */
     DLLLOCAL static QorePythonProgram* getContext();
 
-    //! Returns getContext(), or raises a Python \c RuntimeError and returns nullptr if there is no Python program
+    //! Returns the Python program of the current Program, else that of the caller Program, else the main interpreter's
+    /** The Python program of the current Program, else that of the Program of the code that called the running code
+        through the call chain (qore_get_caller_program()), else the main interpreter's program, which is shared by the
+        whole process and so never returned for code that a sandbox governs: nullptr is returned for such code
+
+        @param sandboxed true if the caller already found that a sandbox governs the running code
+    */
+    DLLLOCAL static QorePythonProgram* getProgramContext(bool sandboxed);
+
+    //! Returns the program of the interpreter that runs on the thread, or nullptr if there is none
+    DLLLOCAL static QorePythonProgram* getThreadContext();
+
+    //! Returns getExecutionContext(), or raises a Python \c RuntimeError and returns nullptr if there is none
     /** For the functions and slots through which Python calls into Qore
     */
     DLLLOCAL static QorePythonProgram* getContextOrRaisePython();

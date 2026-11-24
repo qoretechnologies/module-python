@@ -515,12 +515,8 @@ void PythonQoreClass::populateClass(QorePythonProgram* pypgm, const QoreClass& q
                     xsink.clear();
                     continue;
                 }
-                // the constant is skipped if there is no Python program context (see QorePythonProgram::getContext())
-                QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
-                if (!qore_python_pgm) {
-                    continue;
-                }
-                QorePythonReferenceHolder val(qore_python_pgm->getPythonValue(*qoreval, &xsink));
+                // the value is made for the Python program that the class is populated for
+                QorePythonReferenceHolder val(pypgm->getPythonValue(*qoreval, &xsink));
                 if (xsink) {
                     // a constant that has no Python representation (ex: java.time.Instant::MIN, whose year lies
                     // outside the range supported by datetime.datetime) must not abort the import of the entire
@@ -1398,7 +1394,9 @@ PyObject* PythonQoreClass::py_dir(PyObject* /* unused */, PyObject* self) {
     }
     QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
     if (!qore_python_pgm) {
-        // the Python exception raised replaces any Qore exception
+        // the Python exception raised replaces any Qore exception, which is released without the GIL, as releasing it
+        // can run Qore code
+        QorePythonReleaseGilHelper prgh;
         xsink.clear();
         return nullptr;
     }

@@ -460,11 +460,16 @@ void QorePythonProgram::createQoreProgram() {
     //  qpgm->getRootNS());
 }
 
-QorePythonProgram* QorePythonProgram::getExecutionContext() {
-    return getContext();
+//! returns true if a sandbox governs the running code; true also if that cannot be determined (fail closed)
+static bool qore_python_code_is_sandboxed() noexcept {
+    try {
+        return QoreSandboxCapture().isSandboxed();
+    } catch (...) {
+        return true;
+    }
 }
 
-QorePythonProgram* QorePythonProgram::getContext() {
+QorePythonProgram* QorePythonProgram::getThreadContext() {
     // A PythonProgram can share its parent QoreProgram while owning a different
     // Python interpreter. Its wrappers must be cached in the executing program.
     QorePythonProgram* pypgm = reinterpret_cast<QorePythonProgram*>(q_get_thread_local_data(python_u_tld_key));
@@ -491,12 +496,39 @@ QorePythonProgram* QorePythonProgram::getContext() {
             }
         }
     }
+    return nullptr;
+}
+
+QorePythonProgram* QorePythonProgram::getExecutionContext() {
+    // the functions and slots through which Python calls into Qore convert their values in the interpreter that runs
+    // on the thread
+    QorePythonProgram* pypgm = getThreadContext();
+    return pypgm ? pypgm : getProgramContext(false);
+}
+
+QorePythonProgram* QorePythonProgram::getContext() {
+    // Qore code uses the Python program of the interpreter that runs on the thread (Qore code called from Python)
+    // only if it belongs to the Program whose code runs, or if no sandbox governs the code: code that a sandbox
+    // governs never uses the Python state of another Program, such as that of another sandbox or of the host whose
+    // Python code calls it
+    QorePythonProgram* pypgm = getThreadContext();
+    if (pypgm) {
+        if (pypgm->qpgm == getProgram() || !qore_python_code_is_sandboxed()) {
+            return pypgm;
+        }
+        return getProgramContext(true);
+    }
+    return getProgramContext(false);
+}
+
+QorePythonProgram* QorePythonProgram::getProgramContext(bool sandboxed) {
     // first try to get the actual Program context
     QoreProgram* pgm = getProgram();
     if (pgm) {
-        pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
+        QorePythonProgram* pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
         if (pypgm) {
-            //printd(5, "QorePythonProgram::getContext() got local program context pgm: %p pypgm: %p\n", pgm, pypgm);
+            //printd(5, "QorePythonProgram::getProgramContext() got local program context pgm: %p pypgm: %p\n", pgm,
+            //  pypgm);
             return pypgm;
         }
     }
@@ -506,23 +538,24 @@ QorePythonProgram* QorePythonProgram::getContext() {
     // is unknown where the code that the running code serves cannot be identified
     pgm = qore_get_caller_program();
     if (pgm) {
-        pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
+        QorePythonProgram* pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
         if (pypgm) {
-            //printd(5, "QorePythonProgram::getContext() got caller program context pgm: %p pypgm: %p\n", pgm, pypgm);
+            //printd(5, "QorePythonProgram::getProgramContext() got caller program context pgm: %p pypgm: %p\n", pgm,
+            //  pypgm);
             return pypgm;
         }
     }
     // the main interpreter's program is shared by the whole process: code that a sandbox governs never gets it (fail
     // closed), also when the caller is unknown or has no Python program of its own
-    if (QoreSandboxCapture().isSandboxed()) {
+    if (sandboxed || qore_python_code_is_sandboxed()) {
         return nullptr;
     }
-    //printd(5, "QorePythonProgram::getContext() got global program context pypgm: %p\n", pypgm);
+    //printd(5, "QorePythonProgram::getProgramContext() got global program context\n");
     return qore_python_pgm;
 }
 
 QorePythonProgram* QorePythonProgram::getContextOrRaisePython() {
-    QorePythonProgram* pypgm = getContext();
+    QorePythonProgram* pypgm = getExecutionContext();
     if (!pypgm) {
         PyErr_SetString(PyExc_RuntimeError, "there is no Python program context for the code that runs on this "
             "thread");
@@ -2468,7 +2501,7 @@ void QorePythonProgram::raisePythonException(ExceptionSink& xsink) {
         return;
     }
     // the exception is raised in the interpreter of the current thread, whose program converts the values
-    QorePythonProgram* pypgm = getContext();
+    QorePythonProgram* pypgm = getExecutionContext();
     if (!pypgm || !pypgm->interpreter || pypgm->interpreter != qore_python_get_interpreter(PyThreadState_Get())) {
         pypgm = this;
     }
@@ -4229,7 +4262,7 @@ PyObject* QorePythonProgram::getPythonDict(ExceptionSink* xsink, const QoreHashN
 PyObject* QorePythonProgram::getPythonString(ExceptionSink* xsink, const QoreString* str) {
     TempEncodingHelper py_str(str, QCS_UTF8, xsink);
     if (*xsink) {
-        qore_python_pgm->raisePythonException(*xsink);
+        raisePythonException(*xsink);
         return nullptr;
     }
     return PyUnicode_FromStringAndSize(py_str->c_str(), py_str->size());

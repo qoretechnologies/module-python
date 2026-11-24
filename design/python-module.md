@@ -449,25 +449,32 @@ Python 3.12 has similar TSS issues but different internal structures:
 
 ## The Python program of the current context
 
-`QorePythonProgram::getContext()` returns the Python program that code which names no `PythonProgram` object uses
-(the static methods of `PythonProgram`, the Python functions imported into Qore, the loaders, the Python types of
-Qore declarations), in this order:
+`QorePythonProgram::getContext()` returns the Python program that Qore code which names no `PythonProgram` object
+uses (the static methods of `PythonProgram`, the Python functions imported into Qore), in this order:
 
-1. the program of the interpreter that runs on the thread (`python_u_tld_key`, set by `QorePythonHelper`), when the
-   thread's attached Python state is in that interpreter;
-2. the owner of the attached interpreter, for threads that Python created;
-3. the Python program of the current Program (`getProgram()`): library code that loaded python runs in the library's
+1. the program of the interpreter that runs on the thread (`getThreadContext()`): the program set by
+   `QorePythonHelper` (`python_u_tld_key`) when the thread's attached Python state is in its interpreter, else the
+   owner of the attached interpreter, for threads that Python created; only if it belongs to the Program whose code
+   runs (`getProgram()`) or if no sandbox governs the running code: sandboxed Qore code that the Python code of
+   another Program (another sandbox, the host, the main interpreter) calls continues with step 2, so that it never
+   uses that Program's Python state;
+2. the Python program of the current Program (`getProgram()`): library code that loaded python runs in the library's
    own Python program, which holds library state shared by every caller, as the library's Qore state is;
-4. the Python program of the caller Program (`qore_get_caller_program()`): the first Program outward on the call chain
+3. the Python program of the caller Program (`qore_get_caller_program()`): the first Program outward on the call chain
    that is not a module's, unknown where the code that the running code serves cannot be identified.  It is not the
    call Program context (`qore_get_call_program_context()`), which in a library function or closure is the library's
    own Program (qore#7394);
-5. the main interpreter's program (`qore_python_pgm`), which the whole process shares.  Code that a sandbox governs
+4. the main interpreter's program (`qore_python_pgm`), which the whole process shares.  Code that a sandbox governs
    (`QoreSandboxCapture`), whether its caller is unknown or has no Python program, never gets it: `getContext()`
    returns `nullptr`, and every caller fails closed with a Qore exception (`getContextOrRaise()`) or a Python
    `RuntimeError` (`getContextOrRaisePython()`).
 
-Steps 4 and 5 apply only to a Program without a Python program, i.e. one created with `PO_NO_INHERIT_PROGRAM_DATA`
+Steps 2 to 4 are `getProgramContext()`.  The functions and slots through which Python calls into Qore (the loaders,
+the Python types of Qore declarations, Qore callables) use `getExecutionContext()`: the interpreter that runs on the
+thread, which converts their values, else `getProgramContext()`.  The sandbox check (`QoreSandboxCapture`) is made
+without letting an exception through the CPython frames: if it cannot be made, the code is treated as sandboxed.
+
+Steps 3 and 4 apply only to a Program without a Python program, i.e. one created with `PO_NO_INHERIT_PROGRAM_DATA`
 (a Program that loads or inherits the module gets one in `python_module_ns_init()` or from
 `QorePythonProgram::copy()`).
 

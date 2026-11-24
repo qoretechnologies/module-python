@@ -687,7 +687,7 @@ void QorePythonQoreEntryHelper::applySandbox() {
     if (!python_thread_registered) {
         return;
     }
-    QorePythonProgram* pypgm = QorePythonProgram::getContext();
+    QorePythonProgram* pypgm = QorePythonProgram::getExecutionContext();
     if (!pypgm) {
         return;
     }

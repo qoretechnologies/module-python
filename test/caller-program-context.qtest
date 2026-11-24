@@ -71,6 +71,25 @@ class CallerProgramContextTest inherits QUnit::Test {
             "}\n"
             "auto sub expr(string s) {\n"
             "    return Python::PythonProgram::evalExpression(s);\n"
+            "}\n"
+            "# returns a Python function of the Program's own Python program that calls the code that it is given\n"
+            "code sub get_callit() {\n"
+            "    Python::PythonProgram::evalStatementKeep(\"def cpc_callit(f):\\n    return f()\\n\");\n"
+            "    return Python::PythonProgram::evalExpression(\"cpc_callit\");\n"
+            "}\n"
+            "# returns a closure that writes to and reads from the __main__ module of the Python program that it uses\n"
+            "code sub get_reader(string name) {\n"
+            "    return auto sub () {\n"
+            "        Python::PythonProgram::evalStatement(\"import __main__\\n__main__.cpc_reader_was_here = 1\\n\");\n"
+            "        return Python::PythonProgram::evalExpression(sprintf(\"getattr(__import__('__main__'), %y, None)\", "
+            "name));\n"
+            "    };\n"
+            "}\n"
+            "sub set_save_object_callback_static() {\n"
+            "    Python::PythonProgram::setSaveObjectCallback(sub (object o) {});\n"
+            "}\n"
+            "sub set_save_object_callback_function() {\n"
+            "    Python::set_save_object_callback(sub (object o) {});\n"
             "}\n";
 
         const Ways = ("function", "closure", "static method");
@@ -82,6 +101,12 @@ class CallerProgramContextTest inherits QUnit::Test {
         addTestCase("library code that loaded python uses the library's Python program", \testLibraryPython());
         addTestCase("sandboxed code without a Python program is refused the main interpreter's",
             \testSandboxedWithoutPythonProgram());
+        addTestCase("sandboxed code without a Python program cannot set the main interpreter's object callback",
+            \testSaveObjectCallback());
+        addTestCase("sandboxed code called from another sandbox's Python code uses its own Python program",
+            \testCalledFromAnotherSandbox());
+        addTestCase("sandboxed code called from the host's Python code uses its own Python program",
+            \testCalledFromHost());
         set_return_value(main());
     }
 
@@ -190,5 +215,60 @@ class CallerProgramContextTest inherits QUnit::Test {
         # the sandboxes keep using the Python programs of the libraries, which they do not own
         a.callFunction("via_pylib", "function", "cpc_nodata_pylib", "A");
         assertEq("A", a.callFunction("pylib_get", "cpc_nodata_pylib"));
+    }
+
+    # the object callback of the main interpreter's program, which the whole process shares, is not set by code that a
+    # sandbox governs
+    testSaveObjectCallback() {
+        Program p = sandboxed("cpc-nodata-socb", PO_NEW_STYLE | PO_NO_INHERIT_PROGRAM_DATA);
+        assertThrows("PYTHON-ERROR", "Python program context", \p.callFunction(),
+            "set_save_object_callback_function");
+        assertThrows("PYTHON-ERROR", "no Python program context", \p.callFunction(),
+            "set_save_object_callback_static");
+    }
+
+    # sandboxed code that the Python code of another sandbox calls uses its own Python program, never the other
+    # sandbox's, or is refused if it has none
+    testCalledFromAnotherSandbox() {
+        Program a = sandboxed("cpc-callit-a");
+        a.callFunction("set_direct", "cpc_a_secret", "A");
+        a.callFunction("main_stmt", "import __main__\n__main__.cpc_a_secret = 'A'\n");
+        code callit = a.callFunction("get_callit");
+
+        Program b = sandboxed("cpc-callit-b");
+        code reader = b.callFunction("get_reader", "cpc_a_secret");
+        assertNothing(callit(reader), "B read A's Python state");
+        assertEq(1, b.callFunction("expr", "getattr(__import__('__main__'), 'cpc_reader_was_here', None)"),
+            "B's own Python program");
+        assertNothing(a.callFunction("expr", "getattr(__import__('__main__'), 'cpc_reader_was_here', None)"),
+            "B wrote A's Python state");
+
+        Program n = sandboxed("cpc-callit-nodata", PO_NEW_STYLE | PO_NO_INHERIT_PROGRAM_DATA);
+        code nreader = n.callFunction("get_reader", "cpc_a_secret");
+        assertThrows("PYTHON-ERROR", "no Python program context", callit, (nreader,));
+        assertNothing(a.callFunction("expr", "getattr(__import__('__main__'), 'cpc_reader_was_here', None)"),
+            "a sandbox without a Python program wrote A's Python state");
+    }
+
+    # sandboxed code that the host's Python code calls uses its own Python program, never the host's, or is refused if
+    # it has none
+    testCalledFromHost() {
+        Python::PythonProgram::evalStatement("import __main__\n__main__.cpc_host_secret = 'HOST'\n");
+        Python::PythonProgram::evalStatementKeep("def cpc_host_callit(f):\n    return f()\n");
+        code callit = Python::PythonProgram::evalExpression("cpc_host_callit");
+
+        Program b = sandboxed("cpc-host-b");
+        code reader = b.callFunction("get_reader", "cpc_host_secret");
+        assertNothing(callit(reader), "the sandbox read the host's Python state");
+        assertEq(1, b.callFunction("expr", "getattr(__import__('__main__'), 'cpc_reader_was_here', None)"),
+            "the sandbox's own Python program");
+        assertNothing(Python::PythonProgram::evalExpression("getattr(__import__('__main__'), 'cpc_reader_was_here', "
+            "None)"), "the sandbox wrote the host's Python state");
+
+        Program n = sandboxed("cpc-host-nodata", PO_NEW_STYLE | PO_NO_INHERIT_PROGRAM_DATA);
+        code nreader = n.callFunction("get_reader", "cpc_host_secret");
+        assertThrows("PYTHON-ERROR", "no Python program context", callit, (nreader,));
+        assertNothing(Python::PythonProgram::evalExpression("getattr(__import__('__main__'), 'cpc_reader_was_here', "
+            "None)"), "a sandbox without a Python program wrote the host's Python state");
     }
 }
