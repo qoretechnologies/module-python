@@ -47,6 +47,11 @@
       <a href="https://github.com/qoretechnologies/qore/issues/5503">issue 5503</a>)
 
     <b>Bug Fixes:</b>
+    - fixed a crash in @ref Python::PythonProgram::evalStatementKeep() "PythonProgram::evalStatementKeep()" and
+      @ref Python::PythonProgram::evalExpression() "PythonProgram::evalExpression()" called in a %Program without a
+      %Python program of its own (created with @ref Qore::PO_NO_INHERIT_PROGRAM_DATA "PO_NO_INHERIT_PROGRAM_DATA"): a
+      \c PYTHON-ERROR exception is raised (<a href="https://github.com/qoretechnologies/qore/issues/7519">issue
+      7519</a>)
     - automatically imported %Python classes and their bases use the namespace of their defining module
       (\c __module__), independent of import order: importing \c os creates
       \c Python::collections::abc::Iterable, rather than \c Python::os::Iterable. This also changes the paths
