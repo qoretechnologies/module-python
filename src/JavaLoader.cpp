@@ -98,7 +98,10 @@ PyObject* JavaLoader::create_module(PyObject* self, PyObject* args) {
     if (!qeh.check()) {
         return nullptr;
     }
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     if (!jni_module_find_create_java_namespace) {
         if (load_jni_module(qore_python_pgm)) {
             return nullptr;
@@ -195,7 +198,10 @@ PyObject* JavaLoader::exec_module(PyObject* self, PyObject* args) {
     }
 
     printd(5, "JavaLoader::exec_module() mod: '%s'\n", name_str);
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     [[maybe_unused]] QoreProgram* mod_pgm = qore_python_pgm->getQoreProgram();
     printd(5, "JavaLoader::exec_module() qore_python_pgm: %p mod pgm: %p\n", qore_python_pgm, mod_pgm);
 

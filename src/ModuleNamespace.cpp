@@ -122,7 +122,10 @@ static PyObject* ModuleNamespace_getattro(PyObject* self, PyObject* key) {
     printd(5, "ModuleNamespace_getattro() obj: %p ns: %p (%s) attr: %s: %p\n", self, mns->ns, mns->ns->getName(), key_str, attr);
 
     QoreProgram* qpgm = mns->ns->getProgram();
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     ExceptionSink xsink;
     QoreExternalProgramContextHelper pch(&xsink, qpgm);
     if (xsink) {

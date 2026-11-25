@@ -47,6 +47,7 @@
 #include <datetime.h>
 
 #include <algorithm>
+#include <unordered_map>
 #include <climits>
 #include <ctime>
 #include <new>
@@ -195,13 +196,58 @@ static void main_ts_lck_fork_child(void* arg) {
     }
 }
 
+#ifdef DEBUG
+// test hooks of debug builds: the next deletion of a Python program stops before its persistent references are
+// released until the test resumes it (see qoreloader._test_pause_next_deletion())
+namespace {
+QoreThreadLock test_deletion_lck;
+QoreCondition test_deletion_cond;
+//! 0: no pause requested, 1: the next deletion stops, 2: a deletion is stopped, 3: the stopped deletion continues
+int test_deletion_state = 0;
+}
+
+void qore_python_test_pause_next_deletion() {
+    AutoLocker al(test_deletion_lck);
+    test_deletion_state = 1;
+}
+
+int qore_python_test_wait_deletion_paused() {
+    AutoLocker al(test_deletion_lck);
+    while (test_deletion_state == 1) {
+        test_deletion_cond.wait(test_deletion_lck);
+    }
+    return test_deletion_state == 2 ? 0 : -1;
+}
+
+void qore_python_test_resume_deletion() {
+    AutoLocker al(test_deletion_lck);
+    if (test_deletion_state == 2) {
+        test_deletion_state = 3;
+        test_deletion_cond.broadcast();
+    }
+}
+
+void qore_python_test_deletion_pause_point() {
+    AutoLocker al(test_deletion_lck);
+    if (test_deletion_state != 1) {
+        return;
+    }
+    test_deletion_state = 2;
+    test_deletion_cond.broadcast();
+    while (test_deletion_state == 2) {
+        test_deletion_cond.wait(test_deletion_lck);
+    }
+    test_deletion_state = 0;
+}
+#endif
+
 int QorePythonProgram::registerForkHandlers() {
     assert(!py_thr_lck_fork_reg && !main_ts_lck_fork_reg);
     py_thr_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_thread_states",
         qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, forkChildThreadStates, &py_thr_lck);
     main_ts_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_RESET, "python_main_thread_state", nullptr,
         nullptr, main_ts_lck_fork_child, &main_ts_lck);
-    if (!py_thr_lck_fork_reg || !main_ts_lck_fork_reg) {
+    if (!py_thr_lck_fork_reg || !main_ts_lck_fork_reg || registerFunctionTableForkHandler()) {
         unregisterForkHandlers();
         return -1;
     }
@@ -209,6 +255,7 @@ int QorePythonProgram::registerForkHandlers() {
 }
 
 void QorePythonProgram::unregisterForkHandlers() {
+    unregisterFunctionTableForkHandler();
     qore_unregister_fork_handler(main_ts_lck_fork_reg);
     main_ts_lck_fork_reg = nullptr;
     qore_unregister_fork_handler(py_thr_lck_fork_reg);
@@ -460,11 +507,16 @@ void QorePythonProgram::createQoreProgram() {
     //  qpgm->getRootNS());
 }
 
-QorePythonProgram* QorePythonProgram::getExecutionContext() {
-    return getContext();
+//! returns true if a sandbox governs the running code; true also if that cannot be determined (fail closed)
+static bool qore_python_code_is_sandboxed() noexcept {
+    try {
+        return QoreSandboxCapture().isSandboxed();
+    } catch (...) {
+        return true;
+    }
 }
 
-QorePythonProgram* QorePythonProgram::getContext() {
+QorePythonProgram* QorePythonProgram::getThreadContext() {
     // A PythonProgram can share its parent QoreProgram while owning a different
     // Python interpreter. Its wrappers must be cached in the executing program.
     QorePythonProgram* pypgm = reinterpret_cast<QorePythonProgram*>(q_get_thread_local_data(python_u_tld_key));
@@ -491,25 +543,79 @@ QorePythonProgram* QorePythonProgram::getContext() {
             }
         }
     }
+    return nullptr;
+}
+
+QorePythonProgram* QorePythonProgram::getExecutionContext() {
+    // the functions and slots through which Python calls into Qore convert their values in the interpreter that runs
+    // on the thread
+    QorePythonProgram* pypgm = getThreadContext();
+    return pypgm ? pypgm : getProgramContext(false);
+}
+
+QorePythonProgram* QorePythonProgram::getContext() {
+    // Qore code uses the Python program of the interpreter that runs on the thread (Qore code called from Python)
+    // only if it belongs to the Program whose code runs, or if no sandbox governs the code: code that a sandbox
+    // governs never uses the Python state of another Program, such as that of another sandbox or of the host whose
+    // Python code calls it
+    QorePythonProgram* pypgm = getThreadContext();
+    if (pypgm) {
+        if (pypgm->qpgm == getProgram() || !qore_python_code_is_sandboxed()) {
+            return pypgm;
+        }
+        return getProgramContext(true);
+    }
+    return getProgramContext(false);
+}
+
+QorePythonProgram* QorePythonProgram::getProgramContext(bool sandboxed) {
     // first try to get the actual Program context
     QoreProgram* pgm = getProgram();
     if (pgm) {
-        pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
+        QorePythonProgram* pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
         if (pypgm) {
-            //printd(5, "QorePythonProgram::getContext() got local program context pgm: %p pypgm: %p\n", pgm, pypgm);
+            //printd(5, "QorePythonProgram::getProgramContext() got local program context pgm: %p pypgm: %p\n", pgm,
+            //  pypgm);
             return pypgm;
         }
     }
-    pgm = qore_get_call_program_context();
+    // then the Program of the code that called the running code through the call chain, which library code (the code
+    // of a module's Program) does not hide: the call Program context of library code is the library's own Program
+    // (qore#7394), whose Python program is library state shared by every caller, so it is never used here; the caller
+    // is unknown where the code that the running code serves cannot be identified
+    pgm = qore_get_caller_program();
     if (pgm) {
-        pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
+        QorePythonProgram* pypgm = static_cast<QorePythonProgram*>(pgm->getExternalData(QORE_PYTHON_MODULE_NAME));
         if (pypgm) {
-            //printd(5, "QorePythonProgram::getContext() got local call context pgm: %p pypgm: %p\n", pgm, pypgm);
+            //printd(5, "QorePythonProgram::getProgramContext() got caller program context pgm: %p pypgm: %p\n", pgm,
+            //  pypgm);
             return pypgm;
         }
     }
-    //printd(5, "QorePythonProgram::getContext() got global program context pypgm: %p\n", pypgm);
+    // the main interpreter's program is shared by the whole process: code that a sandbox governs never gets it (fail
+    // closed), also when the caller is unknown or has no Python program of its own
+    if (sandboxed || qore_python_code_is_sandboxed()) {
+        return nullptr;
+    }
+    //printd(5, "QorePythonProgram::getProgramContext() got global program context\n");
     return qore_python_pgm;
+}
+
+QorePythonProgram* QorePythonProgram::getContextOrRaisePython() {
+    QorePythonProgram* pypgm = getExecutionContext();
+    if (!pypgm) {
+        PyErr_SetString(PyExc_RuntimeError, "there is no Python program context for the code that runs on this "
+            "thread");
+    }
+    return pypgm;
+}
+
+QorePythonProgram* QorePythonProgram::getContextOrRaise(ExceptionSink* xsink) {
+    QorePythonProgram* pypgm = getContext();
+    if (!pypgm) {
+        xsink->raiseException("PYTHON-ERROR", "there is no Python program context in the current Program");
+    }
+    return pypgm;
 }
 
 int QorePythonProgram::staticInit() {
@@ -661,6 +767,8 @@ void QorePythonProgram::registerPersistentReference(QorePythonManualReferenceHol
     AutoLocker al(py_thr_lck);
     checkForkIntern();
     assert(valid);
+    // no reference is registered after the final release of the deletion (the program is invalidated right after it)
+    assert(!persistent_references_cleared);
     assert(persistent_references.find(reference) == persistent_references.end());
     persistent_references.insert(reference);
 }
@@ -673,6 +781,25 @@ void QorePythonProgram::releasePersistentReference(QorePythonManualReferenceHold
         checkForkIntern();
         persistent_references.erase(reference);
         object = reference->release();
+        // the object is only ever released with a thread state of its own interpreter: if this thread cannot enter
+        // the interpreter, another thread is deleting the program (cancelThreads() keeps other threads out), and it
+        // releases the object in the interpreter (releaseOrphanedReferences()); once the deleting thread has
+        // released every reference, a holder has no object left (the registry is empty, and a reference can only be
+        // registered while the program is valid)
+        if (object && !qph.isValid()) {
+            assert(!persistent_references_cleared);
+            if (python_fork_lost) {
+                // in a child of fork() that cannot use Python, the reference is left: the GIL cannot be acquired
+                return;
+            }
+            try {
+                orphaned_references.push_back(object);
+            } catch (const std::bad_alloc&) {
+                // the object is left rather than released without its interpreter
+            }
+            return;
+        }
+        assert(!object || !persistent_references_cleared);
     }
     // in a child of fork() that cannot use Python, the reference is left: the GIL cannot be acquired
     if (python_fork_lost) {
@@ -681,6 +808,33 @@ void QorePythonProgram::releasePersistentReference(QorePythonManualReferenceHold
     // Finalization clears every registered reference before invalidating this context.
     assert(!object || (valid && qph.isValid()));
     Py_XDECREF(object);
+}
+
+void QorePythonProgram::releaseOrphanedReferences(bool final) {
+    while (true) {
+        clearPersistentReferences();
+        std::vector<PyObject*> objects;
+        {
+            AutoLocker al(py_thr_lck);
+            checkForkIntern();
+            if (orphaned_references.empty()) {
+                if (persistent_references.empty()) {
+                    if (final) {
+                        // nothing can be registered or orphaned from now on (see persistent_references_cleared)
+                        persistent_references_cleared = true;
+                    }
+                    return;
+                }
+                continue;
+            }
+            objects.swap(orphaned_references);
+        }
+        // releasing an object can run Python finalizers that release other references, which are handled in the
+        // next iteration
+        for (PyObject* object : objects) {
+            Py_DECREF(object);
+        }
+    }
 }
 
 void QorePythonProgram::clearPersistentReferences() {
@@ -772,6 +926,8 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
     destroyed = true;
     // Deregister from global validity tracking FIRST, before anything else
     qpy_global_deregister(this);
+    // the functions of the program cannot be called from now on (calls in progress hold a weak reference)
+    removeFunctions();
     if (needs_deregistration) {
         qpy_deregister(this);
     }
@@ -870,9 +1026,16 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
             checkForkIntern();
             waitForThreadsIntern();
         }
+#ifdef DEBUG
+        // test hook of debug builds: the deletion stops here, before the persistent references are released, while a
+        // test releases a reference in another thread
+        qore_python_test_deletion_pause_point();
+#endif
         {
             QorePythonHelper qph(this);
-            clearPersistentReferences();
+            // the persistent references, and the objects of those that other threads released meanwhile, are released
+            // in the interpreter, after the threads have left it and before it is ended
+            releaseOrphanedReferences(false);
 
             for (auto& i : obj_sink) {
                 Py_DECREF(i);
@@ -929,6 +1092,11 @@ void QorePythonProgram::deleteIntern(ExceptionSink* xsink) {
             for (auto& i : stale_py_cls_vec) {
                 i->release();
             }
+
+            // the releases above can run Python finalizers that create and release persistent references: they are
+            // released here, with any object orphaned meanwhile, after which none can be registered or orphaned (no
+            // other Python code runs in the interpreter before it is invalidated)
+            releaseOrphanedReferences(true);
 
             valid = false;
         }
@@ -1136,7 +1304,14 @@ QoreValue QorePythonProgram::eval(ExceptionSink* xsink, const QoreString& source
         // returns a borrowed reference
         main_dict = PyModule_GetDict(main);
     } else {
-        assert(module);
+        // the program of the main interpreter, which a Program without a Python program of its own uses, has no
+        // module, so it has no globals for code that keeps them
+        if (!module) {
+            xsink->raiseException("PYTHON-ERROR", "the Python program of the current context has no globals for "
+                "code that keeps them: it is the program of the main interpreter, as the current Program has no "
+                "Python program of its own");
+            return QoreValue();
+        }
         // returns a borrowed reference
         main_dict = PyModule_GetDict(*module);
     }
@@ -2442,7 +2617,7 @@ void QorePythonProgram::raisePythonException(ExceptionSink& xsink) {
         return;
     }
     // the exception is raised in the interpreter of the current thread, whose program converts the values
-    QorePythonProgram* pypgm = getContext();
+    QorePythonProgram* pypgm = getExecutionContext();
     if (!pypgm || !pypgm->interpreter || pypgm->interpreter != qore_python_get_interpreter(PyThreadState_Get())) {
         pypgm = this;
     }
@@ -2721,7 +2896,10 @@ PyObject* QorePythonProgram::hashDeclInit(PyObject* capsule, PyObject* args, PyO
     if (!qeh.check()) {
         return nullptr;
     }
-    QorePythonProgram* pypgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* pypgm = QorePythonProgram::getContextOrRaisePython();
+    if (!pypgm) {
+        return nullptr;
+    }
     ExceptionSink xsink;
     QoreExternalProgramContextHelper pch(&xsink, pypgm->getQoreProgram());
     if (!xsink) {
@@ -4200,7 +4378,7 @@ PyObject* QorePythonProgram::getPythonDict(ExceptionSink* xsink, const QoreHashN
 PyObject* QorePythonProgram::getPythonString(ExceptionSink* xsink, const QoreString* str) {
     TempEncodingHelper py_str(str, QCS_UTF8, xsink);
     if (*xsink) {
-        qore_python_pgm->raisePythonException(*xsink);
+        raisePythonException(*xsink);
         return nullptr;
     }
     return PyUnicode_FromStringAndSize(py_str->c_str(), py_str->size());
@@ -5895,7 +6073,10 @@ PyObject* QorePythonProgram::callQoreOverride(PyObject* name, PyObject* args) {
     // the thread state that Python called us with; it must be current again before returning
     PyThreadState* entry_tstate = qore_python_attached_thread_state();
 
-    QorePythonProgram* pypgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* pypgm = QorePythonProgram::getContextOrRaisePython();
+    if (!pypgm) {
+        return nullptr;
+    }
     // the object is kept while its method runs, also if its slot is changed meanwhile; a deleted object raises
     // OBJECT-ALREADY-DELETED, as with Qore's weak references
     struct WeakObjectHolder {
@@ -6066,18 +6247,119 @@ QoreValue QorePythonProgram::execPythonStaticCFunctionMethod(const QoreMethod& m
     return pypgm->callCFunctionMethod(xsink, func, args);
 }
 
-QoreValue QorePythonProgram::execPythonCFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
-        ExceptionSink* xsink) {
-    //printd(5, "QorePythonProgram::execPythonCFunction() argcount: %d\n", args ? (int)args->size() : 0);
-    QorePythonProgram* pypgm = QorePythonProgram::getContext();
-    return pypgm->callCFunctionMethod(xsink, func, args);
+//! The table of the Python functions of Qore function variants: ID -> owning program and function
+class QorePythonProgram::FunctionTable {
+public:
+    struct Entry {
+        //! the Python program that owns the function
+        QorePythonProgram* owner;
+        //! the function, referenced by its owner
+        PyObject* func;
+    };
+
+    //! the lock of the table, a leaf lock with fork handlers
+    static QoreThreadLock lck;
+    //! the functions of the live Python programs
+    static std::unordered_map<uint64_t, Entry> map;
+    //! the last ID given
+    static uint64_t last_id;
+    //! the fork handlers of the lock
+    static QoreForkHandlerRegistration* fork_reg;
+
+    //! The function of a call and a weak reference to its owner, held during the call
+    class CallHelper {
+    public:
+        //! looks up the function; raises PYTHON-INTERPRETER-DELETED if its owner has been deleted
+        DLLLOCAL CallHelper(const void* id, ExceptionSink* xsink) {
+            AutoLocker al(lck);
+            auto i = map.find(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(id)));
+            if (i == map.end()) {
+                xsink->raiseException("PYTHON-INTERPRETER-DELETED", "cannot execute Python function: the Python "
+                    "program that imported it has been deleted");
+                return;
+            }
+            owner = i->second.owner;
+            func = i->second.func;
+            owner->weakRef();
+        }
+
+        DLLLOCAL ~CallHelper() {
+            if (owner) {
+                owner->weakDeref();
+            }
+        }
+
+        CallHelper(const CallHelper&) = delete;
+        CallHelper& operator=(const CallHelper&) = delete;
+
+        QorePythonProgram* owner = nullptr;
+        PyObject* func = nullptr;
+    };
+};
+
+QoreThreadLock QorePythonProgram::FunctionTable::lck;
+std::unordered_map<uint64_t, QorePythonProgram::FunctionTable::Entry> QorePythonProgram::FunctionTable::map;
+uint64_t QorePythonProgram::FunctionTable::last_id = 0;
+QoreForkHandlerRegistration* QorePythonProgram::FunctionTable::fork_reg = nullptr;
+
+int QorePythonProgram::registerFunctionTableForkHandler() {
+    assert(!FunctionTable::fork_reg);
+    FunctionTable::fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_function_table",
+        qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, qore_fork_child_thread_lock,
+        &FunctionTable::lck);
+    return FunctionTable::fork_reg ? 0 : -1;
 }
 
-QoreValue QorePythonProgram::execPythonFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
+void QorePythonProgram::unregisterFunctionTableForkHandler() {
+    qore_unregister_fork_handler(FunctionTable::fork_reg);
+    FunctionTable::fork_reg = nullptr;
+}
+
+uint64_t QorePythonProgram::addFunction(PyObject* func) {
+    AutoLocker al(FunctionTable::lck);
+    // a thread that still runs in the program while it is deleted cannot add a function once the program has removed
+    // its functions; the ID is the data of a Qore function variant, which is a pointer
+    if (functions_removed || FunctionTable::last_id >= static_cast<uint64_t>(UINTPTR_MAX)) {
+        return 0;
+    }
+    // reserve first, so that the program's list and the table stay consistent if an allocation fails
+    function_ids.reserve(function_ids.size() + 1);
+    uint64_t id = ++FunctionTable::last_id;
+    FunctionTable::map.emplace(id, FunctionTable::Entry{this, func});
+    function_ids.push_back(id);
+    return id;
+}
+
+void QorePythonProgram::removeFunctions() {
+    AutoLocker al(FunctionTable::lck);
+    functions_removed = true;
+    for (uint64_t id : function_ids) {
+        FunctionTable::map.erase(id);
+    }
+    function_ids.clear();
+    function_ids.shrink_to_fit();
+}
+
+// the function is called in the interpreter of the Python program that owns it, which checks that it is valid before
+// the function is used (PYTHON-INTERPRETER-DELETED)
+QoreValue QorePythonProgram::execPythonCFunction(const void* id, const QoreListNode* args, q_rt_flags_t rtflags,
+        ExceptionSink* xsink) {
+    //printd(5, "QorePythonProgram::execPythonCFunction() argcount: %d\n", args ? (int)args->size() : 0);
+    FunctionTable::CallHelper fch(id, xsink);
+    if (!fch.owner) {
+        return QoreValue();
+    }
+    return fch.owner->callCFunctionMethod(xsink, fch.func, args);
+}
+
+QoreValue QorePythonProgram::execPythonFunction(const void* id, const QoreListNode* args, q_rt_flags_t rtflags,
         ExceptionSink* xsink) {
     //printd(5, "QorePythonProgram::execPythonFunction() argcount: %d\n", args ? (int)args->size() : 0);
-    QorePythonProgram* pypgm = QorePythonProgram::getContext();
-    return pypgm->callFunctionObject(xsink, func, args);
+    FunctionTable::CallHelper fch(id, xsink);
+    if (!fch.owner) {
+        return QoreValue();
+    }
+    return fch.owner->callFunctionObject(xsink, fch.func, args);
 }
 
 QoreValue QorePythonProgram::callCFunctionMethod(ExceptionSink* xsink, PyObject* func, const QoreListNode* args,
@@ -6589,7 +6871,14 @@ int QorePythonProgram::findCreateQoreFunction(PyObject* value, const char* symbo
         // function that the __getattr__() of a module returned)
         Py_INCREF(value);
         addObj(value);
-        ns->addBuiltinVariant((void*)value, symbol, func, QCF_USES_EXTRA_ARGS, QDOM_UNCONTROLLED_API, autoTypeInfo);
+        // the variant holds the ID of the function in the function table (see FunctionTable); the function is not
+        // added to a program that is being deleted (it stays referenced by the program until it is released)
+        uint64_t id = addFunction(value);
+        if (!id) {
+            return -1;
+        }
+        ns->addBuiltinVariant(reinterpret_cast<void*>(static_cast<uintptr_t>(id)), symbol, func, QCF_USES_EXTRA_ARGS,
+            QDOM_UNCONTROLLED_API, autoTypeInfo);
         printd(5, "QorePythonProgram::findCreateQoreFunction() added function %s::%s() (%s)\n", ns->getName(),
             symbol, Py_TYPE(value)->tp_name);
         return 0;

@@ -447,6 +447,70 @@ Python 3.12 has similar TSS issues but different internal structures:
 - Our tracking variables (`_qore_tss_tstate`, etc.) are authoritative
 - `PyGILState_Check()` results should not be trusted after GIL transitions
 
+## The Python program of the current context
+
+`QorePythonProgram::getContext()` returns the Python program that Qore code which names no `PythonProgram` object
+uses (the static methods of `PythonProgram`, the module commands), in this order (the Python functions and classes
+imported into Qore run in the Python program that imported them, also when an inheriting child Program uses them;
+their use by sandboxed code is qore#7529):
+
+1. the program of the interpreter that runs on the thread (`getThreadContext()`): the program set by
+   `QorePythonHelper` (`python_u_tld_key`) when the thread's attached Python state is in its interpreter, else the
+   owner of the attached interpreter, for threads that Python created; only if it belongs to the Program whose code
+   runs (`getProgram()`) or if no sandbox governs the running code: sandboxed Qore code that the Python code of
+   another Program (another sandbox, the host, the main interpreter) calls continues with step 2, so that it never
+   uses that Program's Python state;
+2. the Python program of the current Program (`getProgram()`): library code that loaded python runs in the library's
+   own Python program, which holds library state shared by every caller, as the library's Qore state is;
+3. the Python program of the caller Program (`qore_get_caller_program()`): the first Program outward on the call chain
+   that is not a module's, unknown where the code that the running code serves cannot be identified.  It is not the
+   call Program context (`qore_get_call_program_context()`), which in a library function or closure is the library's
+   own Program (qore#7394);
+4. the main interpreter's program (`qore_python_pgm`), which the whole process shares.  Code that a sandbox governs
+   (`QoreSandboxCapture`), whether its caller is unknown or has no Python program, never gets it: `getContext()`
+   returns `nullptr`, and every caller fails closed with a Qore exception (`getContextOrRaise()`) or a Python
+   `RuntimeError` (`getContextOrRaisePython()`).
+
+Steps 2 to 4 are `getProgramContext()`.  The functions and slots through which Python calls into Qore (the loaders,
+the Python types of Qore declarations, Qore callables) use `getExecutionContext()`: the interpreter that runs on the
+thread, which converts their values, else `getProgramContext()`.  The sandbox check (`QoreSandboxCapture`) is made
+without letting an exception through the CPython frames: if it cannot be made, the code is treated as sandboxed.
+
+Steps 3 and 4 apply only to a Program without a Python program, i.e. one created with `PO_NO_INHERIT_PROGRAM_DATA`
+(a Program that loads or inherits the module gets one in `python_module_ns_init()` or from
+`QorePythonProgram::copy()`).
+## Imported Python functions
+
+A Python function that a Program imports (`findCreateQoreFunction()`: the `import` command, `export-func`) becomes a
+Qore function variant in the Program's namespace.  Qore function variants have no destructor for their data, and a
+variant can outlive the Python program that created it: a child Program inherits the functions of its parent, also
+one created with `PO_NO_INHERIT_PROGRAM_DATA`, which has no Python program of its own.  The variant therefore holds
+only the ID of the function (never reused) in the function table of the live Python programs
+(`QorePythonProgram::FunctionTable`: ID -> owning program and function, guarded by a leaf lock with fork handlers):
+
+- a call (`execPythonFunction()`, `execPythonCFunction()`) looks the ID up and holds a weak reference to the owning
+  program while it calls the function in that program's interpreter (never in the caller's), which checks that the
+  program is valid before the function is used;
+- the owning program removes its functions from the table when it is deleted (`deleteIntern()`, and its destructor),
+  after which a call raises `PYTHON-INTERPRETER-DELETED`; a call in progress keeps the program object (not its
+  interpreter) until it returns.
+
+The table holds only the functions of live programs, so a process that creates and deletes Programs that import
+Python functions does not keep memory for them.
+## Persistent references released during the deletion of a program
+
+A Python object that Qore code holds (`QorePythonPersistentReferenceHolder`, ex: the Python exception kept in a Qore
+exception) is registered with its program (`persistent_references`) and is only ever released with a thread state of
+its own interpreter.  A thread that releases such a holder while another thread deletes the program cannot enter the
+interpreter (`cancelThreads()` keeps other threads out); it moves the object to `orphaned_references` under
+`py_thr_lck` instead of releasing it.  The deleting thread releases the registered and the orphaned objects in the
+interpreter (`releaseOrphanedReferences()`): once after the threads have left it, and a final time after the
+program's own objects (`obj_sink`, the module, the classes) are released, since their finalizers can create and
+release references; the final call sets `persistent_references_cleared`, after which nothing can be registered or
+orphaned, and the program is invalidated.  A holder released after that has no object (asserted in debug builds).
+Debug builds have test hooks (`qoreloader._test_pause_next_deletion()` and the functions after it, main interpreter
+only) that stop the next deletion before it releases the references.
+
 ## Ownership during interpreter finalization
 
 A `PythonProgram` owns its Python subinterpreter even when it shares the parent

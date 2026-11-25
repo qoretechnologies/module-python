@@ -174,7 +174,10 @@ PyObject* QoreLoader::exec_module(PyObject* self, PyObject* args) {
     const char* name_str = orig_name_str;
 
     printd(5, "QoreLoader::exec_module() mod: '%s'\n", name_str);
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     QoreProgram* mod_pgm = qore_python_pgm->getQoreProgram();
     printd(5, "QoreLoader::exec_module() qore_python_pgm: %p mod pgm: %p\n", qore_python_pgm, mod_pgm);
 

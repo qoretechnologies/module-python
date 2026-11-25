@@ -61,6 +61,38 @@ Program child(PO_NEW_STYLE | PO_NO_UNCONTROLLED_APIS | PO_NO_INHERIT_SYSTEM_CONS
     %Qore APIs called from %Python remain subject to the restrictions and the sandbox of the %Program whose %Python
     code calls them, also on threads created by %Python (see @ref python_created_threads).
 
+    @subsection python_program_context The Python Program of the Current Context
+
+    Each %Qore @ref Qore::Program "Program" that loads the module, or inherits it from its parent, has a %Python
+    program of its own, with its own interpreter.  Code that does not name a
+    @ref Python::PythonProgram "PythonProgram" object (the static methods such as
+    @ref Python::PythonProgram::evalStatement() "PythonProgram::evalStatement()" and the \c python module commands)
+    uses the %Python program of the current context:
+    - in %Qore code called from %Python, the %Python program of that %Python code, if it belongs to the %Program whose
+      code runs or if no sandbox governs the code: code that a sandbox governs never uses the %Python state of another
+      %Program (another sandbox's, the host's, or the main interpreter's), and continues as below instead
+    - otherwise, the %Python program of the %Program whose code runs: the code of a library (a module) that loads the
+      module itself runs in the library's own %Python program, which is library state that every caller of the library
+      shares, as the library's global variables are: a library must not keep per-caller data there, the same rule as
+      for its global variables; a library that needs per-caller %Python state keeps it in
+      @ref Python::PythonProgram "PythonProgram" objects of each caller's own, or in its callers' %Python programs (code
+      that its callers give it, such as call references and closures, runs in the %Program of the caller that created
+      it)
+    - if that %Program has none (it was created with
+      @ref Qore::PO_NO_INHERIT_PROGRAM_DATA "PO_NO_INHERIT_PROGRAM_DATA"), the %Python program of the %Program whose
+      code called the running code through the call chain, which library code does not hide
+    - otherwise, the program of the main interpreter, which the whole process shares; code that a sandbox governs
+      never uses it: a \c PYTHON-ERROR exception is raised instead (a \c RuntimeError in %Python code), so code that a
+      sandbox governs needs a %Program with a %Python program of its own to run %Python code without a
+      @ref Python::PythonProgram "PythonProgram" object
+
+    The %Python functions and classes that a %Program imports belong to the %Python program that imported them and
+    run in it, also when a child %Program that inherits them uses them: an inherited %Python function or class runs in
+    the interpreter of the %Program that imported it, with that %Program's %Python state.  To give a %Program that a
+    sandbox governs %Python functionality, create the %Python objects and imports in that %Program itself rather than
+    letting it inherit them from its parent; the use of inherited %Python symbols by code that a sandbox governs is
+    addressed separately (<a href="https://github.com/qoretechnologies/qore/issues/7529">issue 7529</a>).
+
     @section python_keyword_arguments Keyword Arguments
 
     %Qore code calls %Python functions and methods with keyword arguments with

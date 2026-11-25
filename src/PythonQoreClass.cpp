@@ -374,7 +374,10 @@ static PyObject* qore_static_member_get(PyObject* capsule, PyObject* /* unused *
     if (!qeh.check()) {
         return nullptr;
     }
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     ExceptionSink xsink;
     QoreExternalProgramContextHelper pch(&xsink, qore_python_pgm->getQoreProgram());
     if (!xsink) {
@@ -408,7 +411,10 @@ static PyObject* qore_static_member_set(PyObject* capsule, PyObject* value) {
     if (!qeh.check()) {
         return nullptr;
     }
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     ExceptionSink xsink;
     QoreExternalProgramContextHelper pch(&xsink, qore_python_pgm->getQoreProgram());
     if (!xsink) {
@@ -509,8 +515,8 @@ void PythonQoreClass::populateClass(QorePythonProgram* pypgm, const QoreClass& q
                     xsink.clear();
                     continue;
                 }
-                QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
-                QorePythonReferenceHolder val(qore_python_pgm->getPythonValue(*qoreval, &xsink));
+                // the value is made for the Python program that the class is populated for
+                QorePythonReferenceHolder val(pypgm->getPythonValue(*qoreval, &xsink));
                 if (xsink) {
                     // a constant that has no Python representation (ex: java.time.Instant::MIN, whose year lies
                     // outside the range supported by datetime.datetime) must not abort the import of the entire
@@ -761,7 +767,10 @@ PyObject* PythonQoreClass::exec_qore_method(PyObject* method_capsule, PyObject* 
     }
 
     ExceptionSink xsink;
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     {
         // issue #4330: get Qore program from method if possible
         QoreProgram* pgm = m->getClass()->getProgram();
@@ -860,7 +869,10 @@ PyObject* PythonQoreClass::exec_qore_static_method(const QoreMethod& m, PyObject
     PyThreadState* entry_tstate = qore_python_attached_thread_state();
 
     ExceptionSink xsink;
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     {
         // issue #4330: get Qore program from method if possible
         QoreProgram* pgm = m.getClass()->getProgram();
@@ -961,7 +973,10 @@ int PythonQoreClass::py_init(PyObject* self, PyObject* args, PyObject* kwds) {
     if (!qeh.check()) {
         return -1;
     }
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return -1;
+    }
 
     ExceptionSink xsink;
 
@@ -1203,7 +1218,10 @@ PyObject* PythonQoreClass::py_getattro(PyObject* self, PyObject* attr) {
 
     ExceptionSink xsink;
     //printd(5, "PythonQoreClass::py_getattro() obj %p %s.%s\n", obj, cls_handle->getName().c_str(), member);
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     QoreExternalProgramContextHelper pch(&xsink, qore_python_pgm->getQoreProgram());
     if (!xsink) {
         ValueHolder v(&xsink);
@@ -1281,7 +1299,10 @@ int PythonQoreClass::py_setattro(PyObject* self, PyObject* attr, PyObject* value
     }
 
     ExceptionSink xsink;
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return -1;
+    }
     QoreExternalProgramContextHelper pch(&xsink, qore_python_pgm->getQoreProgram());
     if (!xsink) {
         // the attribute is a Qore member if the class declares it or the object has it; otherwise an object of a
@@ -1371,7 +1392,14 @@ PyObject* PythonQoreClass::py_dir(PyObject* /* unused */, PyObject* self) {
         QorePythonReleaseGilHelper prgh;
         members = obj->getMemberList(&xsink);
     }
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getExecutionContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        // the Python exception raised replaces any Qore exception, which is released without the GIL, as releasing it
+        // can run Qore code
+        QorePythonReleaseGilHelper prgh;
+        xsink.clear();
+        return nullptr;
+    }
     if (xsink) {
         qore_python_pgm->raisePythonException(xsink);
         return nullptr;

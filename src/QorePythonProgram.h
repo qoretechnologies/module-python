@@ -43,6 +43,7 @@
 
 #include <set>
 #include <map>
+#include <cstdint>
 #include <memory>
 
 // forward reference
@@ -532,7 +533,7 @@ public:
     DLLLOCAL static int getQoreOffsetZone(ExceptionSink* xsink, PyObject* offset, const AbstractQoreZoneInfo*& zone);
 
     //! Returns a Python string for the given Qore string
-    DLLLOCAL static PyObject* getPythonString(ExceptionSink* xsink, const QoreString* str);
+    DLLLOCAL PyObject* getPythonString(ExceptionSink* xsink, const QoreString* str);
 
     //! Returns a Python string for the given Qore string
     DLLLOCAL static PyObject* getPythonByteArray(ExceptionSink* xsink, const BinaryNode* b);
@@ -578,6 +579,10 @@ public:
         return static_cast<const QorePythonClass*>(cls)->getPythonProgram();
     }
 
+    //! Returns the Python program for the functions and slots through which Python calls into Qore
+    /** The program of the interpreter that runs on the thread, which converts their values, else as
+        getProgramContext(); nullptr only where getProgramContext() returns it
+    */
     DLLLOCAL static QorePythonProgram* getExecutionContext();
 
     //! Returns the Qore object of the Python object of a Qore object whose class inherits a Python class
@@ -586,7 +591,32 @@ public:
     */
     DLLLOCAL static QoreObject* getQoreSubclassObject(PyObject* pyobj);
 
+    //! Returns the Python program of the Qore code that runs on the thread, or nullptr if it has none
+    /** The program of the interpreter running on the thread (Qore code called from Python) if it belongs to the
+        current Program or if no sandbox governs the running code, else as getProgramContext(), so that code that a
+        sandbox governs never uses the Python state of another Program (fail closed)
+    */
     DLLLOCAL static QorePythonProgram* getContext();
+
+    //! Returns the Python program of the current Program, else that of the caller Program, else the main interpreter's
+    /** The Python program of the current Program, else that of the Program of the code that called the running code
+        through the call chain (qore_get_caller_program()), else the main interpreter's program, which is shared by the
+        whole process and so never returned for code that a sandbox governs: nullptr is returned for such code
+
+        @param sandboxed true if the caller already found that a sandbox governs the running code
+    */
+    DLLLOCAL static QorePythonProgram* getProgramContext(bool sandboxed);
+
+    //! Returns the program of the interpreter that runs on the thread, or nullptr if there is none
+    DLLLOCAL static QorePythonProgram* getThreadContext();
+
+    //! Returns getExecutionContext(), or raises a Python \c RuntimeError and returns nullptr if there is none
+    /** For the functions and slots through which Python calls into Qore
+    */
+    DLLLOCAL static QorePythonProgram* getContextOrRaisePython();
+
+    //! Returns getContext(), or raises a Qore \c PYTHON-ERROR exception and returns nullptr if there is none
+    DLLLOCAL static QorePythonProgram* getContextOrRaise(ExceptionSink* xsink);
 
     //! returns the number of fork() calls that made this process from the process that loaded the module
     DLLLOCAL static unsigned getForkGeneration() {
@@ -926,9 +956,42 @@ protected:
     DLLLOCAL static QoreValue execPythonStaticCFunctionMethod(const QoreMethod& meth, PyObject* func,
             const QoreListNode* args, q_rt_flags_t rtflags, ExceptionSink* xsink);
 
-    DLLLOCAL static QoreValue execPythonCFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
+    //! The Python functions of Qore function variants
+    /** A Qore function variant can outlive the Python program that created it (a child Program that does not inherit
+        the Program data of its parent inherits its functions), and Qore function variants have no destructor for
+        their data, so a variant holds only the ID of its function (never reused) in the table of the functions of
+        the live Python programs (FunctionTable).  A call looks the ID up and holds a weak reference to the owning
+        Python program while it calls the function in that program; the owner removes its functions from the table
+        when it is deleted, after which a call raises PYTHON-INTERPRETER-DELETED.
+    */
+    class FunctionTable;
+
+    //! adds a function owned by this program to the table and returns its ID; the program references the function
+    /** @return the ID of the function, or 0 if it cannot be added: the program is being deleted and has removed its
+        functions (removeFunctions()), or no more IDs can be stored in the data of a Qore function variant
+    */
+    DLLLOCAL uint64_t addFunction(PyObject* func);
+
+    //! removes the functions of this program from the table; called when the program is deleted
+    DLLLOCAL void removeFunctions();
+
+    //! the IDs of the functions that this program owns in the table; guarded by the lock of the table
+    std::vector<uint64_t> function_ids;
+    //! set when the program has removed its functions from the table; no function is added afterwards; guarded by
+    //! the lock of the table
+    bool functions_removed = false;
+
+public:
+    //! registers the fork handlers of the lock of the function table; returns -1 on error
+    DLLLOCAL static int registerFunctionTableForkHandler();
+
+    //! removes the fork handlers registered with registerFunctionTableForkHandler()
+    DLLLOCAL static void unregisterFunctionTableForkHandler();
+
+protected:
+    DLLLOCAL static QoreValue execPythonCFunction(const void* id, const QoreListNode* args, q_rt_flags_t rtflags,
             ExceptionSink* xsink);
-    DLLLOCAL static QoreValue execPythonFunction(PyObject* func, const QoreListNode* args, q_rt_flags_t rtflags,
+    DLLLOCAL static QoreValue execPythonFunction(const void* id, const QoreListNode* args, q_rt_flags_t rtflags,
             ExceptionSink* xsink);
 
     //! Python integration
@@ -937,11 +1000,34 @@ protected:
     DLLLOCAL virtual ~QorePythonProgram() {
         //printd(5, "QorePythonProgram::~QorePythonProgram() this: %p\n", this);
         assert(!qpgm);
+        // the functions are removed when the program is deleted (deleteIntern()), and none is added afterwards
+        assert(function_ids.empty());
     }
 
     // Protected by py_thr_lck; Python reference operations also require the owning context.
     std::set<QorePythonManualReferenceHolder*> persistent_references;
+    //! the objects of persistent references released by other threads while the program is deleted
+    /** A thread that releases a persistent reference while another thread deletes the program cannot enter the
+        interpreter (see cancelThreads()); it moves the object here, and the deleting thread releases it in the
+        interpreter (releaseOrphanedReferences()).  Protected by py_thr_lck
+    */
+    std::vector<PyObject*> orphaned_references;
+    //! set by the deleting thread when it has released every persistent reference for the last time, right before it
+    //! invalidates the program; protected by py_thr_lck
+    /** From then on, no object can be orphaned or registered: the registry is empty, no other Python code runs in the
+        interpreter, and a reference can only be registered while the program is valid, so a holder that is released
+        later has no object
+    */
+    bool persistent_references_cleared = false;
     DLLLOCAL void clearPersistentReferences();
+    //! releases the persistent references and the orphaned objects in the interpreter, until none is left
+    /** Called by the deleting thread in the interpreter, after the threads have left it and before the interpreter is
+        ended: once before the program's own objects are released, and a final time after them (the releases can run
+        Python finalizers), right before the program is invalidated
+
+        @param final true for the final call, which sets persistent_references_cleared
+    */
+    DLLLOCAL void releaseOrphanedReferences(bool final);
 
     DLLLOCAL void deleteIntern(ExceptionSink* xsink);
 

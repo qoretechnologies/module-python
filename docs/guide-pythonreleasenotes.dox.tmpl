@@ -20,6 +20,11 @@
       were created, as in %Qore, and that @ref Qore::PO_NO_INHERIT_SYSTEM_CONSTANTS "PO_NO_INHERIT_SYSTEM_CONSTANTS"
       withholds the inherited constants
       (<a href="https://github.com/qoretechnologies/qore/issues/5521">issue 5521</a>)
+    - code that a sandbox governs no longer runs %Python code without a @ref Python::PythonProgram "PythonProgram"
+      object in the %Python program of another %Program or of the main interpreter, also when %Python code of another
+      %Program calls it (inherited %Python functions and classes excepted), and a library's own %Python program is
+      documented as state shared by all of its callers; see @ref python_program_context
+      (<a href="https://github.com/qoretechnologies/qore/issues/7394">issue 7394</a>)
 
     <b>New Features and Enhancements:</b>
     - Added support for Python 3.12, 3.13, 3.14, 3.15, and 3.16 (tested with the first alpha release of 3.16)
@@ -47,6 +52,20 @@
       <a href="https://github.com/qoretechnologies/qore/issues/5503">issue 5503</a>)
 
     <b>Bug Fixes:</b>
+    - fixed a crash in @ref Python::PythonProgram::evalStatementKeep() "PythonProgram::evalStatementKeep()" and
+      @ref Python::PythonProgram::evalExpression() "PythonProgram::evalExpression()" called in a %Program without a
+      %Python program of its own (created with @ref Qore::PO_NO_INHERIT_PROGRAM_DATA "PO_NO_INHERIT_PROGRAM_DATA"): a
+      \c PYTHON-ERROR exception is raised (<a href="https://github.com/qoretechnologies/qore/issues/7519">issue
+      7519</a>)
+    - fixed a crash on \c python module commands in a %Program without a %Python program of its own (created with
+      @ref Qore::PO_NO_INHERIT_PROGRAM_DATA "PO_NO_INHERIT_PROGRAM_DATA")
+      (<a href="https://github.com/qoretechnologies/qore/issues/7524">issue 7524</a>)
+    - imported %Python functions are called in the %Python program that imported them, also from a child %Program
+      that inherits them, and raise \c PYTHON-INTERPRETER-DELETED once that %Python program has been deleted
+      (<a href="https://github.com/qoretechnologies/qore/issues/7527">issue 7527</a>)
+    - a %Python object that %Qore code holds is no longer released without its interpreter when another thread
+      deletes its %Python program meanwhile (<a href="https://github.com/qoretechnologies/qore/issues/7538">issue
+      7538</a>)
     - automatically imported %Python classes and their bases use the namespace of their defining module
       (\c __module__), independent of import order: importing \c os creates
       \c Python::collections::abc::Iterable, rather than \c Python::os::Iterable. This also changes the paths

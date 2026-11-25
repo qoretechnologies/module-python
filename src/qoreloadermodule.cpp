@@ -77,6 +77,50 @@ static PyObject* qoreloader_test_release_gil_mutex(PyObject* self, PyObject* arg
 }
 #endif
 
+#ifdef DEBUG
+// test hooks of debug builds: the next deletion of a Python program stops before it releases its persistent
+// references, until the test resumes it; only for the main interpreter, where the code of a Python process hosting Qore
+// runs: the code of Qore Programs, which can be sandboxed, runs in other interpreters
+static bool qoreloader_check_test_hook() {
+    if (qore_python_get_interpreter(PyThreadState_Get()) != PyInterpreterState_Main()) {
+        PyErr_SetString(PyExc_RuntimeError, "the test hook can only be called in the main interpreter");
+        return false;
+    }
+    return true;
+}
+
+static PyObject* qoreloader_test_pause_next_deletion(PyObject* self, PyObject* args) {
+    if (!qoreloader_check_test_hook()) {
+        return nullptr;
+    }
+    qore_python_test_pause_next_deletion();
+    Py_RETURN_NONE;
+}
+
+static PyObject* qoreloader_test_wait_deletion_paused(PyObject* self, PyObject* args) {
+    if (!qoreloader_check_test_hook()) {
+        return nullptr;
+    }
+    int rc;
+    Py_BEGIN_ALLOW_THREADS
+    rc = qore_python_test_wait_deletion_paused();
+    Py_END_ALLOW_THREADS
+    if (rc) {
+        PyErr_SetString(PyExc_RuntimeError, "no deletion was paused");
+        return nullptr;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject* qoreloader_test_resume_deletion(PyObject* self, PyObject* args) {
+    if (!qoreloader_check_test_hook()) {
+        return nullptr;
+    }
+    qore_python_test_resume_deletion();
+    Py_RETURN_NONE;
+}
+#endif
+
 static PyMethodDef qoreloader_methods[] = {
     {"load_java", qoreloader_load_java, METH_VARARGS, "Import the given Java path to the parent Qore program if " \
         "possible; args: import_str, a class path (ex: 'org.qore.lang.restclient.RestClient'); wildcard imports are " \
@@ -89,6 +133,14 @@ static PyMethodDef qoreloader_methods[] = {
         "the GIL meanwhile"},
     {"_test_release_gil_mutex", qoreloader_test_release_gil_mutex, METH_NOARGS, "Test hook of debug builds: "
         "releases the mutex held since _test_hold_gil_mutex()"},
+#endif
+#ifdef DEBUG
+    {"_test_pause_next_deletion", qoreloader_test_pause_next_deletion, METH_NOARGS, "Test hook of debug builds: the "
+        "next deletion of a Python program stops before it releases its persistent references"},
+    {"_test_wait_deletion_paused", qoreloader_test_wait_deletion_paused, METH_NOARGS, "Test hook of debug builds: "
+        "waits until the deletion requested with _test_pause_next_deletion() has stopped"},
+    {"_test_resume_deletion", qoreloader_test_resume_deletion, METH_NOARGS, "Test hook of debug builds: the stopped "
+        "deletion continues"},
 #endif
     {nullptr, nullptr, 0, nullptr},
 };
@@ -840,7 +892,10 @@ PyObject* qoreloader_load_java(PyObject* self, PyObject* args) {
     if (!qeh.check()) {
         return nullptr;
     }
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     if (do_jni_module_import(qore_python_pgm, name_str)) {
         return nullptr;
     }
@@ -885,7 +940,10 @@ PyObject* qoreloader_issue_module_cmd(PyObject* self, PyObject* args) {
         return nullptr;
     }
     ExceptionSink xsink;
-    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContext();
+    QorePythonProgram* qore_python_pgm = QorePythonProgram::getContextOrRaisePython();
+    if (!qore_python_pgm) {
+        return nullptr;
+    }
     QoreProgram* qpgm = qore_python_pgm->getQoreProgram();
     if (qpgm->issueModuleCmd(module_str, cmd_str, &xsink)) {
         assert(xsink);
