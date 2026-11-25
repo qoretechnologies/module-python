@@ -30,6 +30,15 @@
 ///@{
 //! The Python version string (e.g. "3.14.2")
 const PythonVersion = str(PY_VERSION);
+
+//! True if the creation of a child Program fails with the module's exception when the module cannot copy the Python program of the parent Program to it
+/** The module reports such errors when it is built with a %Qore library that provides
+    \c AbstractQoreProgramExternalDataEx (%Qore 3.0 or later, \c _QORE_HAS_PROGRAM_EXTERNAL_DATA_EX); otherwise the
+    error is only printed and the child Program is created (qoretechnologies/qore#6918)
+
+    @since python 1.3
+*/
+const PythonProgramCopyErrors = bool(QORE_PYTHON_PROGRAM_COPY_ERRORS);
 ///@}
 
 //! Program for embedding and executing Python code
