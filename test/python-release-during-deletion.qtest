@@ -30,7 +30,8 @@ class PythonReleaseDuringDeletionTest inherits QUnit::Test {
         main_python.parse("sub run(string s) { Python::PythonProgram::evalStatement(s); }", "main-python");
         addTestCase("an object released at a fixed point of the deletion", \testPausedDeletion());
         addTestCase("objects released while the program is deleted", \testStress());
-        addTestCase("an object that a finalizer gives to Qore code during the deletion", \testFinalizer());
+        addTestCase("a finalizer that runs during the deletion cannot give an object to Qore code",
+            \testFinalizer());
         set_return_value(main());
     }
 
@@ -119,8 +120,11 @@ class PythonReleaseDuringDeletionTest inherits QUnit::Test {
         assertEq(nthr * 200, foldl $1 + $2, counts.values());
     }
 
-    # a Python finalizer that runs while the deletion releases the program's own objects gives a new Python object to
-    # Qore code, which keeps it after the program has been deleted and then releases it
+    # a Python finalizer that runs while the interpreter of the program is ended (after the deletion has released the
+    # program's own objects) tries to give a new Python object to Qore code: the call is refused, as the program can
+    # no longer convert values, and the object is never converted in another interpreter (qore#7547); before, the
+    # object was converted with the host's Python program and held as its persistent reference, so the case did not
+    # test the references of the program being deleted (testPausedDeletion() and testStress() do)
     testFinalizer() {
         string src = "class H:\n"
             "    def __del__(self):\n"
@@ -143,9 +147,7 @@ class PythonReleaseDuringDeletionTest inherits QUnit::Test {
             });
             delete pp;
         }
-        assertEq(0, called.getCount(), "the finalizer gave an object to Qore code");
-        # the object was released with its interpreter: releasing the Qore value afterwards releases nothing
-        remove saved;
+        assertEq(1, called.getCount(), "the finalizer gave an object to Qore code");
         assertNothing(saved);
     }
 }

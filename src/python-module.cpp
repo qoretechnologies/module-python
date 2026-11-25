@@ -687,7 +687,13 @@ void QorePythonQoreEntryHelper::applySandbox() {
     if (!python_thread_registered) {
         return;
     }
-    QorePythonProgram* pypgm = QorePythonProgram::getExecutionContext();
+    // not getExecutionContext(), which returns nullptr where the interpreter that runs on the thread has no live
+    // program (qore#7547): the sandbox selection is unchanged for such a thread, whose conversions are refused but
+    // whose release of a Qore callable still runs Qore code
+    QorePythonProgram* pypgm = QorePythonProgram::getThreadContext();
+    if (!pypgm) {
+        pypgm = QorePythonProgram::getProgramContext(false);
+    }
     if (!pypgm) {
         return;
     }

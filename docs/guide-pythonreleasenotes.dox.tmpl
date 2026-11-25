@@ -66,6 +66,10 @@
     - a %Python object that %Qore code holds is no longer released without its interpreter when another thread
       deletes its %Python program meanwhile (<a href="https://github.com/qoretechnologies/qore/issues/7538">issue
       7538</a>)
+    - the arguments and the result of a call to %Qore (a callable, function or method) from %Python code whose
+      %Python program is being deleted are no longer converted in another interpreter: the call raises a
+      \c RuntimeError (see @ref python_program_context;
+      <a href="https://github.com/qoretechnologies/qore/issues/7547">issue 7547</a>)
     - automatically imported %Python classes and their bases use the namespace of their defining module
       (\c __module__), independent of import order: importing \c os creates
       \c Python::collections::abc::Iterable, rather than \c Python::os::Iterable. This also changes the paths

@@ -93,6 +93,11 @@ Program child(PO_NEW_STYLE | PO_NO_UNCONTROLLED_APIS | PO_NO_INHERIT_SYSTEM_CONS
     letting it inherit them from its parent; the use of inherited %Python symbols by code that a sandbox governs is
     addressed separately (<a href="https://github.com/qoretechnologies/qore/issues/7529">issue 7529</a>).
 
+    The arguments and the result of a %Qore function, method or callable that %Python code calls are converted in the
+    interpreter of the calling %Python code, also when the callable belongs to another %Program.  %Python code whose
+    %Python program is being deleted (ex: a finalizer that runs while its interpreter is ended) cannot call %Qore
+    functions, methods or callables or import %Qore or %Java declarations: the call raises a \c RuntimeError.
+
     @section python_keyword_arguments Keyword Arguments
 
     %Qore code calls %Python functions and methods with keyword arguments with
