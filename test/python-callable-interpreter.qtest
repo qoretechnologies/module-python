@@ -1,0 +1,163 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+# The arguments and the result of a Qore callable that Python code calls are converted in the interpreter of the
+# calling Python code, also when the callable belongs to another Program with Python code of its own, and never in
+# another interpreter: Python code whose Python program is being deleted (its finalizers) cannot call Qore callables
+# (qore#7547)
+
+%modern
+%no-child-restrictions
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+
+%requires python
+%requires QUnit
+%requires Util
+
+%exec-class PythonCallableInterpreterTest
+
+class PythonCallableInterpreterTest inherits QUnit::Test {
+    public {
+        # the Python code that calls the Qore callables that it is given: the values that it gets back must be its own
+        # objects, of its own types
+        const CallerSource = "class C:\n"
+            "    pass\n"
+            "def own_fn():\n"
+            "    return 1\n"
+            "def check(echo, wrap):\n"
+            "    c = C()\n"
+            "    d = {'a': [1, 2]}\n"
+            "    r = []\n"
+            "    x = echo(c)\n"
+            "    r.append('same' if x is c and type(x) is C else 'other: %r' % type(x))\n"
+            "    x = echo(d)\n"
+            "    r.append('equal' if type(x) is dict and x == d else 'other: %r' % type(x))\n"
+            "    x = echo(own_fn)\n"
+            "    r.append('same' if x is own_fn else 'other: %r' % type(x))\n"
+            "    x = wrap(c)\n"
+            "    r.append('same' if type(x) is list and x[0] is c and type(x[1]) is dict and x[1]['k'] is c\n"
+            "        else 'other: %r' % type(x))\n"
+            "    return r\n";
+
+        # the code of a Program with Python code of its own, which owns the callables
+        const OwnerSource = "%requires python\n"
+            "code sub get_echo() { return auto sub (auto x) { return x; }; }\n"
+            "code sub get_wrap() { return auto sub (auto x) { return (x, {\"k\": x}); }; }\n";
+
+        # the code of a sandboxed Program whose own Python code calls the callables
+        const SandboxSource = "list<string> sub run_check(string src, code echo, code wrap) {\n"
+            "    Python::PythonProgram::evalStatementKeep(src);\n"
+            "    code check = Python::PythonProgram::evalExpression(\"check\");\n"
+            "    return check(echo, wrap);\n"
+            "}\n";
+
+        # a finalizer that runs while the interpreter of its Python program is ended calls a Qore callable with an
+        # object of the interpreter; the call is refused, so the object never reaches Qore code; the finalizer writes
+        # the outcome of the call (the name of the exception raised) to the file that it is given
+        const FinalizerSource = "import os\n"
+            "class C:\n"
+            "    pass\n"
+            "class H:\n"
+            "    def __del__(self, _os=os, _C=C):\n"
+            "        try:\n"
+            "            cb(_C())\n"
+            "            r = 'called'\n"
+            "        except BaseException as e:\n"
+            "            r = type(e).__name__\n"
+            "        fd = _os.open(path, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)\n"
+            "        _os.write(fd, r.encode())\n"
+            "        _os.close(fd)\n"
+            "cb = None\n"
+            "path = None\n"
+            "def setcb(c, p):\n"
+            "    global cb, path\n"
+            "    cb = c\n"
+            "    path = p\n"
+            "h = H()\n";
+
+        const Expected = ("same", "equal", "same", "same");
+    }
+
+    constructor() : QUnit::Test("python callable interpreter", "1.0", \ARGV) {
+        addTestCase("a callable of another Program converts in the calling interpreter", \testOtherProgram());
+        addTestCase("a callable of the host converts in a sandbox's interpreter", \testSandboxedCaller());
+        addTestCase("a finalizer of a Python program being deleted cannot call a Qore callable", \testFinalizer());
+        addTestCase("a finalizer of a sandbox's Python program being deleted cannot call a Qore callable",
+            \testSandboxedFinalizer());
+        set_return_value(main());
+    }
+
+    # returns a sandboxed Program that may use Python, an uncontrolled API
+    private Program sandboxed(string label) {
+        SandboxManager sm();
+        sm.setUncontrolledApiPolicy(True);
+        Program pgm(PO_NEW_STYLE);
+        pgm.setSandboxManager(sm);
+        pgm.parse(SandboxSource, label);
+        return pgm;
+    }
+
+    # the Python code of a PythonProgram calls the callables of a Program with a Python program of its own
+    testOtherProgram() {
+        Program owner(PO_NEW_STYLE);
+        owner.parse(OwnerSource, "pci-owner");
+        code echo = owner.callFunction("get_echo");
+        code wrap = owner.callFunction("get_wrap");
+
+        PythonProgram caller(CallerSource, "pci-caller");
+        assertEq(Expected, caller.callFunction("check", echo, wrap));
+        # and the host's own callables
+        assertEq(Expected, caller.callFunction("check", auto sub (auto x) { return x; },
+            auto sub (auto x) { return (x, {"k": x}); }));
+    }
+
+    # the Python code of a sandboxed Program calls the callables of the host
+    testSandboxedCaller() {
+        Program s = sandboxed("pci-sandbox");
+        assertEq(Expected, s.callFunction("run_check", CallerSource, auto sub (auto x) { return x; },
+            auto sub (auto x) { return (x, {"k": x}); }));
+
+        Program owner(PO_NEW_STYLE);
+        owner.parse(OwnerSource, "pci-sandbox-owner");
+        assertEq(Expected, s.callFunction("run_check", CallerSource, owner.callFunction("get_echo"),
+            owner.callFunction("get_wrap")));
+    }
+
+    # returns the path of a new file for the outcome of a finalizer's call
+    private string outcomePath(string name) {
+        return sprintf("%s/pci-%s-%d-%s", tmp_location(), name, getpid(), get_random_string(8));
+    }
+
+    # the finalizer runs when the interpreter is ended: its call of the host's callable is not made with the Python
+    # program of another interpreter (that of the host's Program)
+    testFinalizer() {
+        string path = outcomePath("finalizer");
+        on_exit if (is_file(path)) { unlink(path); }
+        Counter called();
+        {
+            PythonProgram pp(FinalizerSource, "pci-finalizer");
+            pp.callFunction("setcb", sub (auto x) {
+                called.inc();
+            }, path);
+            delete pp;
+        }
+        assertEq(0, called.getCount(), "a Qore callable was called during the deletion");
+        assertEq("RuntimeError", ReadOnlyFile::readTextFile(path), "the call was refused");
+    }
+
+    # the same with the Python program of a sandboxed Program, deleted with its Program
+    testSandboxedFinalizer() {
+        string path = outcomePath("sandbox-finalizer");
+        on_exit if (is_file(path)) { unlink(path); }
+        Counter called();
+        {
+            Program s = sandboxed("pci-sandbox-finalizer");
+            s.callFunction("run_check", FinalizerSource + sprintf("def check(echo, wrap):\n    setcb(echo, %y)\n"
+                "    return []\n", path), sub (auto x) { called.inc(); }, sub () {});
+            delete s;
+        }
+        assertEq(0, called.getCount(), "a Qore callable was called during the deletion");
+        assertEq("RuntimeError", ReadOnlyFile::readTextFile(path), "the call was refused");
+    }
+}

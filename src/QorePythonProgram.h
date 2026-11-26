@@ -581,7 +581,10 @@ public:
 
     //! Returns the Python program for the functions and slots through which Python calls into Qore
     /** The program of the interpreter that runs on the thread, which converts their values, else as
-        getProgramContext(); nullptr only where getProgramContext() returns it
+        getProgramContext() if its interpreter is the one that runs on the thread or if no Python code runs on the
+        thread; nullptr if getProgramContext() returns it or if the interpreter that runs on the thread has no live
+        program (ex: it is being deleted): the values of a call from Python are never converted in another interpreter
+        (qore#7547)
     */
     DLLLOCAL static QorePythonProgram* getExecutionContext();
 

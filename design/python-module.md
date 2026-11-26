@@ -473,7 +473,14 @@ their use by sandboxed code is qore#7529):
 
 Steps 2 to 4 are `getProgramContext()`.  The functions and slots through which Python calls into Qore (the loaders,
 the Python types of Qore declarations, Qore callables) use `getExecutionContext()`: the interpreter that runs on the
-thread, which converts their values, else `getProgramContext()`.  The sandbox check (`QoreSandboxCapture`) is made
+thread, which converts their values, else `getProgramContext()` only if no Python code runs on the thread or if its
+program is the live program of the interpreter that runs on it.  The values of a call from Python are never converted
+in another interpreter: Python code whose program is being deleted (its finalizers, which run after the program's
+`qpgm` is cleared and while `Py_EndInterpreter()` ends the interpreter, and its threads) has no live program, and its
+calls into Qore raise a `RuntimeError`; they were converted with the program of the current Qore Program (ex: that of
+the Qore code that deletes the program, or that owns the callable), which created, held and released the objects of
+the calling Python code in another interpreter (qore#7547).  `QorePythonQoreEntryHelper::applySandbox()` still finds
+the sandbox with `getThreadContext()`, else `getProgramContext()`.  The sandbox check (`QoreSandboxCapture`) is made
 without letting an exception through the CPython frames: if it cannot be made, the code is treated as sandboxed.
 
 Steps 3 and 4 apply only to a Program without a Python program, i.e. one created with `PO_NO_INHERIT_PROGRAM_DATA`

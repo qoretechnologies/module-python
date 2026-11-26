@@ -516,18 +516,24 @@ static bool qore_python_code_is_sandboxed() noexcept {
     }
 }
 
-QorePythonProgram* QorePythonProgram::getThreadContext() {
-    // A PythonProgram can share its parent QoreProgram while owning a different
-    // Python interpreter. Its wrappers must be cached in the executing program.
-    QorePythonProgram* pypgm = reinterpret_cast<QorePythonProgram*>(q_get_thread_local_data(python_u_tld_key));
+//! returns the Python thread state that the current thread has attached and runs with, or nullptr if there is none
+static PyThreadState* qore_python_running_thread_state() {
 #if PY_VERSION_HEX >= 0x030D0000
-    PyThreadState* current = PyThreadState_GetUnchecked();
+    return PyThreadState_GetUnchecked();
 #else
     PyThreadState* current = PyGILState_Check() ? _PyThreadState_UncheckedGet() : nullptr;
     if (current && current->thread_id != PyThread_get_thread_ident()) {
         current = nullptr;
     }
+    return current;
 #endif
+}
+
+QorePythonProgram* QorePythonProgram::getThreadContext() {
+    // A PythonProgram can share its parent QoreProgram while owning a different
+    // Python interpreter. Its wrappers must be cached in the executing program.
+    QorePythonProgram* pypgm = reinterpret_cast<QorePythonProgram*>(q_get_thread_local_data(python_u_tld_key));
+    PyThreadState* current = qore_python_running_thread_state();
     if (pypgm && pypgm->qpgm && (!current || pypgm->interpreter == current->interp)) {
         return pypgm;
     }
@@ -550,7 +556,21 @@ QorePythonProgram* QorePythonProgram::getExecutionContext() {
     // the functions and slots through which Python calls into Qore convert their values in the interpreter that runs
     // on the thread
     QorePythonProgram* pypgm = getThreadContext();
-    return pypgm ? pypgm : getProgramContext(false);
+    if (pypgm) {
+        return pypgm;
+    }
+    pypgm = getProgramContext(false);
+    // the Python code that runs on the thread has no live program (ex: its program is being deleted, and its
+    // finalizers or its threads run): the values are never converted with the program of another interpreter, such as
+    // that of the Qore code that owns the callable or that deletes the program, which would create, hold and release
+    // the objects of the calling Python code in another interpreter (qore#7547)
+    if (pypgm) {
+        PyThreadState* current = qore_python_running_thread_state();
+        if (current && (pypgm->interpreter != current->interp || !pypgm->qpgm)) {
+            return nullptr;
+        }
+    }
+    return pypgm;
 }
 
 QorePythonProgram* QorePythonProgram::getContext() {
@@ -604,8 +624,10 @@ QorePythonProgram* QorePythonProgram::getProgramContext(bool sandboxed) {
 QorePythonProgram* QorePythonProgram::getContextOrRaisePython() {
     QorePythonProgram* pypgm = getExecutionContext();
     if (!pypgm) {
-        PyErr_SetString(PyExc_RuntimeError, "there is no Python program context for the code that runs on this "
-            "thread");
+        PyErr_SetString(PyExc_RuntimeError, qore_python_running_thread_state()
+            ? "the Python program of the Python code that runs on this thread is not available (ex: it is being "
+                "deleted); its values cannot be converted in another interpreter"
+            : "there is no Python program context for the code that runs on this thread");
     }
     return pypgm;
 }
