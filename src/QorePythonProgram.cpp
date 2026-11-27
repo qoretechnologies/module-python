@@ -243,7 +243,12 @@ void qore_python_test_deletion_pause_point() {
 
 int QorePythonProgram::registerForkHandlers() {
     assert(!py_thr_lck_fork_reg && !main_ts_lck_fork_reg);
-    py_thr_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_LEAF, "python_thread_states",
+    // py_thr_lck is held while the Program's threads are cancelled (cancelThreads(): qore_cancel_thread() takes the
+    // thread list and the condition waker) and while the Program is registered (initForInterpreter(): qpy_register()
+    // takes qpy_lock, a leaf lock), so it is acquired before them: at the rank of module locks whose holders check for
+    // cancellation, below the thread list (issue #80; at the leaf rank, a fork() could take the thread list or qpy_lock
+    // and then wait for py_thr_lck, held by a thread waiting for them)
+    py_thr_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_CANCELLABLE, "python_thread_states",
         qore_fork_prepare_thread_lock, qore_fork_parent_thread_lock, forkChildThreadStates, &py_thr_lck);
     main_ts_lck_fork_reg = qore_register_fork_handler(QFR_MODULE_RESET, "python_main_thread_state", nullptr,
         nullptr, main_ts_lck_fork_child, &main_ts_lck);
