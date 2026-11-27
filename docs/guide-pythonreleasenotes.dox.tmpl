@@ -52,6 +52,9 @@
       <a href="https://github.com/qoretechnologies/qore/issues/5503">issue 5503</a>)
 
     <b>Bug Fixes:</b>
+    - fixed a possible deadlock of \c fork() (for example when a child process is started) while a
+      @ref Python::PythonProgram "PythonProgram" was deleted, or created for an interpreter, in another thread
+      (<a href="https://github.com/qoretechnologies/module-python/issues/80">issue 80</a>)
     - fixed a crash in @ref Python::PythonProgram::evalStatementKeep() "PythonProgram::evalStatementKeep()" and
       @ref Python::PythonProgram::evalExpression() "PythonProgram::evalExpression()" called in a %Program without a
       %Python program of its own (created with @ref Qore::PO_NO_INHERIT_PROGRAM_DATA "PO_NO_INHERIT_PROGRAM_DATA"): a
