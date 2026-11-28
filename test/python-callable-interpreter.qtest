@@ -92,6 +92,11 @@ class PythonCallableInterpreterTest inherits QUnit::Test {
     private Program sandboxed(string label) {
         SandboxManager sm();
         sm.setUncontrolledApiPolicy(True);
+        # the python module applies neither the file-system nor the network policy of a sandbox, so a sandbox that allows
+        # uncontrolled APIs but restricts either refuses the module's APIs (qore#7832 step 1): a host that trusts the
+        # code with Python opens both
+        sm.setFilesystemDefaultPolicy(True);
+        sm.setNetworkDefaultPolicy(True);
         Program pgm(PO_NEW_STYLE);
         pgm.setSandboxManager(sm);
         pgm.parse(SandboxSource, label);

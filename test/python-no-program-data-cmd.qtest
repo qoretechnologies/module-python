@@ -57,6 +57,11 @@ class PythonNoProgramDataCmdTest inherits QUnit::Test {
     testSandboxed() {
         SandboxManager sm();
         sm.setUncontrolledApiPolicy(True);
+        # the python module applies neither the file-system nor the network policy of a sandbox, so a sandbox that allows
+        # uncontrolled APIs but restricts either refuses the module's APIs (qore#7832 step 1): a host that trusts the
+        # code with Python opens both
+        sm.setFilesystemDefaultPolicy(True);
+        sm.setNetworkDefaultPolicy(True);
         Program p = noData();
         p.setSandboxManager(sm);
         p.parse("%module-cmd(python) import math\n" + Source, "no-program-data-sandboxed-cmd");
