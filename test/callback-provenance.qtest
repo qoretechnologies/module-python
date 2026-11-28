@@ -32,16 +32,16 @@ class ProvenanceTest inherits QUnit::Test {
         sm.setUncontrolledApiPolicy(True);
         sandbox.setSandboxManager(sm);
         code trusted = runtime.callFunction("make", reader);
-        code restricted = sandbox.callFunction("make", runtime, reader);
         assertEq("allowed", trusted());
-        assertEq("FILESYSTEM-ACCESS-DENIED", restricted());
+        # the python module does not apply the sandbox's file-system policy, so a sandbox that restricts the file
+        # system refuses the runtime to its code, also when it allows uncontrolled APIs: no callback can be created
+        # under that policy (qore#7832 step 1)
+        assertThrows("INVALID-FUNCTION-ACCESS", \sandbox.callFunction(), ("make", runtime, reader));
         Queue results();
         ThreadPool pool(1);
         on_exit pool.stopWait();
-        pool.submit(sub () { results.push(restricted()); });
-        assertEq("FILESYSTEM-ACCESS-DENIED", results.get(10s));
         pool.submit(sub () { results.push(trusted()); });
-        assertEq("allowed", results.get(10s), "worker reuse restores the previous context");
+        assertEq("allowed", results.get(10s), "a worker runs the trusted callback");
     }
 
     # PythonProgram is an uncontrolled API: code that a sandbox governs is refused it unless the sandbox allows
@@ -66,8 +66,14 @@ class ProvenanceTest inherits QUnit::Test {
         }
         assertTrue(refused, "the sandbox called PythonProgram::callFunction() without the uncontrolled-API policy");
 
-        # the same sandbox with the policy set may call it
+        # the policy alone is not enough while a new manager's file-system and network restrictions remain: the python
+        # module applies neither, so the sandbox still refuses it (qore#7832 step 1)
         sm.setUncontrolledApiPolicy(True);
+        assertThrows("INVALID-FUNCTION-ACCESS", "PythonProgram::callFunction", \sandbox.callFunction(),
+            ("call", runtime));
+        # a host that trusts the code with Python opens both, and the sandbox may call it
+        sm.setFilesystemDefaultPolicy(True);
+        sm.setNetworkDefaultPolicy(True);
         assertEq(42, sandbox.callFunction("call", runtime));
     }
 
@@ -107,10 +113,12 @@ def clear():
         # must be allowed to call the Python runtime (an uncontrolled API) to obtain a callback at all
         sm.setUncontrolledApiPolicy(True);
         sandbox.setSandboxManager(sm);
-        code restricted = sandbox.callFunction("take", runtime);
+        # the python module does not apply the sandbox's file-system policy, so the sandbox is refused the runtime and
+        # no wrapper is returned to it (qore#7832 step 1)
+        assertThrows("INVALID-FUNCTION-ACCESS", \sandbox.callFunction(), ("take", runtime));
+        # the foreign object is released in the trusted context it was created in
         runtime.callFunction("clear");
-        remove restricted;
-        assertEq("FILESYSTEM-ACCESS-DENIED", results.get(10s));
+        assertEq("allowed", results.get(10s));
     }
 
 }

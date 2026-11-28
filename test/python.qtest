@@ -739,6 +739,11 @@ int sub get_count() { return count; }
         {
             SandboxManager sm();
             sm.setUncontrolledApiPolicy(True);
+            # the python module applies neither the file-system nor the network policy of a sandbox, so a sandbox that
+            # allows uncontrolled APIs but restricts either refuses the module's APIs (qore#7832 step 1): a host that trusts
+            # the code with Python opens both
+            sm.setFilesystemDefaultPolicy(True);
+            sm.setNetworkDefaultPolicy(True);
             Program pgm(PO_NEW_STYLE);
             pgm.setSandboxManager(sm);
             pgm.parse("%module-cmd(python) parse sandboxed.py " + py_code + "\n", "trusting");
@@ -863,25 +868,30 @@ int sub get_count() { return count; }
             }
         }
 
-        # Python code is not subject to the other restrictions (ex: PO_NO_FILESYSTEM): the same command runs it,
-        # whether the host issues it or the code with the restriction does
-        {
-            Program pgm(PO_NO_FILESYSTEM | PO_NEW_STYLE);
+        # the python module enforces none of the restriction classes (file system, network, external processes), so
+        # code with any of them is refused the module's commands, as with PO_NO_UNCONTROLLED_APIS (qore#7832 step 1);
+        # an unrestricted issuer (here the host) may still issue them to a restricted target Program, as in (b)
+        foreach hash<auto> r in ({"PO_NO_FILESYSTEM": PO_NO_FILESYSTEM, "PO_NO_NETWORK": PO_NO_NETWORK,
+                "PO_NO_EXTERNAL_PROCESS": PO_NO_EXTERNAL_PROCESS}.pairIterator()) {
+            unlink(marker);
+            Program pgm(r.value | PO_NEW_STYLE);
             pgm.issueModuleCmd("python", "parse restricted.py " + py_code);
-            assertTrue(is_file(marker), "an unrestricted module command runs the Python code");
+            assertTrue(is_file(marker), r.key + ": an unrestricted issuer's command runs the Python code");
             unlink(marker);
-            Program issuer(PO_NO_FILESYSTEM | PO_NEW_STYLE);
-            issuer.parse("%module-cmd(python) parse restricted.py " + py_code + "\n", "restricted");
-            assertTrue(is_file(marker), "PO_NO_FILESYSTEM: the issuer's directive runs the Python code");
-            unlink(marker);
+            Program issuer(r.value | PO_NEW_STYLE);
+            assertThrows("PYTHON-PARSE-COMMAND-ERROR", refused, \issuer.parse(),
+                ("%module-cmd(python) parse restricted.py " + py_code + "\n", "restricted"),
+                r.key + ": the issuer's directive is refused");
+            assertFalse(is_file(marker), r.key + ": the refused directive did not run the Python code");
             if (issuer_model) {
-                issuer = new Program(PO_NO_FILESYSTEM | PO_NEW_STYLE);
+                issuer = new Program(r.value | PO_NEW_STYLE);
                 issuer.parse("sub issue(Program target, string cmd) { target.issueModuleCmd('python', cmd); }",
                     "restricted-issuer");
-                Program target(PO_NO_FILESYSTEM | PO_NEW_STYLE);
-                issuer.callFunction("issue", target, "parse restricted.py " + py_code);
-                assertTrue(is_file(marker), "PO_NO_FILESYSTEM: the issuer's runtime command runs the Python code");
-                unlink(marker);
+                # a target with the issuer's restrictions, which Qore requires of a command's target
+                Program target(r.value | PO_NEW_STYLE);
+                assertThrows("PYTHON-PARSE-COMMAND-ERROR", refused, \issuer.callFunction(),
+                    ("issue", target, "parse restricted.py " + py_code), r.key + ": the issuer's runtime command is refused");
+                assertFalse(is_file(marker), r.key + ": the refused runtime command did not run the Python code");
             }
         }
 
@@ -1020,19 +1030,15 @@ def py_call_in_thread(reader, path):
 
         # the file can be read outside the sandbox
         assertEq("secret", PythonSandboxTestReader::readFile(secret));
-        # on the calling Qore thread, the sandboxed code that calls the function governs it
-        *string here = pgm.callFunction("py_read_here", secret);
-        assertRegex("FILESYSTEM-ACCESS-DENIED", here, "the read on the Qore thread is denied");
-        # on a thread that Python created in the sandboxed program's interpreter
-        *string in_thread = pgm.callFunction("py_read_in_thread", secret);
-        assertRegex("FILESYSTEM-ACCESS-DENIED", in_thread, "the read on the Python thread is denied");
-
-        # a closure of this unrestricted Program given to the sandboxed code, which runs in this Program
+        # the python module does not apply the sandbox's file-system policy, so a sandbox that restricts the file
+        # system (here a denied path) refuses the module's functions to its code, also when it allows uncontrolled
+        # APIs: no Python code, on the Qore thread or on a Python thread, runs under that policy (qore#7832 step 1)
         code reader = string sub (string path) { return ReadOnlyFile::readTextFile(path); };
-        assertRegex("FILESYSTEM-ACCESS-DENIED", pgm.callFunction("py_call_here", reader, secret),
-            "the closure called on the Qore thread is denied");
-        assertRegex("FILESYSTEM-ACCESS-DENIED", pgm.callFunction("py_call_in_thread", reader, secret),
-            "the closure called on the Python thread is denied");
+        assertThrows("INVALID-FUNCTION-ACCESS", "FILESYSTEM", \pgm.callFunction(), ("py_read_here", secret));
+        assertThrows("INVALID-FUNCTION-ACCESS", "FILESYSTEM", \pgm.callFunction(), ("py_read_in_thread", secret));
+        assertThrows("INVALID-FUNCTION-ACCESS", "FILESYSTEM", \pgm.callFunction(), ("py_call_here", reader, secret));
+        assertThrows("INVALID-FUNCTION-ACCESS", "FILESYSTEM", \pgm.callFunction(),
+            ("py_call_in_thread", reader, secret));
     }
 
     # os.putenv() and os.unsetenv(), which os.environ uses, change the environment under the lock that serializes the
@@ -6446,6 +6452,11 @@ int sub simple() {
         # the sandboxed code calls a PythonProgram (run_loop()), which is an uncontrolled API: without the policy the
         # call is refused and the Python loop never starts
         sm.setUncontrolledApiPolicy(True);
+        # the python module applies neither the file-system nor the network policy of a sandbox, so a sandbox that
+        # allows uncontrolled APIs but restricts either refuses the module's APIs (qore#7832 step 1): a host that trusts
+        # the code with Python opens both
+        sm.setFilesystemDefaultPolicy(True);
+        sm.setNetworkDefaultPolicy(True);
         p.setSandboxManager(sm);
 
         foreach string func in (("loop", "qore_loop")) {
@@ -6533,6 +6544,11 @@ hash<auto> sub stop() { return pp.callFunction('stop'); }
         # start() and stop() of the sandboxed Program call a PythonProgram (an uncontrolled API); this test is about
         # the interrupts, not about the uncontrolled-API policy
         sm.setUncontrolledApiPolicy(True);
+        # the python module applies neither the file-system nor the network policy of a sandbox, so a sandbox that
+        # allows uncontrolled APIs but restricts either refuses the module's APIs (qore#7832 step 1): a host that trusts
+        # the code with Python opens both
+        sm.setFilesystemDefaultPolicy(True);
+        sm.setNetworkDefaultPolicy(True);
         pgm.setSandboxManager(sm);
         Queue started();
         pgm.callFunction("start", started);
@@ -6628,6 +6644,11 @@ def simple_func():
         # the sandboxed code creates and calls a PythonProgram, which is an uncontrolled API: this test is about the
         # interrupt, not about the uncontrolled-API policy (callback-provenance.qtest tests that the policy refuses it)
         sm.setUncontrolledApiPolicy(True);
+        # the python module applies neither the file-system nor the network policy of a sandbox, so a sandbox that
+        # allows uncontrolled APIs but restricts either refuses the module's APIs (qore#7832 step 1): a host that trusts
+        # the code with Python opens both
+        sm.setFilesystemDefaultPolicy(True);
+        sm.setNetworkDefaultPolicy(True);
         p.setSandboxManager(sm);
 
         hash<auto> result = p.callFunction("test_interrupted_python_call", sm);
